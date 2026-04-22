@@ -57,6 +57,21 @@ MAX_RETRIES=60
 RETRY_INTERVAL=10
 
 # =============================================================================
+# 1.5. BUILD PATCHED IMAGE IF NOT ALREADY PRESENT
+# =============================================================================
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "[INFO] Patched image '$IMAGE' not found locally — building..."
+    docker build \
+        -f "${REPO_DIR}/Dockerfile.kv_tracking" \
+        -t "$IMAGE" \
+        "${REPO_DIR}"
+    echo "[INFO] Build complete: $IMAGE"
+else
+    echo "[INFO] Patched image already present: $IMAGE"
+fi
+
+# =============================================================================
 # 2. BUILD NPU DEVICE FLAGS
 # =============================================================================
 build_npu_flags() {

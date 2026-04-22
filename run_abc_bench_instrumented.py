@@ -87,6 +87,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("abc_instrumented")
 
+# Guards concurrent append/remove on litellm.success_callback (a global list).
+_litellm_cb_lock = threading.Lock()
+
 # ─────────────────────────────────────── helpers ──────────────────────────────
 
 def json_dumps_safe(obj: Any, **kw) -> str:
@@ -593,12 +596,50 @@ def run_single_agent(
     )
 
     log.info("[%s] Starting on %s", agent_id, task_dir.name)
+
+    # Per-agent accumulator for KV-block stats returned by the patched vLLM.
+    # litellm.success_callback fires after every LLM call with the assembled
+    # response; we read kv_blocks_used / kv_blocks_size_gb from usage there.
+    _kv_acc: dict[str, Any] = {
+        "total_kv_blocks": 0,
+        "total_kv_size_gb": 0.0,
+        "call_count": 0,
+    }
+
+    def _kv_cb(kwargs: Any, completion_response: Any,
+                start_time: Any, end_time: Any) -> None:
+        try:
+            usage = getattr(completion_response, "usage", None)
+            if usage is None:
+                return
+            kb = getattr(usage, "kv_blocks_used", None)
+            ks = getattr(usage, "kv_blocks_size_gb", None)
+            if isinstance(kb, int):
+                _kv_acc["total_kv_blocks"] += kb
+                _kv_acc["call_count"] += 1
+            if isinstance(ks, (int, float)):
+                _kv_acc["total_kv_size_gb"] += float(ks)
+        except Exception:
+            pass  # callbacks must never raise
+
+    import litellm as _litellm
+    with _litellm_cb_lock:
+        if not isinstance(getattr(_litellm, "success_callback", None), list):
+            _litellm.success_callback = []
+        _litellm.success_callback.append(_kv_cb)
+
     tracker.run_start()
     wall_start = time.monotonic()
     conversation.send_message(prompt)
     conversation.run()
     wall_end = time.monotonic()
     tracker.run_end()
+
+    with _litellm_cb_lock:
+        try:
+            _litellm.success_callback.remove(_kv_cb)
+        except (ValueError, AttributeError):
+            pass
 
     # Persist trace CSV.
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -614,6 +655,13 @@ def run_single_agent(
             llm_metrics = llm.metrics.model_dump()
         except Exception:
             llm_metrics = {"repr": repr(llm.metrics)}
+
+    # Append per-agent KV-block stats captured via the litellm callback.
+    # These are populated by the patched vLLM when agent_id is in extra_body.
+    llm_metrics["kv_blocks_used"]       = _kv_acc["total_kv_blocks"]
+    llm_metrics["kv_blocks_size_gb"]    = round(_kv_acc["total_kv_size_gb"], 6)
+    llm_metrics["kv_blocks_call_count"] = _kv_acc["call_count"]
+
     with (results_dir / f"{agent_id}_llm_metrics.json").open("w") as f:
         json_dump_safe(llm_metrics, f, indent=2)
 

@@ -1,5 +1,5 @@
 reasoning:
-  image: "quay.io/ascend/vllm-ascend:v0.13m"
+  image: "agent-concurrency/vllm-kv-tracking:v0.13m"
   container_name: "vllm-reasoning-jwzhao"
   host_port: 8027
   devices:
