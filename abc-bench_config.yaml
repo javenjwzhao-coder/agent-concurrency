@@ -1,0 +1,138 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ABC-Bench Instrumented Run Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Usage:
+#   python run_with_config.py --config abc_bench_config.yaml
+#   python run_with_config.py --config abc_bench_config.yaml --dry-run
+#
+# Environment variable overrides:
+#   Any value can reference an env var with ${VAR_NAME} syntax.
+#   Example:  api_key: "${LLM_API_KEY}"
+#
+# CLI overrides:
+#   Any top-level key can be overridden from the command line:
+#     python run_with_config.py --config abc_bench_config.yaml \
+#         --override max_tasks=3 --override launch.seed=99
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  LLM Endpoint                                                           ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+llm:
+  # LiteLLM-format model name.  The "openai/" prefix tells LiteLLM to use
+  # the OpenAI-compatible chat completions API.
+  model: "openai/Qwen3-30B-A3B-Instruct"
+
+  # vLLM (or any OpenAI-compatible) base URL.
+  base_url: "http://127.0.0.1:8000/v1"
+
+  # API key.  Use ${LLM_API_KEY} to read from the environment at runtime.
+  api_key: "${LLM_API_KEY}"
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Dataset & Task Selection                                                ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+dataset:
+  # Path to the ABC-Bench root (containing a `tasks/` subdirectory) or
+  # directly to the `tasks/` directory itself.
+  root: "/data/ABC-Bench"
+
+  # Glob pattern applied under `tasks/` to select which tasks to run.
+  task_glob: "task_*"
+
+  # Maximum number of tasks to run (tasks are sorted alphabetically and
+  # truncated to this count).
+  max_tasks: 6
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Directories                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+paths:
+  # Mutable working copies of task repos are created here.
+  # Each agent gets its own copy so concurrent agents don't collide.
+  workspace_root: "./abc_runs"
+
+  # All output artifacts go here: per-agent trace CSVs, summaries,
+  # LLM metrics, test results, and the aggregated run_summary.json.
+  results_root: "./abc_results"
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Agent Execution                                                         ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+agent:
+  # Maximum OpenHands agent iterations (tool-call rounds) per task.
+  # Higher values let the agent try more approaches but cost more tokens.
+  max_iterations: 80
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Multi-Agent Launch Strategy                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+launch:
+  # When true, tasks are partitioned into random-sized waves launched at
+  # staggered intervals.  When false, tasks run sequentially one at a time.
+  randomise: true
+
+  # Maximum number of agents started in a single wave.
+  max_agents_per_wave: 4
+
+  # Range (seconds) for the random delay between consecutive waves.
+  min_wave_delay_s: 2.0
+  max_wave_delay_s: 15.0
+
+  # RNG seed for reproducible wave schedules.  Set to null for true
+  # randomness.
+  seed: 42
+
+  # Thread-pool size for concurrent agent execution.
+  # Set this ≤ the number of NPU cards to avoid over-subscribing vLLM.
+  max_concurrent: 8
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Post-Run Testing                                                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+testing:
+  # Whether to run each task's ./run-tests.sh after the agent finishes.
+  enabled: true
+
+  # Timeout in seconds for the test script.  Docker-based tests may need
+  # a generous limit.
+  timeout_sec: 1800
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Prediction Model (Step 2)                                               ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+# Optional: run the tool-duration predictor automatically after the agents
+# finish.  Set enabled: false to skip.
+prediction:
+  enabled: false
+
+  # Model type: "ridge" (fast, interpretable) or "rf" (random forest).
+  model: "rf"
+
+  # Train/test split fraction.
+  test_fraction: 0.2
+
+  # Save the trained model for later inference.
+  save_model: "./duration_model.joblib"
+
+  # RNG seed for the train/test split.
+  seed: 42
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Logging                                                                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+logging:
+  # Python logging level: DEBUG, INFO, WARNING, ERROR.
+  level: "INFO"
+
+  # Optional log file.  Set to null to log only to stderr.
+  file: null
