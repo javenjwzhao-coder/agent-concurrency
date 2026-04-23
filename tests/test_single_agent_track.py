@@ -63,7 +63,7 @@ _VLLM_CFG = yaml.safe_load(
     (REPO_ROOT / "config" / "vllm_config.yaml").read_text()
 )
 _SC       = _VLLM_CFG["sidecar"]
-HOST_PORT = _VLLM_CFG["reasoning"]["host_port"]
+HOST_PORT = _VLLM_CFG["native"]["port"]
 VLLM_URL  = f"http://localhost:{HOST_PORT}"
 
 BYTES_PER_BLK = _sidecar.bytes_per_block(
@@ -75,7 +75,7 @@ BYTES_PER_BLK = _sidecar.bytes_per_block(
 )
 
 # LiteLLM expects "openai/<model-name>" for OpenAI-compatible endpoints.
-_RAW_MODEL  = _VLLM_CFG["reasoning"]["model"]        # e.g. Qwen/Qwen3-30B-A3B-Instruct-2507
+_RAW_MODEL  = _VLLM_CFG["native"]["served_model_name"]  # e.g. Qwen/Qwen3-30B-A3B-Instruct-2507
 LLM_MODEL   = f"openai/{_RAW_MODEL.split('/')[-1]}"  # e.g. openai/Qwen3-30B-A3B-Instruct-2507
 LLM_BASE_URL = f"{VLLM_URL}/v1"
 LLM_API_KEY  = os.getenv("LLM_API_KEY", "dummy")

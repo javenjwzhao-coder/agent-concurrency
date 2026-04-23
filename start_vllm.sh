@@ -1,5 +1,5 @@
 #!/bin/bash
-# start_vllm.sh — Start vLLM on Ascend NPU (native bare-metal or Docker)
+# start_vllm.sh — Start vLLM on Ascend NPU (native bare-metal)
 # Usage: ./start_vllm.sh [config.yaml]
 set -euo pipefail
 
@@ -144,96 +144,10 @@ start_native() {
 }
 
 # =============================================================================
-# DOCKER LAUNCH (original path — unchanged)
+# MAIN
 # =============================================================================
-build_npu_flags() {
-    local DEVICES=$(cfg reasoning.devices)
-    local flags="" idx=0
-    for dev in $DEVICES; do
-        flags+=" --device ${dev}:/dev/davinci${idx}"
-        idx=$((idx + 1))
-    done
-    flags+=" --device /dev/davinci_manager:/dev/davinci_manager"
-    flags+=" --device /dev/devmm_svm:/dev/devmm_svm"
-    flags+=" --device /dev/hisi_hdc:/dev/hisi_hdc"
-    flags+=" -v /usr/local/dcmi:/usr/local/dcmi"
-    flags+=" -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi"
-    flags+=" -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/"
-    flags+=" -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info"
-    flags+=" -v /etc/ascend_install.info:/etc/ascend_install.info"
-    echo "$flags"
-}
-
-start_docker() {
-    local CONTAINER_NAME=$(cfg reasoning.container_name)
-    local IMAGE=$(cfg reasoning.image)
-    local MODEL=$(cfg reasoning.model)
-    local MODEL_PATH=$(cfg reasoning.model_path)
-    local TENSOR_PARALLEL=$(cfg reasoning.tensor_parallel)
-    local DTYPE=$(cfg reasoning.dtype)
-    local MEM=$(cfg reasoning.mem)
-    local SHM_SIZE=$(cfg reasoning.shm_size)
-    local EXTRA_ARGS=$(cfg reasoning.extra_args)
-
-    REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-    if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-        echo "[INFO] Patched image '$IMAGE' not found locally — building..."
-        docker build \
-            -f "${REPO_DIR}/Dockerfile.kv_tracking" \
-            -t "$IMAGE" \
-            "${REPO_DIR}/src"
-        echo "[INFO] Build complete: $IMAGE"
-    else
-        echo "[INFO] Patched image already present: $IMAGE"
-    fi
-
-    if docker ps --format '{{.Names}}' | grep -qw "$CONTAINER_NAME"; then
-        echo "[INFO] Container '$CONTAINER_NAME' already running. Skipping launch."
-        return
-    fi
-
-    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-    METRICS_DIR="/tmp/vllm_metrics_${CONTAINER_NAME}"
-    mkdir -p "$METRICS_DIR" && rm -rf "${METRICS_DIR:?}"/*
-    NPU_FLAGS=$(build_npu_flags)
-
-    echo "[INFO] Starting $CONTAINER_NAME (model=$MODEL, tp=$TENSOR_PARALLEL, port=$HOST_PORT)..."
-    docker run -d --name "$CONTAINER_NAME" \
-        $NPU_FLAGS \
-        --shm-size "$SHM_SIZE" \
-        --memory="$MEM" \
-        --memory-swap="$MEM" \
-        -v "${MODEL_PATH}:${MODEL_PATH}" \
-        -v "${METRICS_DIR}:/tmp/vllm_metrics" \
-        -p "${HOST_PORT}:8000" \
-        -e HF_HUB_OFFLINE=1 \
-        -e TASK_QUEUE_ENABLE=1 \
-        -e LCCL_DETERMINISTIC=1 \
-        -e HCCL_DETERMINISTIC=true \
-        -e ATB_MATMUL_SHUFFLE_K_ENABLE=0 \
-        -e ATB_LLM_LCOC_ENABLE=0 \
-        -e PROMETHEUS_MULTIPROC_DIR=/tmp/vllm_metrics \
-        -e no_proxy="localhost,127.0.0.1" \
-        "$IMAGE" \
-        vllm serve "$MODEL" \
-        --dtype "$DTYPE" \
-        --tensor-parallel-size "$TENSOR_PARALLEL" \
-        --kv-transfer-config '{"kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}' \
-        $EXTRA_ARGS
-}
-
-# =============================================================================
-# MAIN — mode dispatch
-# =============================================================================
-NATIVE_ENABLED=$(cfg native.enabled 2>/dev/null || echo "false")
-
-if [ "$NATIVE_ENABLED" = "True" ] || [ "$NATIVE_ENABLED" = "true" ]; then
-    HOST_PORT=$(cfg native.port)
-    start_native
-else
-    HOST_PORT=$(cfg reasoning.host_port)
-    start_docker
-fi
+HOST_PORT=$(cfg native.port)
+start_native
 
 wait_for_ready || exit 1
 

@@ -103,7 +103,7 @@ Loads all `*_trace.csv` files, filters to `tool_call` phase rows, engineers feat
 ## Key Configuration Files
 
 - **`abc-bench_config.yaml`** — LLM endpoint, dataset path/glob, launch strategy (wave sizing, delays, seed), and prediction settings. LLM API key read from `$LLM_API_KEY`.
-- **`vllm_config.yaml`** — Ascend NPU-specific vLLM container config (model, memory, tensor parallelism, NUMA topology).
+- **`vllm_config.yaml`** — Ascend NPU-specific vLLM bare-metal config (model, memory, tensor parallelism, NUMA topology).
 
 ## Output Artifacts
 

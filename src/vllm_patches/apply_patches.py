@@ -2,13 +2,13 @@
 """
 apply_patches.py — KV-block tracking patches for vLLM v0.13.x
 
-Run inside the container (or during `docker build`) to add per-agent KV
+Run during bare-metal venv setup to add per-agent KV
 cache block reporting to:
   • vllm/entrypoints/openai/protocol.py  — UsageInfo + ChatCompletionRequest
   • vllm/entrypoints/openai/serving_chat.py — computation + population
 
 Pass --vllm-dir to target a specific vllm package directory (e.g. a
-project-local venv's site-packages/vllm). Defaults to the Docker path.
+project-local venv's site-packages/vllm). Defaults to the shared venv path.
 """
 
 import argparse
@@ -20,8 +20,8 @@ import textwrap
 _parser = argparse.ArgumentParser(description="Apply KV-block tracking patches to vLLM")
 _parser.add_argument(
     "--vllm-dir",
-    default="/vllm-workspace/vllm/vllm",
-    help="Path to the vllm package directory to patch (default: Docker container path)",
+    default="/opt/vllm/venv/lib/python3.11/site-packages/vllm",
+    help="Path to the vllm package directory to patch",
 )
 _args = _parser.parse_args()
 
