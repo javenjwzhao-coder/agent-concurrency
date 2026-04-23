@@ -15,21 +15,14 @@ if ! python3 -c "import yaml" 2>/dev/null; then
     exit 1
 fi
 
+_CFG_JSON=$(python3 -c "import yaml,json; print(json.dumps(yaml.safe_load(open('$CONFIG'))))")
+
 cfg() {
-    python3 -c "
-import yaml
-with open('$CONFIG') as f:
-    c = yaml.safe_load(f)
-keys = '$1'.split('.')
-v = c
-for k in keys:
-    v = v[k]
-if isinstance(v, list):
-    print(' '.join(str(i) for i in v))
-elif v is None:
-    print('')
-else:
-    print(v)
+    echo "$_CFG_JSON" | python3 -c "
+import json,sys
+c=json.load(sys.stdin)
+for k in '$1'.split('.'): c=c[k]
+print(' '.join(str(i) for i in c) if isinstance(c,list) else ('' if c is None else c))
 "
 }
 

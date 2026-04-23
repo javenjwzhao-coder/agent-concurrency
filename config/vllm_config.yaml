@@ -1,6 +1,4 @@
 native:
-  enabled: true
-
   # Ascend env setup scripts
   ascend_toolkit_path: /usr/local/Ascend/ascend-toolkit/set_env.sh
   atb_path:            /usr/local/Ascend/nnal/atb/set_env.sh

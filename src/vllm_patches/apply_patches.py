@@ -20,7 +20,7 @@ import textwrap
 _parser = argparse.ArgumentParser(description="Apply KV-block tracking patches to vLLM")
 _parser.add_argument(
     "--vllm-dir",
-    default="/opt/vllm/venv/lib/python3.11/site-packages/vllm",
+    default=f"/opt/vllm/venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/vllm",
     help="Path to the vllm package directory to patch",
 )
 _args = _parser.parse_args()
