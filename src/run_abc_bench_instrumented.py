@@ -90,6 +90,13 @@ log = logging.getLogger("abc_instrumented")
 # Guards concurrent append/remove on litellm.success_callback (a global list).
 _litellm_cb_lock = threading.Lock()
 
+# ─────────────────────────── live state (shared with embedded sidecar) ────────
+# Agent threads write phase transitions and latest KV stats here.
+# The embedded sidecar thread reads this dict directly — no serialization.
+
+_LIVE_AGENTS: dict[str, dict] = {}
+_live_lock   = threading.Lock()
+
 # ─────────────────────────────────────── helpers ──────────────────────────────
 
 def json_dumps_safe(obj: Any, **kw) -> str:
@@ -252,11 +259,24 @@ class AgentPhaseTracker:
     def _open_phase(self, phase: str, start_dt: datetime):
         self._current_phase = phase
         self._phase_start_dt = start_dt
+        with _live_lock:
+            if self.agent_id in _LIVE_AGENTS:
+                _LIVE_AGENTS[self.agent_id]["state"] = phase
+                _LIVE_AGENTS[self.agent_id]["state_since"] = iso_utc(start_dt)
 
     # ── public API ──
 
     def run_start(self):
         """Called just before conversation.send_message()."""
+        with _live_lock:
+            _LIVE_AGENTS[self.agent_id] = {
+                "task_id": self.task_id,
+                "state": "waiting",
+                "state_since": iso_utc(now_utc()),
+                "kv_blocks": None,
+                "kv_gb": None,
+                "last_kv_updated": None,
+            }
         with self._lock:
             start_dt = now_utc()
             # Record the waiting gap between scheduled time and actual start.
@@ -279,6 +299,10 @@ class AgentPhaseTracker:
 
     def run_end(self):
         """Called after conversation.run() returns."""
+        with _live_lock:
+            if self.agent_id in _LIVE_AGENTS:
+                _LIVE_AGENTS[self.agent_id]["state"] = "done"
+                _LIVE_AGENTS[self.agent_id]["state_since"] = iso_utc(now_utc())
         with self._lock:
             end_dt = now_utc()
             self._close_phase(end_dt, outcome="run_complete", detail="agent finished")
@@ -619,6 +643,15 @@ def run_single_agent(
                 _kv_acc["call_count"] += 1
             if isinstance(ks, (int, float)):
                 _kv_acc["total_kv_size_gb"] += float(ks)
+            # Mirror latest per-call KV stats into the live state for sidecar.py.
+            if isinstance(kb, int):
+                with _live_lock:
+                    if agent_id in _LIVE_AGENTS:
+                        _LIVE_AGENTS[agent_id]["kv_blocks"] = kb
+                        _LIVE_AGENTS[agent_id]["kv_gb"] = (
+                            float(ks) if isinstance(ks, (int, float)) else None
+                        )
+                        _LIVE_AGENTS[agent_id]["last_kv_updated"] = iso_utc(now_utc())
         except Exception:
             pass  # callbacks must never raise
 
@@ -863,6 +896,21 @@ def parse_args() -> argparse.Namespace:
                    help="RNG seed for reproducible launch schedules.")
     p.add_argument("--max-concurrent", type=int, default=8,
                    help="Thread pool size for concurrent agents.")
+
+    # ── embedded sidecar (optional) ──────────────────────────────────────────
+    # Set --sidecar-log-file to enable.  The sidecar runs as a daemon thread
+    # and reads _LIVE_AGENTS directly — no file I/O or serialization.
+    sc = p.add_argument_group("embedded sidecar (omit to disable)")
+    sc.add_argument("--sidecar-log-file", default=None,
+                    help="Enable the embedded sidecar and write its JSONL log here.")
+    sc.add_argument("--sidecar-vllm-url", default="http://localhost:8000")
+    sc.add_argument("--sidecar-interval", type=float, default=5.0,
+                    help="Sidecar poll interval in seconds.")
+    sc.add_argument("--sidecar-num-layers",   type=int, default=None)
+    sc.add_argument("--sidecar-num-kv-heads", type=int, default=None)
+    sc.add_argument("--sidecar-head-dim",     type=int, default=None)
+    sc.add_argument("--sidecar-block-size",   type=int, default=16)
+    sc.add_argument("--sidecar-dtype",        default="bfloat16")
     return p.parse_args()
 
 
@@ -875,6 +923,39 @@ def main() -> int:
             print(f"ERROR: missing --{name.replace('_','-')} or "
                   f"{name.upper()}", file=sys.stderr)
             return 2
+
+    # ── optional embedded sidecar ────────────────────────────────────────────
+    if args.sidecar_log_file:
+        missing = [f"--sidecar-{f}" for f in ("num-layers", "num-kv-heads", "head-dim")
+                   if getattr(args, f"sidecar_{f.replace('-', '_')}") is None]
+        if missing:
+            print(f"ERROR: sidecar enabled but missing: {', '.join(missing)}",
+                  file=sys.stderr)
+            return 2
+        import sidecar as _sidecar
+        _sc_args = argparse.Namespace(
+            vllm_url=args.sidecar_vllm_url,
+            log_file=args.sidecar_log_file,
+            interval=args.sidecar_interval,
+            num_layers=args.sidecar_num_layers,
+            num_kv_heads=args.sidecar_num_kv_heads,
+            head_dim=args.sidecar_head_dim,
+            block_size=args.sidecar_block_size,
+            dtype=args.sidecar_dtype,
+        )
+        _sc_bpb = _sidecar.bytes_per_block(
+            _sc_args.num_layers, _sc_args.num_kv_heads,
+            _sc_args.head_dim, _sc_args.block_size, _sc_args.dtype,
+        )
+        def _get_agents() -> dict:
+            with _live_lock:
+                return dict(_LIVE_AGENTS)
+        threading.Thread(
+            target=_sidecar.run_loop,
+            args=(_sc_args, _sc_bpb, _get_agents),
+            daemon=True, name="sidecar",
+        ).start()
+        log.info("[sidecar] embedded sidecar started → %s", args.sidecar_log_file)
 
     task_dirs = find_task_dirs(args.dataset_root, args.task_glob)
     if not task_dirs:

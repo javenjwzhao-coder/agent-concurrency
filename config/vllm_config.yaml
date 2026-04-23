@@ -5,13 +5,22 @@ reasoning:
   devices:
     - /dev/davinci5
     - /dev/davinci7
-  model: "Qwen/Qwen3-30B-A3B-Instruct-2507" 
+  model: "Qwen/Qwen3-30B-A3B-Instruct-2507"
   model_path: "/root/.cache/huggingface"
   tensor_parallel: 2
   dtype: "bfloat16"
   mem: "128g"
   shm_size: "10g"
   extra_args: "--gpu-memory-utilization 0.9 --num-gpu-blocks-override 1000 --max-num-seqs 256 --max-num-batched-tokens 32768 --enable-auto-tool-choice --tool-call-parser hermes --kv-cache-metrics-sample 1"
+
+# Model geometry for sidecar.py KV block → GB conversion.
+# Source: Qwen/Qwen3-30B-A3B config.json
+sidecar:
+  num_layers: 48        # num_hidden_layers
+  num_kv_heads: 4       # num_key_value_heads (GQA)
+  head_dim: 128         # explicitly set in model config (not hidden_size / num_attention_heads)
+  block_size: 16        # vLLM default; change if --block-size is passed to vllm serve
+  dtype: "bfloat16"     # must match reasoning.dtype
 
 # NUMA topology: 
 # davinci0,2 -> CPUs 144-167, NUMA node 6

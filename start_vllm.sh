@@ -53,6 +53,12 @@ CPUSET_MEMS=$(cfg numa.cpuset_mems)
 CPU_AFFINITY=$(cfg numa.cpu_affinity)
 OMP_NUM_THREADS=$(cfg numa.omp_num_threads)
 
+SC_NUM_LAYERS=$(cfg sidecar.num_layers)
+SC_NUM_KV_HEADS=$(cfg sidecar.num_kv_heads)
+SC_HEAD_DIM=$(cfg sidecar.head_dim)
+SC_BLOCK_SIZE=$(cfg sidecar.block_size)
+SC_DTYPE=$(cfg sidecar.dtype)
+
 MAX_RETRIES=60
 RETRY_INTERVAL=10
 
@@ -171,3 +177,13 @@ else
 fi
 
 wait_for_ready || exit 1
+
+# Export sidecar geometry so callers can pass them to run_abc_bench_instrumented.py
+# via --sidecar-num-layers etc. without needing to re-parse the config.
+export SIDECAR_NUM_LAYERS="$SC_NUM_LAYERS"
+export SIDECAR_NUM_KV_HEADS="$SC_NUM_KV_HEADS"
+export SIDECAR_HEAD_DIM="$SC_HEAD_DIM"
+export SIDECAR_BLOCK_SIZE="$SC_BLOCK_SIZE"
+export SIDECAR_DTYPE="$SC_DTYPE"
+export SIDECAR_VLLM_URL="http://localhost:${HOST_PORT}"
+echo "[INFO] Sidecar env: layers=${SC_NUM_LAYERS} kv_heads=${SC_NUM_KV_HEADS} head_dim=${SC_HEAD_DIM} block_size=${SC_BLOCK_SIZE} dtype=${SC_DTYPE}"
