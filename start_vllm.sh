@@ -48,10 +48,6 @@ SHM_SIZE=$(cfg reasoning.shm_size)
 EXTRA_ARGS=$(cfg reasoning.extra_args)
 DEVICES=$(cfg reasoning.devices)
 
-CPUSET_CPUS=$(cfg numa.cpuset_cpus)
-CPUSET_MEMS=$(cfg numa.cpuset_mems)
-CPU_AFFINITY=$(cfg numa.cpu_affinity)
-OMP_NUM_THREADS=$(cfg numa.omp_num_threads)
 
 SC_NUM_LAYERS=$(cfg sidecar.num_layers)
 SC_NUM_KV_HEADS=$(cfg sidecar.num_kv_heads)
@@ -137,17 +133,13 @@ else
     docker run -d --name "$CONTAINER_NAME" \
         $NPU_FLAGS \
         --shm-size "$SHM_SIZE" \
-        --cpuset-cpus="$CPUSET_CPUS" \
-        --cpuset-mems="$CPUSET_MEMS" \
         --memory="$MEM" \
         --memory-swap="$MEM" \
         -v "${MODEL_PATH}:${MODEL_PATH}" \
         -v "${METRICS_DIR}:/tmp/vllm_metrics" \
         -p "${HOST_PORT}:8000" \
         -e HF_HUB_OFFLINE=1 \
-        -e CPU_AFFINITY_CONF="$CPU_AFFINITY" \
         -e TASK_QUEUE_ENABLE=1 \
-        -e OMP_NUM_THREADS="$OMP_NUM_THREADS" \
         -e LCCL_DETERMINISTIC=1 \
         -e HCCL_DETERMINISTIC=true \
         -e ATB_MATMUL_SHUFFLE_K_ENABLE=0 \

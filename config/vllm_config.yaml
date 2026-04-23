@@ -21,14 +21,3 @@ sidecar:
   head_dim: 128         # explicitly set in model config (not hidden_size / num_attention_heads)
   block_size: 16        # vLLM default; change if --block-size is passed to vllm serve
   dtype: "bfloat16"     # must match reasoning.dtype
-
-# NUMA topology: 
-# davinci0,2 -> CPUs 144-167, NUMA node 6
-# davinci1,3 -> CPUs 0-23, NUMA node 0
-# davinci4,6 -> CPUs 96-119, NUMA node 4
-# davinci5,7 -> CPUs 48-71, NUMA node 2
-numa:
-  cpuset_cpus: "48-71"
-  cpuset_mems: "2"
-  cpu_affinity: "1,npu5:48-71,npu7:48-71"
-  omp_num_threads: 10
