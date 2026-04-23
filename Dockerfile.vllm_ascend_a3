@@ -11,7 +11,7 @@
 #       -t quay.io/ascend/vllm-ascend:v0.13m-a3 \
 #       .
 
-FROM quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG="v0.3.7.post2"
