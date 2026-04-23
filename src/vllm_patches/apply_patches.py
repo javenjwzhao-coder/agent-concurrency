@@ -6,14 +6,26 @@ Run inside the container (or during `docker build`) to add per-agent KV
 cache block reporting to:
   • vllm/entrypoints/openai/protocol.py  — UsageInfo + ChatCompletionRequest
   • vllm/entrypoints/openai/serving_chat.py — computation + population
+
+Pass --vllm-dir to target a specific vllm package directory (e.g. a
+project-local venv's site-packages/vllm). Defaults to the Docker path.
 """
 
+import argparse
 import pathlib
 import re
 import sys
 import textwrap
 
-VLLM_DIR = pathlib.Path("/vllm-workspace/vllm/vllm")
+_parser = argparse.ArgumentParser(description="Apply KV-block tracking patches to vLLM")
+_parser.add_argument(
+    "--vllm-dir",
+    default="/vllm-workspace/vllm/vllm",
+    help="Path to the vllm package directory to patch (default: Docker container path)",
+)
+_args = _parser.parse_args()
+
+VLLM_DIR = pathlib.Path(_args.vllm_dir)
 PROTO   = VLLM_DIR / "entrypoints/openai/protocol.py"
 SERVING = VLLM_DIR / "entrypoints/openai/serving_chat.py"
 
@@ -33,6 +45,9 @@ def _replace_once(text: str, old: str, new: str, label: str) -> str:
 
 def patch_protocol() -> None:
     txt = PROTO.read_text()
+    if "kv_blocks_used" in txt and "agent_id" in txt:
+        print("[SKIP] protocol.py already patched")
+        return
 
     # ── 1. Add kv_blocks fields to UsageInfo ─────────────────────────────────
     # The class always ends with prompt_tokens_details (both | None and Optional forms).
@@ -124,6 +139,9 @@ def patch_protocol() -> None:
 
 def patch_serving_chat() -> None:
     txt = SERVING.read_text()
+    if "kv_blocks_used" in txt:
+        print("[SKIP] serving_chat.py already patched")
+        return
 
     # ── 1. Precompute KV block geometry in __init__ ───────────────────────────
     # Insert after `self.enable_force_include_usage = enable_force_include_usage`
