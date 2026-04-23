@@ -3,7 +3,7 @@
 # Usage: ./start_reasoning.sh [config.yaml]
 set -euo pipefail
 
-CONFIG="${1:-vllm_config.yaml}"
+CONFIG="${1:-config/vllm_config.yaml}"
 
 if [ ! -f "$CONFIG" ]; then
     echo "[ERROR] Config file not found: $CONFIG"
@@ -66,7 +66,7 @@ if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
     docker build \
         -f "${REPO_DIR}/Dockerfile.vllm_ascend_base" \
         -t "$BASE_IMAGE" \
-        "${REPO_DIR}"
+        "${REPO_DIR}/src"
     echo "[INFO] Base image build complete: $BASE_IMAGE"
 else
     echo "[INFO] Base image already present: $BASE_IMAGE"
@@ -80,7 +80,7 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build \
         -f "${REPO_DIR}/Dockerfile.kv_tracking" \
         -t "$IMAGE" \
-        "${REPO_DIR}"
+        "${REPO_DIR}/src"
     echo "[INFO] Build complete: $IMAGE"
 else
     echo "[INFO] Patched image already present: $IMAGE"

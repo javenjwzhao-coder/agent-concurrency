@@ -6,13 +6,12 @@
 #   /vllm-workspace/vllm/   (source tree)
 # so replacing .py files there takes effect immediately — no wheel rebuild.
 #
-# Usage:
+# Usage (from repo root):
 #   docker build -f Dockerfile.kv_tracking \
 #                -t agent-concurrency/vllm-kv-tracking:v0.13m \
-#                /path/to/agent-concurrency
+#                src/
 #
-# The build context must be the agent-concurrency repo root so that
-# vllm_patches/ is available.
+# The build context must be src/ so that vllm_patches/ is available.
 
 FROM quay.io/ascend/vllm-ascend:v0.13m
 

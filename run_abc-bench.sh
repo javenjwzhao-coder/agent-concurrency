@@ -255,12 +255,12 @@ if [[ -n "${MIN_WAVE_DELAY_S:-}" && -n "${MAX_WAVE_DELAY_S:-}" ]]; then
     fi
 fi
 
-RUNNER_SCRIPT="${SCRIPT_DIR}/run_abc_bench_instrumented.py"
+RUNNER_SCRIPT="${SCRIPT_DIR}/src/run_abc_bench_instrumented.py"
 if [[ ! -f "$RUNNER_SCRIPT" ]]; then
     ERRORS+=("Runner script not found: ${RUNNER_SCRIPT}")
 fi
 
-PREDICTOR_SCRIPT="${SCRIPT_DIR}/predict_tool_duration.py"
+PREDICTOR_SCRIPT="${SCRIPT_DIR}/src/predict_tool_duration.py"
 
 if [[ ${#ERRORS[@]} -gt 0 ]]; then
     echo -e "\n${RED}Config validation failed:${RESET}" >&2
