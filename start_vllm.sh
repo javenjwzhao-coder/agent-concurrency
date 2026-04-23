@@ -63,24 +63,10 @@ MAX_RETRIES=60
 RETRY_INTERVAL=10
 
 # =============================================================================
-# 1.4. BUILD BASE IMAGE IF NOT ALREADY PRESENT
+# 1.4. BUILD PATCHED IMAGE IF NOT ALREADY PRESENT
+# (Base image quay.io/ascend/vllm-ascend:v0.13.0-a3 is pulled automatically)
 # =============================================================================
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BASE_IMAGE=$(grep -m1 '^FROM ' "${REPO_DIR}/Dockerfile.kv_tracking" | awk '{print $2}')
-if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-    echo "[INFO] Base image '$BASE_IMAGE' not found locally — building from source..."
-    docker build \
-        -f "${REPO_DIR}/Dockerfile.vllm_ascend_base" \
-        -t "$BASE_IMAGE" \
-        "${REPO_DIR}/src"
-    echo "[INFO] Base image build complete: $BASE_IMAGE"
-else
-    echo "[INFO] Base image already present: $BASE_IMAGE"
-fi
-
-# =============================================================================
-# 1.5. BUILD PATCHED IMAGE IF NOT ALREADY PRESENT
-# =============================================================================
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "[INFO] Patched image '$IMAGE' not found locally — building..."
     docker build \
