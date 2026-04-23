@@ -1,6 +1,7 @@
 # Dockerfile.kv_tracking
 #
 # Builds a patched vLLM Ascend image with per-agent KV-block tracking.
+# Targets Ascend 910C (Atlas A3); base image built from Dockerfile.vllm_ascend_a3.
 #
 # Base image installs vLLM as an editable pip install at:
 #   /vllm-workspace/vllm/   (source tree)
@@ -13,7 +14,7 @@
 #
 # The build context must be src/ so that vllm_patches/ is available.
 
-FROM quay.io/ascend/vllm-ascend:v0.13m
+FROM quay.io/ascend/vllm-ascend:v0.13m-a3
 
 # ── Copy patch script ──────────────────────────────────────────────────────────
 COPY vllm_patches/apply_patches.py /tmp/apply_patches.py
