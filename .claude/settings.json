@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/mohamed/Desktop/agent-concurrency/tests/test_single_agent_track.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(curl -s \"https://quay.io/v2/ascend/cann/tags/list\")",
+      "Bash(python3 -c \"import sys,json; tags=json.load\\(sys.stdin\\).get\\('tags',[]\\); [print\\(t\\) for t in sorted\\(tags\\) if '910' in t]\")",
+      "Bash(python3 -c \"import sys,json; tags=json.load\\(sys.stdin\\).get\\('tags',[]\\); [print\\(t\\) for t in sorted\\(tags\\) if '910c' in t.lower\\(\\) or '8.5' in t or '8.2' in t or '9.' in t]\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/vllm-project/vllm-ascend/v0.13.0/README.md\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/Dockerfile\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/vllm-project/vllm-ascend/v0.13.0/Dockerfile.a3\")",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
