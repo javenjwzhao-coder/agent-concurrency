@@ -3,14 +3,14 @@ native:
   ascend_toolkit_path: /usr/local/Ascend/ascend-toolkit/set_env.sh
   atb_path:            /usr/local/Ascend/nnal/atb/set_env.sh
   shared_venv_python:  /opt/vllm/venv/bin/python
-  workdir:             /root
+  workdir:             /root/jwzhao
 
   # NPU device indices for ASCEND_RT_VISIBLE_DEVICES
   devices: "0,1"
 
   # vllm serve arguments — mirrors existing reasoning: block
-  model_path:           /root/.cache/huggingface/Qwen3-30B-A3B-Instruct-2507
-  served_model_name:    Qwen/Qwen3-30B-A3B-Instruct-2507
+  model_path:           /opt/data/Model/Qwen3/Qwen3-32B
+  served_model_name:    qwen3-32b
   host:                 127.0.0.1
   port:                 8027
   api_key:              dummy
