@@ -31,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────── defaults ────────────────────────────────────────
 
-CONFIG_FILE=""
+CONFIG_FILE="${SCRIPT_DIR}/config/abc-bench_config.yaml"
 DRY_RUN=false
 SKIP_PREDICTION=false
 declare -a OVERRIDES=()
@@ -83,12 +83,6 @@ while [[ $# -gt 0 ]]; do
             usage >&2; exit 2 ;;
     esac
 done
-
-if [[ -z "$CONFIG_FILE" ]]; then
-    echo -e "${RED}ERROR: --config is required${RESET}" >&2
-    usage >&2
-    exit 2
-fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${RED}ERROR: config file not found: ${CONFIG_FILE}${RESET}" >&2
@@ -402,6 +396,26 @@ fi
 if [[ "$DRY_RUN" == "true" ]]; then
     echo -e "  ${YELLOW}[dry-run] No processes were started.${RESET}"
     exit 0
+fi
+
+# ─────────────────────────── ensure vLLM is running ──────────────────────────
+
+VLLM_HEALTH_URL="${LLM_BASE_URL%/}/models"
+echo -e "${CYAN}Checking vLLM at ${LLM_BASE_URL} ...${RESET}"
+VLLM_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+    -H "Authorization: Bearer ${LLM_API_KEY}" \
+    "$VLLM_HEALTH_URL" 2>/dev/null || echo "000")
+
+if [[ "$VLLM_HTTP_CODE" == "200" ]]; then
+    echo -e "${GREEN}  vLLM is already running.${RESET}"
+else
+    echo -e "${YELLOW}  vLLM not responding (HTTP ${VLLM_HTTP_CODE}). Starting via start_vllm.sh ...${RESET}"
+    VLLM_START_SCRIPT="${SCRIPT_DIR}/start_vllm.sh"
+    if [[ ! -f "$VLLM_START_SCRIPT" ]]; then
+        echo -e "${RED}ERROR: start_vllm.sh not found: ${VLLM_START_SCRIPT}${RESET}" >&2
+        exit 2
+    fi
+    bash "$VLLM_START_SCRIPT"
 fi
 
 # ─────────────────────────── execute ─────────────────────────────────────────
