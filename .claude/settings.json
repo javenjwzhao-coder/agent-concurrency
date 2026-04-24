@@ -21,7 +21,12 @@
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency log --oneline -5)",
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency diff HEAD~1 HEAD)",
       "Read(//Users/montreal/Desktop/agent-concurrency/tests/**)",
-      "Read(//Users/medan/Desktop/**)"
+      "Read(//Users/medan/Desktop/**)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency commit -m ' *)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency push)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add src/vllm_patches/apply_patches.py)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add config/vllm_config.yaml .claude/settings.json)"
     ]
   }
 }

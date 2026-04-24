@@ -6,7 +6,7 @@ native:
   workdir:             /root/jwzhao
 
   # NPU device indices for ASCEND_RT_VISIBLE_DEVICES
-  devices: "0,1"
+  devices: "6,7"
 
   # vllm serve arguments — mirrors existing reasoning: block
   model_path:           /opt/data/Model/Qwen3/Qwen3-32B
