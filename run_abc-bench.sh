@@ -426,7 +426,7 @@ if [[ ! -f "${BENCH_VENV}/bin/activate" ]]; then
     echo -e "${CYAN}  Creating benchmark venv at ${BENCH_VENV} (Python 3.12)...${RESET}"
     uv venv "${BENCH_VENV}" --python 3.12
     source "${BENCH_VENV}/bin/activate"
-    uv pip install openhands-sdk openhands-tools pyyaml pydantic scikit-learn numpy pandas joblib
+    uv pip install openhands-sdk openhands-tools
 else
     source "${BENCH_VENV}/bin/activate"
 fi
