@@ -54,8 +54,8 @@ wait_for_ready() {
 
 # =============================================================================
 # NATIVE LAUNCH (no Docker)
-# Creates a project-local uv venv that inherits from the shared venv but
-# keeps a patched copy of the 2 affected vLLM files in its own site-packages.
+# Creates a project-local uv venv that inherits from the shared venv but keeps
+# a patched private copy of the full vLLM package in its own site-packages.
 # The shared /opt/vllm/venv is never modified.
 # =============================================================================
 start_native() {
@@ -84,7 +84,7 @@ start_native() {
         uv venv "$VENV" --python "$SHARED_PY" --system-site-packages
     fi
 
-    # ── 2. Copy the 2 affected vLLM files into project venv site-packages ────
+    # ── 2. Mirror the full vLLM package into project venv site-packages ──────
     PYTHON_VER=$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     # Resolve vllm's actual location via Python import — handles editable/empty installs
     # where files are NOT under the venv's own site-packages/vllm/ tree.
@@ -95,39 +95,42 @@ start_native() {
         echo "        Is vllm installed in the shared venv? (checked: $SHARED_PY)"
         exit 1
     }
-    VENV_VLLM="$VENV/lib/python${PYTHON_VER}/site-packages/vllm"
-    VENV_OAI="$VENV_VLLM/entrypoints/openai"
-    mkdir -p "$VENV_OAI"
-
-    for f in protocol.py serving_chat.py; do
-        SRC="$SHARED_OAI/$f"
-        DST="$VENV_OAI/$f"
-        # Recopy if shared vLLM is newer (e.g. after an upgrade)
-        if [ ! -f "$DST" ] || [ "$SRC" -nt "$DST" ]; then
-            cp "$SRC" "$DST"
-            echo "[INFO] Copied $f from shared venv into project venv"
-        fi
-    done
-    # Stub __init__.py files so Python treats the dirs as packages
-    touch "$VENV_VLLM/__init__.py" \
-          "$VENV_VLLM/entrypoints/__init__.py" \
-          "$VENV_OAI/__init__.py"
+    SHARED_VLLM="$(dirname "$(dirname "$SHARED_OAI")")"
+    SHARED_SITE="$(dirname "$SHARED_VLLM")"
+    VENV_SITE="$VENV/lib/python${PYTHON_VER}/site-packages"
+    VENV_VLLM="$VENV_SITE/vllm"
+    mkdir -p "$VENV_VLLM"
+    cp -a "$SHARED_VLLM/." "$VENV_VLLM/"
+    echo "[INFO] Mirrored shared vLLM package into project venv"
 
     # ── 3. Apply KV-tracking + process-name patches to project venv (idempotent) ─
     echo "[INFO] Applying patches to project venv..."
-    SHARED_SITE="$(dirname "$(dirname "$(dirname "$SHARED_OAI")")")"
     "$VENV/bin/python" "$REPO_DIR/src/vllm_patches/apply_patches.py" \
         --vllm-dir "$VENV_VLLM" \
         --shared-site "$SHARED_SITE" \
         --process-name "$PROC_NAME"
 
-    # ── 4. Skip if already running ────────────────────────────────────────────
+    # ── 4. Verify the project venv imports the patched copy ──────────────────
+    echo "[INFO] Verifying patched vLLM import path..."
+    "$VENV/bin/python" - <<'PY'
+import vllm.entrypoints.openai.protocol as protocol
+import vllm.entrypoints.openai.serving_chat as serving_chat
+
+assert "kv_blocks_used" in protocol.UsageInfo.model_fields
+assert "kv_blocks_size_gb" in protocol.UsageInfo.model_fields
+assert "agent_id" in protocol.ChatCompletionRequest.model_fields
+
+print(f"[INFO] protocol.py -> {protocol.__file__}")
+print(f"[INFO] serving_chat.py -> {serving_chat.__file__}")
+PY
+
+    # ── 5. Skip if already running ────────────────────────────────────────────
     if [ -f "$PID_FILE" ] && kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
         echo "[INFO] vLLM already running (PID $(cat $PID_FILE)). Skipping launch."
         return
     fi
 
-    # ── 5. Launch vllm serve natively ────────────────────────────────────────
+    # ── 6. Launch vllm serve natively ────────────────────────────────────────
     echo "[INFO] Starting native vLLM (model=$(basename $MODEL), tp=$TP, port=$PORT)..."
     (
         set +u
@@ -135,16 +138,18 @@ start_native() {
         source "$ATB"
         set -u
         source "$VENV/bin/activate"
-        # vllm executable lives in the shared venv's bin, not in the project venv.
-        # Prepend it so `vllm` is found while Python still imports from .venv first.
-        export PATH="$(dirname "$SHARED_PY"):$PATH"
+        VLLM_CLI="$(dirname "$SHARED_PY")/vllm"
+        if [ ! -f "$VLLM_CLI" ]; then
+            echo "[ERROR] Cannot find vLLM CLI script at $VLLM_CLI"
+            exit 1
+        fi
         cd "$WORKDIR"
         unset VLLM_USE_MODELSCOPE MODELSCOPE_ENVIRONMENT
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
         export OMP_NUM_THREADS=1
         export VLLM_PROCESS_NAME="$PROC_NAME"
 
-        vllm serve "$MODEL" \
+        "$VENV/bin/python" "$VLLM_CLI" serve "$MODEL" \
           --served-model-name "$SERVED_NAME" \
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \

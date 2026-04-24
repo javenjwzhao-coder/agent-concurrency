@@ -33,7 +33,11 @@
       "Bash(/opt/vllm/venv/bin/pip show *)",
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add config/vllm_config.yaml src/vllm_patches/apply_patches.py start_vllm.sh .claude/settings.json)",
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh src/vllm_patches/apply_patches.py)",
-      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh src/vllm_patches/apply_patches.py .claude/settings.json)"
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh src/vllm_patches/apply_patches.py .claude/settings.json)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency show --stat 753ce91)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency show 753ce91 -- start_vllm.sh)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency show a3a8ee6 --stat)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency log --oneline -10)"
     ]
   }
 }
