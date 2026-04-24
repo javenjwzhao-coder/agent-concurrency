@@ -39,6 +39,7 @@ wait_for_ready() {
     echo "[INFO] Waiting for vLLM on port ${HOST_PORT}..."
     for i in $(seq 1 "$MAX_RETRIES"); do
         code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+            -H "Authorization: Bearer ${VLLM_API_KEY}" \
             "http://localhost:${HOST_PORT}/v1/models" 2>/dev/null || echo "000")
         if [ "$code" = "200" ]; then
             echo "[INFO] vLLM is READY."
@@ -153,6 +154,7 @@ start_native() {
 # MAIN
 # =============================================================================
 HOST_PORT=$(cfg native.port)
+VLLM_API_KEY=$(cfg native.api_key)
 start_native
 
 wait_for_ready || exit 1
