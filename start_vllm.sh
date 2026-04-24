@@ -125,8 +125,10 @@ start_native() {
     # ── 5. Launch vllm serve natively ────────────────────────────────────────
     echo "[INFO] Starting native vLLM (model=$(basename $MODEL), tp=$TP, port=$PORT)..."
     (
+        set +u
         source "$TOOLKIT"
         source "$ATB"
+        set -u
         source "$VENV/bin/activate"
         cd "$WORKDIR"
         unset VLLM_USE_MODELSCOPE MODELSCOPE_ENVIRONMENT

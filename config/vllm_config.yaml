@@ -13,7 +13,7 @@ native:
   served_model_name:    qwen3-32b
   host:                 127.0.0.1
   port:                 8027
-  api_key:              dummy
+  api_key:              sk-local-ascend
   tensor_parallel_size: 2
   dtype:                bfloat16
   extra_args: >-
