@@ -23,7 +23,7 @@
 llm:
   # LiteLLM-format model name.  The "openai/" prefix tells LiteLLM to use
   # the OpenAI-compatible chat completions API.
-  model: "openai/Qwen3-32B"
+  model: "openai/qwen3-32b"
 
   # vLLM (or any OpenAI-compatible) base URL.
   base_url: "http://127.0.0.1:8027/v1"
