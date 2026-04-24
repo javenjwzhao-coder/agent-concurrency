@@ -36,9 +36,9 @@ llm:
 # ║  Dataset & Task Selection                                                ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 dataset:
-  # Path to the ABC-Bench root (containing a `tasks/` subdirectory) or
-  # directly to the `tasks/` directory itself.
-  root: "./tests/tasks/"
+  # Path to the ABC-Benfch root (containing a `tasks/` subdirectory) or
+  # directly to the `tfasks/` directory itself.
+  root: "/root/jwzhao/tasks/"
 
   # Glob pattern applied under `tasks/` to select which tasks to run.
   task_glob: "task_*"
@@ -54,11 +54,11 @@ dataset:
 paths:
   # Mutable working copies of task repos are created here.
   # Each agent gets its own copy so concurrent agents don't collide.
-  workspace_root: "./tests/abc_runs"
+  workspace_root: "/root/jwzhao/abc_runs"
 
   # All output artifacts go here: per-agent trace CSVs, summaries,
   # LLM metrics, test results, and the aggregated run_summary.json.
-  results_root: "./tests/abc_results"
+  results_root: "/root/jwzhao/abc_results"
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
