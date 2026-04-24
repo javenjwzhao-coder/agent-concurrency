@@ -72,7 +72,6 @@ start_native() {
     local TP=$(cfg native.tensor_parallel_size)
     local DTYPE=$(cfg native.dtype)
     local EXTRA=$(cfg native.extra_args)
-    local PROC_NAME=$(cfg native.process_name)
     local PID_FILE=$(cfg native.pid_file)
 
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -96,19 +95,16 @@ start_native() {
         exit 1
     }
     SHARED_VLLM="$(dirname "$(dirname "$SHARED_OAI")")"
-    SHARED_SITE="$(dirname "$SHARED_VLLM")"
     VENV_SITE="$VENV/lib/python${PYTHON_VER}/site-packages"
     VENV_VLLM="$VENV_SITE/vllm"
     mkdir -p "$VENV_VLLM"
     cp -a "$SHARED_VLLM/." "$VENV_VLLM/"
     echo "[INFO] Mirrored shared vLLM package into project venv"
 
-    # ── 3. Apply KV-tracking + process-name patches to project venv (idempotent) ─
+    # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
     echo "[INFO] Applying patches to project venv..."
     "$VENV/bin/python" "$REPO_DIR/src/vllm_patches/apply_patches.py" \
-        --vllm-dir "$VENV_VLLM" \
-        --shared-site "$SHARED_SITE" \
-        --process-name "$PROC_NAME"
+        --vllm-dir "$VENV_VLLM"
 
     # ── 4. Verify the project venv imports the patched copy ──────────────────
     echo "[INFO] Verifying patched vLLM import path..."
@@ -147,7 +143,6 @@ PY
         unset VLLM_USE_MODELSCOPE MODELSCOPE_ENVIRONMENT
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
         export OMP_NUM_THREADS=1
-        export VLLM_PROCESS_NAME="$PROC_NAME"
 
         "$VENV/bin/python" "$VLLM_CLI" serve "$MODEL" \
           --served-model-name "$SERVED_NAME" \

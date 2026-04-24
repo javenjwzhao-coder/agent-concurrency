@@ -25,9 +25,6 @@ native:
     --enable-auto-tool-choice
     --tool-call-parser hermes
 
-  # Process name shown in npu-smi process table (≤15 chars for prctl)
-  process_name: vllm_jwzhao
-
   pid_file: /tmp/vllm_native.pid
 
 # Model geometry for sidecar.py KV block → GB conversion.

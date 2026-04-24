@@ -23,16 +23,6 @@ _parser.add_argument(
     default=f"/opt/vllm/venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/vllm",
     help="Path to the vllm package directory to patch",
 )
-_parser.add_argument(
-    "--shared-site",
-    default=None,
-    help="Shared venv site-packages root (parent of vllm/). Used to find worker process-name files.",
-)
-_parser.add_argument(
-    "--process-name",
-    default=None,
-    help="Custom process name to replace VLLMWorker_TP (≤15 chars for prctl).",
-)
 _args = _parser.parse_args()
 
 VLLM_DIR = pathlib.Path(_args.vllm_dir)
@@ -366,65 +356,6 @@ def patch_serving_chat() -> None:
     print(f"[OK]  serving_chat.py written ({SERVING})")
 
 
-# ─────────────────────────── worker process name ─────────────────────────────
-
-def patch_worker_name(shared_site: pathlib.Path, project_site: pathlib.Path, process_name: str) -> None:
-    """
-    Find every Python file under shared_site that contains the hardcoded
-    'VLLMWorker_TP' string, copy it into the project venv at the same relative
-    path, and replace the string with an os.environ lookup so the running
-    process picks up VLLM_PROCESS_NAME.
-    """
-    TARGET = "VLLMWorker_TP"
-    SENTINEL = "VLLM_PROCESS_NAME"
-    REPLACEMENT = f'os.environ.get("{SENTINEL}", "{TARGET}")'
-
-    found_any = False
-    for src in sorted(shared_site.rglob("*.py")):
-        try:
-            txt = src.read_text()
-        except Exception:
-            continue
-        if TARGET not in txt:
-            continue
-
-        found_any = True
-        rel = src.relative_to(shared_site)
-        dst = project_site / rel
-
-        if dst.exists() and SENTINEL in dst.read_text():
-            print(f"[SKIP] {rel}: process name already patched")
-            continue
-
-        # Ensure package hierarchy has __init__.py stubs
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        for pkg_dir in list(dst.parents):
-            if pkg_dir == project_site:
-                break
-            init = pkg_dir / "__init__.py"
-            if not init.exists():
-                init.touch()
-
-        # Inject `import os` once if the file doesn't already import it
-        if SENTINEL not in txt:
-            if not re.search(r'^\s*import os\b', txt, re.MULTILINE):
-                txt = "import os\n" + txt
-
-        # Replace every quoted occurrence of the hardcoded name
-        txt = txt.replace(f'"{TARGET}"', REPLACEMENT)
-        txt = txt.replace(f"'{TARGET}'", REPLACEMENT)
-
-        dst.write_text(txt)
-        print(f"[OK]  {rel}: VLLMWorker_TP → {SENTINEL} env var (copied from shared venv)")
-
-    if not found_any:
-        print(
-            f"[INFO] '{TARGET}' not found in Python files under {shared_site}.\n"
-            f"       The name may be set by a C extension or the NPU driver; "
-            f"VLLM_PROCESS_NAME env var is still exported for reference."
-        )
-
-
 # ─────────────────────────── validation ──────────────────────────────────────
 
 def validate() -> None:
@@ -473,11 +404,5 @@ if __name__ == "__main__":
     patch_protocol()
     patch_serving_chat()
     validate()
-
-    if _args.shared_site and _args.process_name:
-        shared_site = pathlib.Path(_args.shared_site)
-        project_site = VLLM_DIR.parent  # .venv/lib/pythonX.Y/site-packages
-        print(f"=== Patching worker process name: {_args.process_name!r} ===")
-        patch_worker_name(shared_site, project_site, _args.process_name)
 
     print("=== All patches applied successfully ===")
