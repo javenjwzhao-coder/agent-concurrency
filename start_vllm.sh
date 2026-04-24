@@ -84,7 +84,15 @@ start_native() {
 
     # ── 2. Copy the 2 affected vLLM files into project venv site-packages ────
     PYTHON_VER=$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    SHARED_OAI="$(dirname "$SHARED_PY")/../lib/python${PYTHON_VER}/site-packages/vllm/entrypoints/openai"
+    # Resolve vllm's actual location via Python import — handles editable/empty installs
+    # where files are NOT under the venv's own site-packages/vllm/ tree.
+    SHARED_OAI=$("$SHARED_PY" -c \
+        "import os, vllm.entrypoints.openai as m; print(os.path.dirname(m.__file__))" \
+        2>/dev/null) || {
+        echo "[ERROR] Cannot locate vllm.entrypoints.openai via $SHARED_PY"
+        echo "        Is vllm installed in the shared venv? (checked: $SHARED_PY)"
+        exit 1
+    }
     VENV_VLLM="$VENV/lib/python${PYTHON_VER}/site-packages/vllm"
     VENV_OAI="$VENV_VLLM/entrypoints/openai"
     mkdir -p "$VENV_OAI"
