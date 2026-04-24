@@ -130,6 +130,9 @@ start_native() {
         source "$ATB"
         set -u
         source "$VENV/bin/activate"
+        # vllm executable lives in the shared venv's bin, not in the project venv.
+        # Prepend it so `vllm` is found while Python still imports from .venv first.
+        export PATH="$(dirname "$SHARED_PY"):$PATH"
         cd "$WORKDIR"
         unset VLLM_USE_MODELSCOPE MODELSCOPE_ENVIRONMENT
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
