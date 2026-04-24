@@ -41,6 +41,65 @@ def _replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def _try_replace_candidates(
+    text: str, candidates: list[tuple[str, str]], label: str
+) -> tuple[str, bool]:
+    """Try each (old, new) pair in order. Return (modified_text, True) on first match."""
+    for old, new in candidates:
+        if old in text:
+            count = text.count(old)
+            if count > 1:
+                print(f"[WARN]  Pattern found {count} times in {label} — replacing first occurrence only")
+            return text.replace(old, new, 1), True
+    return text, False
+
+
+def _patch_via_regex_usage_block(
+    text: str,
+    usage_var: str,
+    kv_injection: str,
+    label: str,
+) -> tuple[str, bool]:
+    """
+    Regex fallback: find 'usage_var.prompt_tokens_details = PromptTokenUsageInfo(...)'
+    (with optional preceding if-guard) and append kv_injection after it.
+    Handles any variable name for num_cached_tokens and any indentation depth.
+    """
+    pattern = re.compile(
+        r'([ \t]+(?:if\s+[^\n]+\n[ \t]+)?'
+        + re.escape(usage_var)
+        + r'\.prompt_tokens_details\s*=\s*PromptTokenUsageInfo\(\s*\n'
+        r'[ \t]+cached_tokens=[^\n]+\n'
+        r'[ \t]+\))',
+        re.MULTILINE,
+    )
+    m = pattern.search(text)
+    if m:
+        old = m.group(1)
+        new = old + "\n" + kv_injection
+        print(f"[OK]  serving_chat.py: {label} — kv fields populated (regex anchor)")
+        return text.replace(old, new, 1), True
+
+    # Last resort: report what PromptTokenUsageInfo occurrences exist so the user
+    # can add an explicit candidate anchor.
+    occurrences = [
+        (i, text[max(0, i - 120): i + 120])
+        for i in [m2.start() for m2 in re.finditer(r'PromptTokenUsageInfo', text)]
+    ]
+    print(f"[WARN] Could not auto-detect '{usage_var}.prompt_tokens_details' block for {label}.",
+          file=sys.stderr)
+    if occurrences:
+        print(f"       Found {len(occurrences)} PromptTokenUsageInfo occurrence(s):", file=sys.stderr)
+        for _, ctx in occurrences[:3]:
+            print(f"       ---\n{ctx}\n       ---", file=sys.stderr)
+    else:
+        print("       No PromptTokenUsageInfo occurrences found — file may lack cached-token tracking.",
+              file=sys.stderr)
+    print(f"[WARN] Skipping {label} patch. KV blocks will not be reported for this path.",
+          file=sys.stderr)
+    return text, False
+
+
 # ─────────────────────────── protocol.py ─────────────────────────────────────
 
 def patch_protocol() -> None:
@@ -198,14 +257,8 @@ def patch_serving_chat() -> None:
     print("[OK]  serving_chat.py: _compute_kv_blocks method added")
 
     # ── 3. Non-streaming path: populate kv fields after UsageInfo() ───────────
-    # Anchor: the prompt_tokens_details assignment block in chat_completion_full_generator.
-    # This block is unique (uses `final_res.num_cached_tokens`).
-    nonstream_anchor = (
-        "        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:\n"
-        "            usage.prompt_tokens_details = PromptTokenUsageInfo(\n"
-        "                cached_tokens=final_res.num_cached_tokens\n"
-        "            )"
-    )
+    # Try candidate anchors across vLLM versions / vllm_ascend variants, then
+    # fall back to regex auto-detection on the usage.prompt_tokens_details block.
     nonstream_kv = """\
         if getattr(request, "agent_id", None):
             _kv_blocks, _kv_size_gb = self._compute_kv_blocks(
@@ -214,22 +267,37 @@ def patch_serving_chat() -> None:
             usage.kv_blocks_used = _kv_blocks
             usage.kv_blocks_size_gb = _kv_size_gb"""
 
-    txt = _replace_once(
-        txt,
-        nonstream_anchor,
-        nonstream_anchor + "\n" + nonstream_kv,
-        "serving_chat.py (non-streaming UsageInfo block)",
-    )
-    print("[OK]  serving_chat.py: non-streaming path — kv fields populated")
+    def _ns_candidate(cached_expr: str, guard: str = "if self.enable_prompt_tokens_details and ") -> str:
+        return (
+            f"        {guard}{cached_expr}:\n"
+            f"            usage.prompt_tokens_details = PromptTokenUsageInfo(\n"
+            f"                cached_tokens={cached_expr}\n"
+            f"            )"
+        )
+
+    nonstream_candidates = [
+        # v0.13.x / upstream
+        (_ns_candidate("final_res.num_cached_tokens"),
+         _ns_candidate("final_res.num_cached_tokens") + "\n" + nonstream_kv),
+        # vllm_ascend 0.11 — may use 'final_output' or bare 'num_cached_tokens'
+        (_ns_candidate("final_output.num_cached_tokens"),
+         _ns_candidate("final_output.num_cached_tokens") + "\n" + nonstream_kv),
+        (_ns_candidate("num_cached_tokens"),
+         _ns_candidate("num_cached_tokens") + "\n" + nonstream_kv),
+        # Without enable_prompt_tokens_details guard
+        (_ns_candidate("final_res.num_cached_tokens", "if "),
+         _ns_candidate("final_res.num_cached_tokens", "if ") + "\n" + nonstream_kv),
+        (_ns_candidate("num_cached_tokens", "if "),
+         _ns_candidate("num_cached_tokens", "if ") + "\n" + nonstream_kv),
+    ]
+
+    txt, ok = _try_replace_candidates(txt, nonstream_candidates, "serving_chat.py (non-streaming)")
+    if ok:
+        print("[OK]  serving_chat.py: non-streaming path — kv fields populated")
+    else:
+        txt, ok = _patch_via_regex_usage_block(txt, "usage", nonstream_kv, "non-streaming path")
 
     # ── 4. Streaming path: populate kv fields after final_usage construction ──
-    # Anchor: prompt_tokens_details assignment using `num_cached_tokens` (no `final_res.`).
-    stream_anchor = (
-        "                if self.enable_prompt_tokens_details and num_cached_tokens:\n"
-        "                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(\n"
-        "                        cached_tokens=num_cached_tokens\n"
-        "                    )"
-    )
     stream_kv = """\
                 if getattr(request, "agent_id", None):
                     _kv_blocks, _kv_size_gb = self._compute_kv_blocks(
@@ -238,13 +306,33 @@ def patch_serving_chat() -> None:
                     final_usage.kv_blocks_used = _kv_blocks
                     final_usage.kv_blocks_size_gb = _kv_size_gb"""
 
-    txt = _replace_once(
-        txt,
-        stream_anchor,
-        stream_anchor + "\n" + stream_kv,
-        "serving_chat.py (streaming UsageInfo block)",
-    )
-    print("[OK]  serving_chat.py: streaming path — kv fields populated")
+    def _st_candidate(cached_expr: str, guard: str = "if self.enable_prompt_tokens_details and ") -> str:
+        return (
+            f"                {guard}{cached_expr}:\n"
+            f"                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(\n"
+            f"                        cached_tokens={cached_expr}\n"
+            f"                    )"
+        )
+
+    stream_candidates = [
+        # v0.13.x / upstream
+        (_st_candidate("num_cached_tokens"),
+         _st_candidate("num_cached_tokens") + "\n" + stream_kv),
+        # vllm_ascend 0.11 variants
+        (_st_candidate("final_res.num_cached_tokens"),
+         _st_candidate("final_res.num_cached_tokens") + "\n" + stream_kv),
+        (_st_candidate("final_output.num_cached_tokens"),
+         _st_candidate("final_output.num_cached_tokens") + "\n" + stream_kv),
+        # Without enable_prompt_tokens_details guard
+        (_st_candidate("num_cached_tokens", "if "),
+         _st_candidate("num_cached_tokens", "if ") + "\n" + stream_kv),
+    ]
+
+    txt, ok = _try_replace_candidates(txt, stream_candidates, "serving_chat.py (streaming)")
+    if ok:
+        print("[OK]  serving_chat.py: streaming path — kv fields populated")
+    else:
+        txt, ok = _patch_via_regex_usage_block(txt, "final_usage", stream_kv, "streaming path")
 
     SERVING.write_text(txt)
     print(f"[OK]  serving_chat.py written ({SERVING})")
