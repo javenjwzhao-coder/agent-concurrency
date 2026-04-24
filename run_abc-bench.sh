@@ -437,7 +437,7 @@ install_bench_dependencies() {
     while (( attempt <= BENCH_UV_INSTALL_RETRIES )); do
         echo -e "${CYAN}  Installing benchmark dependencies (attempt ${attempt}/${BENCH_UV_INSTALL_RETRIES}, UV_HTTP_TIMEOUT=${BENCH_UV_HTTP_TIMEOUT}s)...${RESET}"
         if UV_HTTP_TIMEOUT="${BENCH_UV_HTTP_TIMEOUT}" \
-            uv pip install openhands-sdk openhands-tools; then
+            uv pip install openhands-sdk openhands-tools -i https://mirrors.aliyun.com/pypi/simple/; then
             return 0
         fi
 
