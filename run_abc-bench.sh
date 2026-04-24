@@ -418,16 +418,19 @@ else
     bash "$VLLM_START_SCRIPT"
 fi
 
-# ── Activate project venv (Python 3.10, created by start_vllm.sh) ───────────
-VENV="${SCRIPT_DIR}/.venv"
-if [[ -f "${VENV}/bin/activate" ]]; then
-    source "${VENV}/bin/activate"
-    echo -e "${CYAN}  Using $(python3 --version) from ${VENV}${RESET}"
+# ── Benchmark venv (Python 3.12, separate from the vLLM .venv) ──────────────
+# openhands-sdk requires Python >=3.12; the vLLM .venv must stay on the
+# shared Python (3.11) so that torch C extensions load correctly.
+BENCH_VENV="${SCRIPT_DIR}/.bench-venv"
+if [[ ! -f "${BENCH_VENV}/bin/activate" ]]; then
+    echo -e "${CYAN}  Creating benchmark venv at ${BENCH_VENV} (Python 3.12)...${RESET}"
+    uv venv "${BENCH_VENV}" --python 3.12
+    source "${BENCH_VENV}/bin/activate"
+    uv pip install openhands-sdk openhands-tools pyyaml pydantic scikit-learn numpy pandas joblib
 else
-    echo -e "${RED}ERROR: project venv not found at ${VENV}.${RESET}" >&2
-    echo -e "${RED}       Run ./start_vllm.sh first to create it.${RESET}" >&2
-    exit 2
+    source "${BENCH_VENV}/bin/activate"
 fi
+echo -e "${CYAN}  Using $(python3 --version) from ${BENCH_VENV}${RESET}"
 
 # ─────────────────────────── execute ─────────────────────────────────────────
 
