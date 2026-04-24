@@ -80,7 +80,7 @@ start_native() {
     # ── 1. Create project venv via uv (skipped if already exists) ────────────
     if [ ! -f "$VENV/bin/activate" ]; then
         echo "[INFO] Creating project venv with uv..."
-        uv venv "$VENV" --python "$SHARED_PY" --system-site-packages
+        uv venv "$VENV" --python 3.10 --system-site-packages
     fi
 
     # ── 2. Mirror the full vLLM package into project venv site-packages ──────

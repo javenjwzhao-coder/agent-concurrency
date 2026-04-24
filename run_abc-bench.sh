@@ -418,6 +418,17 @@ else
     bash "$VLLM_START_SCRIPT"
 fi
 
+# ── Activate project venv (Python 3.10, created by start_vllm.sh) ───────────
+VENV="${SCRIPT_DIR}/.venv"
+if [[ -f "${VENV}/bin/activate" ]]; then
+    source "${VENV}/bin/activate"
+    echo -e "${CYAN}  Using $(python3 --version) from ${VENV}${RESET}"
+else
+    echo -e "${RED}ERROR: project venv not found at ${VENV}.${RESET}" >&2
+    echo -e "${RED}       Run ./start_vllm.sh first to create it.${RESET}" >&2
+    exit 2
+fi
+
 # ─────────────────────────── execute ─────────────────────────────────────────
 
 # Create output directories.
