@@ -72,6 +72,7 @@ start_native() {
     local TP=$(cfg native.tensor_parallel_size)
     local DTYPE=$(cfg native.dtype)
     local EXTRA=$(cfg native.extra_args)
+    local PROC_NAME=$(cfg native.process_name)
     local PID_FILE=$(cfg native.pid_file)
 
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -112,10 +113,13 @@ start_native() {
           "$VENV_VLLM/entrypoints/__init__.py" \
           "$VENV_OAI/__init__.py"
 
-    # ── 3. Apply KV-tracking patches to project venv copies (idempotent) ─────
-    echo "[INFO] Applying KV-tracking patch to project venv..."
+    # ── 3. Apply KV-tracking + process-name patches to project venv (idempotent) ─
+    echo "[INFO] Applying patches to project venv..."
+    SHARED_SITE="$(dirname "$(dirname "$(dirname "$SHARED_OAI")")")"
     "$VENV/bin/python" "$REPO_DIR/src/vllm_patches/apply_patches.py" \
-        --vllm-dir "$VENV_VLLM"
+        --vllm-dir "$VENV_VLLM" \
+        --shared-site "$SHARED_SITE" \
+        --process-name "$PROC_NAME"
 
     # ── 4. Skip if already running ────────────────────────────────────────────
     if [ -f "$PID_FILE" ] && kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
@@ -138,6 +142,7 @@ start_native() {
         unset VLLM_USE_MODELSCOPE MODELSCOPE_ENVIRONMENT
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
         export OMP_NUM_THREADS=1
+        export VLLM_PROCESS_NAME="$PROC_NAME"
 
         vllm serve "$MODEL" \
           --served-model-name "$SERVED_NAME" \
@@ -145,7 +150,7 @@ start_native() {
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
           $EXTRA
-    ) &
+    ) > /dev/null 2>&1 &
     echo $! > "$PID_FILE"
     echo "[INFO] vLLM PID: $(cat $PID_FILE)"
 }
