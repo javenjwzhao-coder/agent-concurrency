@@ -136,8 +136,12 @@ start_native() {
         set -u
         source "$VENV/bin/activate"
         # vllm executable lives in the shared venv's bin, not in the project venv.
-        # Prepend it so `vllm` is found while Python still imports from .venv first.
+        # Prepend it so `vllm` is found.  PYTHONPATH ensures the shared Python
+        # binary loads patched files from the project venv first, before the
+        # shared venv's site-packages (which lack our patches).
         export PATH="$(dirname "$SHARED_PY"):$PATH"
+        VENV_SITE="$VENV/lib/python${PYTHON_VER}/site-packages"
+        export PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
         cd "$WORKDIR"
         unset VLLM_USE_MODELSCOPE MODELSCOPE_ENVIRONMENT
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
