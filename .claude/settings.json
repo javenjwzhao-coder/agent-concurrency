@@ -39,7 +39,18 @@
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency show a3a8ee6 --stat)",
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency log --oneline -10)",
       "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add run_abc-bench.sh start_vllm.sh)",
-      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh run_abc-bench.sh)"
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh run_abc-bench.sh)",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('src/predict_tool_duration.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('src/predict_tool_duration.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 src/predict_tool_duration.py --help)",
+      "Bash(pip3 show *)",
+      "Bash(python3 -m pip show numpy)",
+      "Read(//Users/mohamed/Library/Python/**)",
+      "Bash(python3.9 -c \"import numpy, sklearn; print\\('deps OK'\\)\")",
+      "Read(//Users/mohamed/**)",
+      "Bash(/opt/homebrew/bin/python3.12 -c \"import numpy, sklearn; print\\('deps OK'\\)\")",
+      "Bash(/opt/homebrew/bin/python3.14 -c \"import numpy, sklearn; print\\('deps OK'\\)\")",
+      "Bash(/opt/homebrew/bin/python3.14 src/predict_tool_duration.py --help)"
     ]
   }
 }
