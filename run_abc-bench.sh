@@ -201,6 +201,15 @@ flat_keys = [
     ("PREDICTION_SEED",        "prediction.seed"),
     ("LOG_LEVEL",              "logging.level"),
     ("LOG_FILE",               "logging.file"),
+    ("SIDECAR_ENABLED",        "sidecar.enabled"),
+    ("SIDECAR_LOG_FILE",       "sidecar.log_file"),
+    ("SIDECAR_VLLM_URL",       "sidecar.vllm_url"),
+    ("SIDECAR_INTERVAL",       "sidecar.interval"),
+    ("SIDECAR_NUM_LAYERS",     "sidecar.num_layers"),
+    ("SIDECAR_NUM_KV_HEADS",   "sidecar.num_kv_heads"),
+    ("SIDECAR_HEAD_DIM",       "sidecar.head_dim"),
+    ("SIDECAR_BLOCK_SIZE",     "sidecar.block_size"),
+    ("SIDECAR_DTYPE",          "sidecar.dtype"),
 ]
 
 for bash_name, dotted in flat_keys:
@@ -302,6 +311,20 @@ build_runner_cmd() {
         )
     fi
 
+    if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
+        _sc_log="${SIDECAR_LOG_FILE:-${RESULTS_ROOT:-./abc_results}/sidecar.log}"
+        cmd+=(
+            --sidecar-log-file     "$_sc_log"
+            --sidecar-vllm-url     "${SIDECAR_VLLM_URL:-http://localhost:8000}"
+            --sidecar-interval     "${SIDECAR_INTERVAL:-5.0}"
+            --sidecar-num-layers   "${SIDECAR_NUM_LAYERS}"
+            --sidecar-num-kv-heads "${SIDECAR_NUM_KV_HEADS}"
+            --sidecar-head-dim     "${SIDECAR_HEAD_DIM}"
+            --sidecar-block-size   "${SIDECAR_BLOCK_SIZE:-16}"
+            --sidecar-dtype        "${SIDECAR_DTYPE:-bfloat16}"
+        )
+    fi
+
     echo "${cmd[@]}"
 }
 
@@ -366,6 +389,16 @@ echo "    enabled:            ${PREDICTION_ENABLED:-false}"
 echo "    model:              ${PREDICTION_MODEL:-ridge}"
 echo "    test_fraction:      ${PREDICTION_TEST_FRAC:-0.2}"
 echo "    save_model:         ${PREDICTION_SAVE_MODEL:-}"
+echo ""
+echo -e "  ${CYAN}Sidecar (KV cache monitor)${RESET}"
+echo "    enabled:            ${SIDECAR_ENABLED:-false}"
+if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
+    _sc_log_display="${SIDECAR_LOG_FILE:-${RESULTS_ROOT:-./abc_results}/sidecar.log}"
+    echo "    log_file:           ${_sc_log_display}"
+    echo "    vllm_url:           ${SIDECAR_VLLM_URL:-http://localhost:8000}"
+    echo "    interval:           ${SIDECAR_INTERVAL:-5.0}s"
+    echo "    geometry:           layers=${SIDECAR_NUM_LAYERS}  kv_heads=${SIDECAR_NUM_KV_HEADS}  head_dim=${SIDECAR_HEAD_DIM}  block=${SIDECAR_BLOCK_SIZE}  dtype=${SIDECAR_DTYPE:-bfloat16}"
+fi
 echo ""
 echo -e "${BOLD}════════════════════════════════════════════════════════════════════════${RESET}"
 
