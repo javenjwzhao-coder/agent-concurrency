@@ -34,6 +34,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config/abc-bench_config.yaml"
 DRY_RUN=false
 SKIP_PREDICTION=false
+BENCH_UV_HTTP_TIMEOUT="${BENCH_UV_HTTP_TIMEOUT:-300}"
+BENCH_UV_INSTALL_RETRIES="${BENCH_UV_INSTALL_RETRIES:-3}"
 declare -a OVERRIDES=()
 
 # ─────────────────────────── colours ─────────────────────────────────────────
@@ -421,14 +423,46 @@ fi
 # ── Benchmark venv (Python 3.12, separate from the vLLM .venv) ──────────────
 # openhands-sdk requires Python >=3.12; the vLLM .venv must stay on the
 # shared Python (3.11) so that torch C extensions load correctly.
+bench_dependencies_ready() {
+    python3 - <<'PYEOF' >/dev/null 2>&1
+import openhands.sdk
+from openhands.tools.file_editor import FileEditorTool
+from openhands.tools.task_tracker import TaskTrackerTool
+from openhands.tools.terminal import TerminalTool
+PYEOF
+}
+
+install_bench_dependencies() {
+    local attempt=1
+    while (( attempt <= BENCH_UV_INSTALL_RETRIES )); do
+        echo -e "${CYAN}  Installing benchmark dependencies (attempt ${attempt}/${BENCH_UV_INSTALL_RETRIES}, UV_HTTP_TIMEOUT=${BENCH_UV_HTTP_TIMEOUT}s)...${RESET}"
+        if UV_HTTP_TIMEOUT="${BENCH_UV_HTTP_TIMEOUT}" \
+            uv pip install openhands-sdk openhands-tools; then
+            return 0
+        fi
+
+        if (( attempt == BENCH_UV_INSTALL_RETRIES )); then
+            echo -e "${RED}ERROR: failed to install benchmark dependencies after ${BENCH_UV_INSTALL_RETRIES} attempts.${RESET}" >&2
+            echo -e "${YELLOW}Hint: rerun with a larger timeout, for example:${RESET} BENCH_UV_HTTP_TIMEOUT=600 bash run_abc-bench.sh --config ...${RESET}" >&2
+            return 1
+        fi
+
+        echo -e "${YELLOW}  Install attempt ${attempt} failed; retrying in 5s...${RESET}"
+        sleep 5
+        attempt=$((attempt + 1))
+    done
+}
+
 BENCH_VENV="${SCRIPT_DIR}/.bench-venv"
 if [[ ! -f "${BENCH_VENV}/bin/activate" ]]; then
     echo -e "${CYAN}  Creating benchmark venv at ${BENCH_VENV} (Python 3.12)...${RESET}"
     uv venv "${BENCH_VENV}" --python 3.12
-    source "${BENCH_VENV}/bin/activate"
-    uv pip install openhands-sdk openhands-tools
+fi
+source "${BENCH_VENV}/bin/activate"
+if bench_dependencies_ready; then
+    echo -e "${GREEN}  Benchmark dependencies already available in ${BENCH_VENV}.${RESET}"
 else
-    source "${BENCH_VENV}/bin/activate"
+    install_bench_dependencies
 fi
 echo -e "${CYAN}  Using $(python3 --version) from ${BENCH_VENV}${RESET}"
 
