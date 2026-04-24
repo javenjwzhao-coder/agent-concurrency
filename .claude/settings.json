@@ -31,7 +31,9 @@
       "Read(//opt/**)",
       "Read(//usr/**)",
       "Bash(/opt/vllm/venv/bin/pip show *)",
-      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add config/vllm_config.yaml src/vllm_patches/apply_patches.py start_vllm.sh .claude/settings.json)"
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add config/vllm_config.yaml src/vllm_patches/apply_patches.py start_vllm.sh .claude/settings.json)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh src/vllm_patches/apply_patches.py)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add start_vllm.sh src/vllm_patches/apply_patches.py .claude/settings.json)"
     ]
   }
 }
