@@ -69,8 +69,8 @@ def _patch_via_regex_usage_block(
         r'([ \t]+(?:if\s+[^\n]+\n[ \t]+)?'
         + re.escape(usage_var)
         + r'\.prompt_tokens_details\s*=\s*PromptTokenUsageInfo\(\s*\n'
-        r'[ \t]+cached_tokens=[^\n]+\n'
-        r'[ \t]+\))',
+        r'[ \t]+cached_tokens=[^\n]+'
+        r'(?:\n[ \t]+\))?)',          # closing ) may be inline or on its own line
         re.MULTILINE,
     )
     m = pattern.search(text)
@@ -267,24 +267,33 @@ def patch_serving_chat() -> None:
             usage.kv_blocks_used = _kv_blocks
             usage.kv_blocks_size_gb = _kv_size_gb"""
 
-    def _ns_candidate(cached_expr: str, guard: str = "if self.enable_prompt_tokens_details and ") -> str:
+    def _ns_candidate(cached_expr: str, guard: str = "if self.enable_prompt_tokens_details and ",
+                      inline_paren: bool = False) -> str:
+        close = f")" if inline_paren else f"\n            )"
         return (
             f"        {guard}{cached_expr}:\n"
             f"            usage.prompt_tokens_details = PromptTokenUsageInfo(\n"
-            f"                cached_tokens={cached_expr}\n"
-            f"            )"
+            f"                cached_tokens={cached_expr}{close}"
         )
 
     nonstream_candidates = [
-        # v0.13.x / upstream
+        # vllm_ascend 0.11 — inline closing paren (confirmed from diagnostics)
+        (_ns_candidate("final_res.num_cached_tokens", inline_paren=True),
+         _ns_candidate("final_res.num_cached_tokens", inline_paren=True) + "\n" + nonstream_kv),
+        (_ns_candidate("num_cached_tokens", inline_paren=True),
+         _ns_candidate("num_cached_tokens", inline_paren=True) + "\n" + nonstream_kv),
+        (_ns_candidate("final_output.num_cached_tokens", inline_paren=True),
+         _ns_candidate("final_output.num_cached_tokens", inline_paren=True) + "\n" + nonstream_kv),
+        # Without guard, inline paren
+        (_ns_candidate("final_res.num_cached_tokens", "if ", inline_paren=True),
+         _ns_candidate("final_res.num_cached_tokens", "if ", inline_paren=True) + "\n" + nonstream_kv),
+        # v0.13.x / upstream — closing paren on its own line
         (_ns_candidate("final_res.num_cached_tokens"),
          _ns_candidate("final_res.num_cached_tokens") + "\n" + nonstream_kv),
-        # vllm_ascend 0.11 — may use 'final_output' or bare 'num_cached_tokens'
         (_ns_candidate("final_output.num_cached_tokens"),
          _ns_candidate("final_output.num_cached_tokens") + "\n" + nonstream_kv),
         (_ns_candidate("num_cached_tokens"),
          _ns_candidate("num_cached_tokens") + "\n" + nonstream_kv),
-        # Without enable_prompt_tokens_details guard
         (_ns_candidate("final_res.num_cached_tokens", "if "),
          _ns_candidate("final_res.num_cached_tokens", "if ") + "\n" + nonstream_kv),
         (_ns_candidate("num_cached_tokens", "if "),
@@ -306,24 +315,33 @@ def patch_serving_chat() -> None:
                     final_usage.kv_blocks_used = _kv_blocks
                     final_usage.kv_blocks_size_gb = _kv_size_gb"""
 
-    def _st_candidate(cached_expr: str, guard: str = "if self.enable_prompt_tokens_details and ") -> str:
+    def _st_candidate(cached_expr: str, guard: str = "if self.enable_prompt_tokens_details and ",
+                      inline_paren: bool = False) -> str:
+        close = ")" if inline_paren else "\n                    )"
         return (
             f"                {guard}{cached_expr}:\n"
             f"                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(\n"
-            f"                        cached_tokens={cached_expr}\n"
-            f"                    )"
+            f"                        cached_tokens={cached_expr}{close}"
         )
 
     stream_candidates = [
-        # v0.13.x / upstream
+        # vllm_ascend 0.11 — inline closing paren (confirmed from diagnostics)
+        (_st_candidate("num_cached_tokens", inline_paren=True),
+         _st_candidate("num_cached_tokens", inline_paren=True) + "\n" + stream_kv),
+        (_st_candidate("final_res.num_cached_tokens", inline_paren=True),
+         _st_candidate("final_res.num_cached_tokens", inline_paren=True) + "\n" + stream_kv),
+        (_st_candidate("final_output.num_cached_tokens", inline_paren=True),
+         _st_candidate("final_output.num_cached_tokens", inline_paren=True) + "\n" + stream_kv),
+        # Without guard, inline paren
+        (_st_candidate("num_cached_tokens", "if ", inline_paren=True),
+         _st_candidate("num_cached_tokens", "if ", inline_paren=True) + "\n" + stream_kv),
+        # v0.13.x / upstream — closing paren on its own line
         (_st_candidate("num_cached_tokens"),
          _st_candidate("num_cached_tokens") + "\n" + stream_kv),
-        # vllm_ascend 0.11 variants
         (_st_candidate("final_res.num_cached_tokens"),
          _st_candidate("final_res.num_cached_tokens") + "\n" + stream_kv),
         (_st_candidate("final_output.num_cached_tokens"),
          _st_candidate("final_output.num_cached_tokens") + "\n" + stream_kv),
-        # Without enable_prompt_tokens_details guard
         (_st_candidate("num_cached_tokens", "if "),
          _st_candidate("num_cached_tokens", "if ") + "\n" + stream_kv),
     ]
@@ -343,29 +361,41 @@ def patch_serving_chat() -> None:
 def validate() -> None:
     import importlib.util, types
 
-    for path, mod_name in [(PROTO, "vllm.entrypoints.openai.protocol"),
-                           (SERVING, "vllm.entrypoints.openai.serving_chat")]:
-        spec = importlib.util.spec_from_file_location(mod_name, path)
-        assert spec is not None
-        mod = types.ModuleType(mod_name)
-        try:
-            exec(compile(path.read_text(), str(path), "exec"), mod.__dict__)
-        except Exception as e:
-            print(f"[ERROR] Syntax/import error in {path.name}: {e}", file=sys.stderr)
-            sys.exit(1)
+    # Only exec-validate protocol.py; serving_chat.py imports third-party packages
+    # (e.g. `regex`, `openai_harmony`) that may not be available at patch time.
+    try:
+        exec(compile(PROTO.read_text(), str(PROTO), "exec"), types.ModuleType("proto").__dict__)
+    except SyntaxError as e:
+        print(f"[ERROR] Syntax error in protocol.py: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception:
+        pass  # ImportError is expected — we only care about syntax here
 
-    # Import and check fields
-    import importlib
-    proto = importlib.import_module("vllm.entrypoints.openai.protocol")
+    # Text-level checks: confirm KV fields landed in both patched files
+    proto_txt = PROTO.read_text()
+    serving_txt = SERVING.read_text()
+    errors = []
+    for field in ("kv_blocks_used", "kv_blocks_size_gb"):
+        if field not in proto_txt:
+            errors.append(f"protocol.py missing field: {field}")
+    if "agent_id" not in proto_txt:
+        errors.append("protocol.py missing field: agent_id")
+    if "_compute_kv_blocks" not in serving_txt:
+        errors.append("serving_chat.py missing _compute_kv_blocks method")
+    if "_kv_block_size" not in serving_txt:
+        errors.append("serving_chat.py missing KV geometry init block")
 
-    assert hasattr(proto.UsageInfo, "model_fields") and \
-        "kv_blocks_used" in proto.UsageInfo.model_fields, \
-        "kv_blocks_used missing from UsageInfo.model_fields"
-    assert "kv_blocks_size_gb" in proto.UsageInfo.model_fields, \
-        "kv_blocks_size_gb missing from UsageInfo.model_fields"
-    assert "agent_id" in proto.ChatCompletionRequest.model_fields, \
-        "agent_id missing from ChatCompletionRequest.model_fields"
+    if errors:
+        for e in errors:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
 
+    kv_injected = serving_txt.count("kv_blocks_used")
+    if kv_injected == 0:
+        print("[WARN] serving_chat.py: kv_blocks_used not injected into any response path "
+              "— non-streaming and streaming patches both skipped.", file=sys.stderr)
+    else:
+        print(f"[OK]  serving_chat.py: kv_blocks_used injected into {kv_injected} response path(s)")
     print("[OK]  Validation passed: all expected fields present")
 
 
