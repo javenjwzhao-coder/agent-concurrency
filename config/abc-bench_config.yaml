@@ -133,7 +133,7 @@ prediction:
 # Set enabled: true to start the sidecar daemon thread alongside the runner.
 # Geometry values must match the served model (see config/vllm_config.yaml).
 sidecar:
-  enabled: false
+  enabled: true
 
   # JSONL output file.  null → <results_root>/sidecar.log
   log_file: null
