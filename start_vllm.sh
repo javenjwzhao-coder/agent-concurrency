@@ -100,13 +100,19 @@ start_native() {
     mkdir -p "$VENV_VLLM"
     cp -a "$SHARED_VLLM/." "$VENV_VLLM/"
     echo "[INFO] Mirrored shared vLLM package into project venv"
-    # Make non-vllm packages (torch, transformers, etc.) from the shared venv
-    # importable. A .pth file is loaded by Python's site module at startup and
-    # appends the path to sys.path AFTER the project venv's own site-packages,
-    # so the patched vllm copy in VENV_SITE still takes priority.
-    SHARED_SITE="$(dirname "$SHARED_VLLM")"
-    echo "$SHARED_SITE" > "$VENV_SITE/shared_venv.pth"
-    echo "[INFO] Linked shared venv site-packages for non-vllm deps (torch, etc.)"
+    # Make all packages importable from the shared venv (torch, transformers,
+    # torch_npu, etc.) by snapshotting the shared Python's full sys.path into a
+    # .pth file.  Python's site module appends .pth entries AFTER the project
+    # venv's own site-packages, so our patched vllm copy still takes priority.
+    # Using sys.path directly (rather than guessing site-packages location)
+    # handles editable installs and Ascend-specific path layouts correctly.
+    "$SHARED_PY" -c "
+import sys
+for p in sys.path:
+    if p and p != '.':
+        print(p)
+" > "$VENV_SITE/shared_venv.pth"
+    echo "[INFO] Linked shared venv packages ($(wc -l < "$VENV_SITE/shared_venv.pth") paths) for non-vllm deps"
 
     # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
     echo "[INFO] Applying patches to project venv..."
