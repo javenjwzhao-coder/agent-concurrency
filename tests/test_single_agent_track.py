@@ -17,20 +17,20 @@ Three properties are checked:
 
 Environment variables
 ─────────────────────
-  ABC_BENCH_ROOT   (required) Path to the ABC-Bench root containing tasks/.
+  ABC_BENCH_ROOT   (optional) Path to the ABC-Bench root containing tasks/.
+                   Defaults to ../tasks, then ./tasks, when either exists.
   ABC_BENCH_TASK   (optional) Task-name glob; defaults to the first task_* match.
   ABC_BENCH_VENV   (optional) Benchmark venv path; defaults to ./.bench-venv.
-  LLM_API_KEY      (optional) API key; defaults to "dummy" (vLLM accepts any).
-  SKIP_VLLM_START  Set to "1" to assume vLLM is already running (skip launch).
+  LLM_API_KEY      (optional) API key; defaults to "sk-local-ascend".
+  SKIP_VLLM_START  Defaults to "1" to assume vLLM is already running.
 
 Run
 ───
-  # the test automatically re-runs itself inside ./.bench-venv:
-  # start vLLM automatically:
-  ABC_BENCH_ROOT=/data/ABC-Bench pytest tests/test_single_agent_track.py -v
+  # Assumes vLLM is already running and automatically re-runs inside ./.bench-venv.
+  pytest tests/test_single_agent_track.py -vs
 
-  # assume vLLM already running:
-  SKIP_VLLM_START=1 ABC_BENCH_ROOT=/data/ABC-Bench pytest tests/test_single_agent_track.py -v
+  # Override defaults when needed:
+  ABC_BENCH_ROOT=/data/ABC-Bench SKIP_VLLM_START=0 pytest tests/test_single_agent_track.py -vs
 """
 
 from __future__ import annotations
@@ -68,6 +68,21 @@ _BENCH_TEST_IMPORTS = (
     "requests",
     "yaml",
 )
+_ABC_BENCH_ROOT_DEFAULTS = (
+    REPO_ROOT.parent / "tasks",
+    REPO_ROOT / "tasks",
+)
+
+
+def _set_default_test_env() -> None:
+    os.environ.setdefault("SKIP_VLLM_START", "1")
+    os.environ.setdefault("LLM_API_KEY", "sk-local-ascend")
+    if os.getenv("ABC_BENCH_ROOT"):
+        return
+    for candidate in _ABC_BENCH_ROOT_DEFAULTS:
+        if candidate.is_dir():
+            os.environ["ABC_BENCH_ROOT"] = str(candidate)
+            return
 
 
 def _path_inside(path: Path, parent: Path) -> bool:
@@ -168,6 +183,7 @@ def _reexec_in_bench_venv() -> None:
     )
 
 
+_set_default_test_env()
 _reexec_in_bench_venv()
 
 import pytest
@@ -205,7 +221,7 @@ BYTES_PER_BLK = _sidecar.bytes_per_block(
 _RAW_MODEL  = _VLLM_CFG["native"]["served_model_name"]  # e.g. Qwen/Qwen3-30B-A3B-Instruct-2507
 LLM_MODEL   = f"openai/{_RAW_MODEL.split('/')[-1]}"  # e.g. openai/Qwen3-30B-A3B-Instruct-2507
 LLM_BASE_URL = f"{VLLM_URL}/v1"
-LLM_API_KEY  = os.getenv("LLM_API_KEY", "dummy")
+LLM_API_KEY  = os.getenv("LLM_API_KEY", "sk-local-ascend")
 
 
 # ── Prometheus helpers ────────────────────────────────────────────────────────
