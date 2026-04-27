@@ -103,7 +103,9 @@ _BENCH_ROOT_DEFAULTS = (REPO_ROOT.parent / "tasks", REPO_ROOT / "tasks")
 
 def _set_defaults() -> None:
     os.environ.setdefault("LLM_API_KEY", "sk-local-ascend")
-    os.environ.setdefault("PREDICTOR_TRACE_DIR", str(Path(__file__).parent))
+    _tests_dir = Path(__file__).parent
+    if not os.getenv("PREDICTOR_TRACE_DIR") and list(_tests_dir.rglob("*_trace.csv")):
+        os.environ["PREDICTOR_TRACE_DIR"] = str(_tests_dir)
     if not os.getenv("ABC_BENCH_ROOT"):
         for c in _BENCH_ROOT_DEFAULTS:
             if c.is_dir():
