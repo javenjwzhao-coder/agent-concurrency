@@ -516,7 +516,7 @@ def saved_model(trace_dir):
       • PREDICTOR_MODEL_FILE   if the env var is set
       • <trace_dir>/duration_predictor.joblib  otherwise
     """
-    features_csv = trace_dir / "tool_call_features.csv"
+    features_csv = Path(__file__).parent / "tool_call_features.csv"
     split = _build_split(trace_dir, out_csv=features_csv)
 
     if split.feat_tr.empty:
