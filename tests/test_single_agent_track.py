@@ -12,7 +12,7 @@ Three properties are checked:
   2. Formula match     — kv_blocks_size_gb ≈ kv_blocks_used × bytes_per_block
                          converted to GiB, matching the patched vLLM field
                          (verifies the patch's geometry calculation end-to-end).
-  3. Prometheus bound  — peak Prometheus num_gpu_blocks_used ≥ kv_blocks_used
+  3. Prometheus bound  — peak Prometheus KV blocks used ≥ kv_blocks_used
                          for the largest single call (global metric must have
                          seen at least as many blocks as the agent reported).
 
@@ -231,7 +231,13 @@ def _fetch_metrics() -> dict[str, float]:
     try:
         r = requests.get(f"{VLLM_URL}/metrics", timeout=5)
         r.raise_for_status()
-        return _sidecar.parse_prometheus(r.text)
+        kv = _sidecar._parse_vllm_kv_metrics(r.text)
+        return {
+            key: float(value)
+            for key, value in kv.items()
+            if key in {"total_blocks", "used_blocks", "usage_pct"}
+            and isinstance(value, (int, float))
+        }
     except Exception:
         return {}
 
@@ -329,9 +335,9 @@ def test_single_agent_kv_tracking(vllm_running, task_dir, tmp_path):
     1. Patch active:   at least one LLM call returned kv_blocks_used > 0.
     2. Formula match:  kv_blocks_size_gb == kv_blocks_used × bytes_per_block / 1024^3
                        within 1 % relative error.
-    3. Prometheus ≥:   peak Prometheus num_gpu_blocks_used (sampled every 0.5 s
+    3. Prometheus ≥:   peak Prometheus KV blocks used (sampled every 0.5 s
                        throughout the run) is ≥ the agent's max kv_blocks_used.
-    4. Fraction sane:  gpu_cache_usage_perc remains in [0, 1].
+    4. Fraction sane:  KV cache usage fraction remains in [0, 1].
     """
     import litellm as _litellm
 
@@ -407,17 +413,19 @@ def test_single_agent_kv_tracking(vllm_running, task_dir, tmp_path):
         )
 
     # ── 3. Prometheus peak ≥ agent peak ───────────────────────────────────────
-    total_blks = poller.peak("vllm:num_gpu_blocks")
-    used_pct   = poller.peak("vllm:gpu_cache_usage_perc")   # fraction 0–1
-    peak_prom_blocks = round(total_blks * used_pct) if total_blks and used_pct else 0
+    total_blks = poller.peak("total_blocks")
+    used_pct   = poller.peak("usage_pct")   # fraction 0–1
+    peak_prom_blocks = poller.peak("used_blocks")
+    if not peak_prom_blocks and total_blks and used_pct:
+        peak_prom_blocks = round(total_blks * used_pct)
 
     assert peak_prom_blocks >= kv_blocks, (
         f"Prometheus peak blocks ({peak_prom_blocks}) < "
         f"agent kv_blocks_used ({kv_blocks}).\n"
-        f"  vllm:num_gpu_blocks peak          : {total_blks}\n"
-        f"  vllm:gpu_cache_usage_perc peak     : {used_pct:.4f}\n"
-        f"  Prometheus derived used blocks     : {peak_prom_blocks}\n"
-        f"  Agent kv_blocks_used (peak call)   : {kv_blocks}\n"
+        f"  Prometheus total_blocks peak      : {total_blks}\n"
+        f"  Prometheus usage_pct peak         : {used_pct:.4f}\n"
+        f"  Prometheus used_blocks peak       : {peak_prom_blocks}\n"
+        f"  Agent kv_blocks_used (peak call)  : {kv_blocks}\n"
         "The Prometheus poller (0.5 s interval) may have missed the allocation "
         "window, or the metrics endpoint was not updated in time."
     )
