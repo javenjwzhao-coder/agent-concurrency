@@ -45,7 +45,7 @@ dataset:
 
   # Maximum number of tasks to run (tasks are sorted alphabetically and
   # truncated to this count).
-  max_tasks: 1
+  max_tasks: 5
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
