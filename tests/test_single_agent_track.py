@@ -71,15 +71,20 @@ _BENCH_TEST_IMPORTS = (
 
 
 def _path_inside(path: Path, parent: Path) -> bool:
+    path = Path(os.path.abspath(os.path.expanduser(str(path))))
+    parent = Path(os.path.abspath(os.path.expanduser(str(parent))))
     try:
-        path.resolve().relative_to(parent.resolve())
+        path.relative_to(parent)
         return True
     except ValueError:
         return False
 
 
 def _running_inside_bench_venv() -> bool:
-    return _path_inside(Path(sys.executable), _BENCH_VENV)
+    virtual_env = os.getenv("VIRTUAL_ENV")
+    if virtual_env and Path(os.path.abspath(virtual_env)) == Path(os.path.abspath(_BENCH_VENV)):
+        return True
+    return _path_inside(Path(sys.executable), _BENCH_VENV) or _path_inside(Path(sys.prefix), _BENCH_VENV)
 
 
 def _bench_dependencies_ready() -> bool:
