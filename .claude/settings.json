@@ -50,7 +50,9 @@
       "Read(//Users/mohamed/**)",
       "Bash(/opt/homebrew/bin/python3.12 -c \"import numpy, sklearn; print\\('deps OK'\\)\")",
       "Bash(/opt/homebrew/bin/python3.14 -c \"import numpy, sklearn; print\\('deps OK'\\)\")",
-      "Bash(/opt/homebrew/bin/python3.14 src/predict_tool_duration.py --help)"
+      "Bash(/opt/homebrew/bin/python3.14 src/predict_tool_duration.py --help)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add src/sidecar.py)",
+      "Bash(git -C /Users/mohamed/Desktop/agent-concurrency add config/vllm_config.yaml config/abc-bench_config.yaml)"
     ]
   }
 }

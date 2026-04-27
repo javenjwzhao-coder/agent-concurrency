@@ -29,7 +29,7 @@ print(' '.join(str(i) for i in c) if isinstance(c,list) else ('' if c is None el
 export no_proxy="localhost,127.0.0.1"
 export NO_PROXY="localhost,127.0.0.1"
 
-MAX_RETRIES=60
+MAX_RETRIES=30
 RETRY_INTERVAL=10
 
 # =============================================================================
@@ -163,7 +163,7 @@ PY
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
           $EXTRA
-    ) > /dev/null 2>&1 &
+    ) # > /dev/null 2>&1 &
     echo $! > "$PID_FILE"
     echo "[INFO] vLLM PID: $(cat $PID_FILE)"
 }
