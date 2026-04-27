@@ -10,6 +10,7 @@ Three properties are checked:
 
   1. Patch active      — kv_blocks_used > 0 in at least one LLM response.
   2. Formula match     — kv_blocks_size_gb ≈ kv_blocks_used × bytes_per_block
+                         converted to GiB, matching the patched vLLM field
                          (verifies the patch's geometry calculation end-to-end).
   3. Prometheus bound  — peak Prometheus num_gpu_blocks_used ≥ kv_blocks_used
                          for the largest single call (global metric must have
@@ -326,7 +327,7 @@ def test_single_agent_kv_tracking(vllm_running, task_dir, tmp_path):
     Assertions
     ──────────
     1. Patch active:   at least one LLM call returned kv_blocks_used > 0.
-    2. Formula match:  kv_blocks_size_gb == kv_blocks_used × bytes_per_block / 1e9
+    2. Formula match:  kv_blocks_size_gb == kv_blocks_used × bytes_per_block / 1024^3
                        within 1 % relative error.
     3. Prometheus ≥:   peak Prometheus num_gpu_blocks_used (sampled every 0.5 s
                        throughout the run) is ≥ the agent's max kv_blocks_used.
@@ -392,12 +393,12 @@ def test_single_agent_kv_tracking(vllm_running, task_dir, tmp_path):
 
     # ── 2. formula match ──────────────────────────────────────────────────────
     if kv_gb is not None:
-        expected_gb = kv_blocks * BYTES_PER_BLK / 1e9
+        expected_gb = kv_blocks * BYTES_PER_BLK / (1024 ** 3)
         rel_err = abs(kv_gb - expected_gb) / max(expected_gb, 1e-12)
         assert rel_err < 0.01, (
             f"kv_blocks_size_gb formula mismatch:\n"
-            f"  response  : {kv_gb:.6f} GB\n"
-            f"  expected  : {expected_gb:.6f} GB "
+            f"  response  : {kv_gb:.6f} GiB\n"
+            f"  expected  : {expected_gb:.6f} GiB "
             f"({kv_blocks} blocks × {BYTES_PER_BLK} B/block)\n"
             f"  rel_error : {rel_err:.2%}  (tolerance: 1 %)\n"
             f"  Geometry  : layers={_SC['num_layers']} kv_heads={_SC['num_kv_heads']} "
