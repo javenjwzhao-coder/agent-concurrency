@@ -104,94 +104,105 @@ def _patch_via_regex_usage_block(
 
 def patch_protocol() -> None:
     txt = PROTO.read_text()
-    if "kv_blocks_size_gb" in txt and "agent_id" in txt:
+
+    # kv_blocks_size_gb and "agent_id: str | None" are unique to our patch.
+    need_kv_size  = "kv_blocks_size_gb" not in txt
+    need_agent_id = "agent_id: str | None" not in txt
+
+    if not need_kv_size and not need_agent_id:
         print("[SKIP] protocol.py already patched")
         return
 
     # ── 1. Add kv_blocks fields to UsageInfo ─────────────────────────────────
     # The class always ends with prompt_tokens_details (both | None and Optional forms).
     # We try the v0.13 form first, then fall back to the v0.9 form.
-    usage_tail_v13  = "    prompt_tokens_details: PromptTokenUsageInfo | None = None"
-    usage_tail_v09  = "    prompt_tokens_details: Optional[PromptTokenUsageInfo] = None"
+    usage_tail_v13 = "    prompt_tokens_details: PromptTokenUsageInfo | None = None"
+    usage_tail_v09 = "    prompt_tokens_details: Optional[PromptTokenUsageInfo] = None"
 
-    kv_fields = textwrap.dedent("""\
-        kv_blocks_used: int | None = Field(
-            default=None,
-            description=(
-                "GPU KV-cache blocks consumed by this request: "
-                "ceil(total_tokens / block_size). "
-                "Only populated when agent_id is present in the request."
-            ),
-        )
-        kv_blocks_size_gb: float | None = Field(
-            default=None,
-            description="GiB of GPU KV-cache used by kv_blocks_used blocks.",
-        )
-    """)
-    # Indent to match class body (4 spaces)
-    kv_fields_indented = textwrap.indent(kv_fields, "    ")
+    if need_kv_size:
+        # If vllm-ascend already defines kv_blocks_used upstream, only inject
+        # kv_blocks_size_gb (which is always unique to our patch).
+        if "kv_blocks_used" in txt:
+            kv_insert = textwrap.dedent("""\
+                kv_blocks_size_gb: float | None = Field(
+                    default=None,
+                    description="GiB of GPU KV-cache used by kv_blocks_used blocks.",
+                )
+            """)
+            kv_msg = "protocol.py: UsageInfo — kv_blocks_size_gb added (kv_blocks_used already defined upstream)"
+        else:
+            kv_insert = textwrap.dedent("""\
+                kv_blocks_used: int | None = Field(
+                    default=None,
+                    description=(
+                        "GPU KV-cache blocks consumed by this request: "
+                        "ceil(total_tokens / block_size). "
+                        "Only populated when agent_id is present in the request."
+                    ),
+                )
+                kv_blocks_size_gb: float | None = Field(
+                    default=None,
+                    description="GiB of GPU KV-cache used by kv_blocks_used blocks.",
+                )
+            """)
+            kv_msg = "protocol.py: UsageInfo — kv_blocks_used + kv_blocks_size_gb added"
 
-    if usage_tail_v13 in txt:
-        txt = _replace_once(
-            txt,
-            usage_tail_v13,
-            usage_tail_v13 + "\n" + kv_fields_indented,
-            "protocol.py (UsageInfo v0.13)",
-        )
-    elif usage_tail_v09 in txt:
-        txt = _replace_once(
-            txt,
-            usage_tail_v09,
-            usage_tail_v09 + "\n" + kv_fields_indented,
-            "protocol.py (UsageInfo v0.9)",
-        )
-    else:
-        print("[ERROR] Could not find UsageInfo.prompt_tokens_details in protocol.py",
-              file=sys.stderr)
-        sys.exit(1)
-    print("[OK]  protocol.py: UsageInfo — kv_blocks_used + kv_blocks_size_gb added")
+        kv_insert_indented = textwrap.indent(kv_insert, "    ")
+
+        if usage_tail_v13 in txt:
+            txt = _replace_once(
+                txt,
+                usage_tail_v13,
+                usage_tail_v13 + "\n" + kv_insert_indented,
+                "protocol.py (UsageInfo v0.13)",
+            )
+        elif usage_tail_v09 in txt:
+            txt = _replace_once(
+                txt,
+                usage_tail_v09,
+                usage_tail_v09 + "\n" + kv_insert_indented,
+                "protocol.py (UsageInfo v0.9)",
+            )
+        else:
+            print("[ERROR] Could not find UsageInfo.prompt_tokens_details in protocol.py",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"[OK]  {kv_msg}")
 
     # ── 2. Add agent_id to ChatCompletionRequest ──────────────────────────────
     # Strategy: find the ChatCompletionRequest class body, locate the transition
     # from fields to methods/validators (first "@" or "    def " after the class
     # header), and insert the agent_id field just before it.
-    agent_id_field = textwrap.dedent("""\
-        agent_id: str | None = Field(
-            default=None,
-            description=(
-                "Caller-supplied agent identifier. When provided, the server "
-                "returns kv_blocks_used and kv_blocks_size_gb in usage so the "
-                "caller can track per-agent GPU KV-cache consumption."
-            ),
-        )
-    """)
-    agent_id_field_indented = textwrap.indent(agent_id_field, "    ")
+    if need_agent_id:
+        agent_id_field = textwrap.dedent("""\
+            agent_id: str | None = Field(
+                default=None,
+                description=(
+                    "Caller-supplied agent identifier. When provided, the server "
+                    "returns kv_blocks_used and kv_blocks_size_gb in usage so the "
+                    "caller can track per-agent GPU KV-cache consumption."
+                ),
+            )
+        """)
+        agent_id_field_indented = textwrap.indent(agent_id_field, "    ")
 
-    # Find the ChatCompletionRequest class
-    class_match = re.search(r'\nclass ChatCompletionRequest\b', txt)
-    if not class_match:
-        print("[ERROR] class ChatCompletionRequest not found in protocol.py", file=sys.stderr)
-        sys.exit(1)
+        class_match = re.search(r'\nclass ChatCompletionRequest\b', txt)
+        if not class_match:
+            print("[ERROR] class ChatCompletionRequest not found in protocol.py", file=sys.stderr)
+            sys.exit(1)
 
-    class_start = class_match.end()
-    rest = txt[class_start:]
+        class_start = class_match.end()
+        rest = txt[class_start:]
 
-    # Find first method/validator within the class (4-space indent + @/def)
-    method_match = re.search(r'\n    (?:@|def )', rest)
-    if not method_match:
-        print("[ERROR] No method/validator found in ChatCompletionRequest", file=sys.stderr)
-        sys.exit(1)
+        # Find first method/validator within the class (4-space indent + @/def)
+        method_match = re.search(r'\n    (?:@|def )', rest)
+        if not method_match:
+            print("[ERROR] No method/validator found in ChatCompletionRequest", file=sys.stderr)
+            sys.exit(1)
 
-    insert_pos = class_start + method_match.start()
-    txt = txt[:insert_pos] + "\n" + agent_id_field_indented + txt[insert_pos:]
-    print("[OK]  protocol.py: ChatCompletionRequest — agent_id field added")
-
-    if txt.count("kv_blocks_used") > 2:
-        print("[ERROR] kv_blocks_used appears >2 times after patching — aborting to prevent double-patch",
-              file=sys.stderr)
-        print("        Inspect protocol.py manually; vLLM may already define kv_blocks_used upstream.",
-              file=sys.stderr)
-        sys.exit(1)
+        insert_pos = class_start + method_match.start()
+        txt = txt[:insert_pos] + "\n" + agent_id_field_indented + txt[insert_pos:]
+        print("[OK]  protocol.py: ChatCompletionRequest — agent_id field added")
 
     PROTO.write_text(txt)
     print(f"[OK]  protocol.py written ({PROTO})")
