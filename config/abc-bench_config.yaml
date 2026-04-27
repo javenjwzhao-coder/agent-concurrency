@@ -142,7 +142,7 @@ sidecar:
   vllm_url: "http://127.0.0.1:8027"
 
   # Poll interval in seconds.
-  interval: 5.0
+  interval: 1
 
   # Model geometry — must match vllm_config.yaml sidecar section.
   num_layers: 64        # num_hidden_layers
