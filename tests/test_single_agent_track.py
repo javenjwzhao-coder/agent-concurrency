@@ -19,11 +19,13 @@ Environment variables
 ─────────────────────
   ABC_BENCH_ROOT   (required) Path to the ABC-Bench root containing tasks/.
   ABC_BENCH_TASK   (optional) Task-name glob; defaults to the first task_* match.
+  ABC_BENCH_VENV   (optional) Benchmark venv path; defaults to ./.bench-venv.
   LLM_API_KEY      (optional) API key; defaults to "dummy" (vLLM accepts any).
   SKIP_VLLM_START  Set to "1" to assume vLLM is already running (skip launch).
 
 Run
 ───
+  # the test automatically re-runs itself inside ./.bench-venv:
   # start vLLM automatically:
   ABC_BENCH_ROOT=/data/ABC-Bench pytest tests/test_single_agent_track.py -v
 
@@ -41,12 +43,132 @@ import threading
 import time
 from pathlib import Path
 
+# ── make src/ importable without installing the package ──────────────────────
+REPO_ROOT = Path(__file__).parent.parent
+
+
+# ── benchmark venv handoff ───────────────────────────────────────────────────
+
+_BENCH_VENV = Path(os.getenv("ABC_BENCH_VENV", REPO_ROOT / ".bench-venv"))
+_BENCH_PYTHON = _BENCH_VENV / "bin" / "python"
+_BENCH_REEXEC_MARKER = "ABC_BENCH_TEST_REEXECED"
+_BENCH_TEST_REQUIREMENTS = (
+    "openhands-sdk",
+    "openhands-tools",
+    "pytest",
+    "requests",
+    "PyYAML",
+)
+_BENCH_TEST_IMPORTS = (
+    "openhands.sdk",
+    "openhands.tools.file_editor",
+    "openhands.tools.task_tracker",
+    "openhands.tools.terminal",
+    "pytest",
+    "requests",
+    "yaml",
+)
+
+
+def _path_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _running_inside_bench_venv() -> bool:
+    return _path_inside(Path(sys.executable), _BENCH_VENV)
+
+
+def _bench_dependencies_ready() -> bool:
+    if not _BENCH_PYTHON.exists():
+        return False
+    check = "\n".join(f"import {name}" for name in _BENCH_TEST_IMPORTS)
+    return subprocess.run(
+        [str(_BENCH_PYTHON), "-c", check],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=str(REPO_ROOT),
+    ).returncode == 0
+
+
+def _bootstrap_bench_venv() -> None:
+    if not _BENCH_PYTHON.exists():
+        subprocess.run(
+            ["uv", "venv", str(_BENCH_VENV), "--python", "3.12"],
+            cwd=str(REPO_ROOT),
+            check=True,
+        )
+
+    if _bench_dependencies_ready():
+        return
+
+    env = os.environ.copy()
+    env.setdefault("UV_HTTP_TIMEOUT", env.get("BENCH_UV_HTTP_TIMEOUT", "300"))
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(_BENCH_PYTHON),
+            *_BENCH_TEST_REQUIREMENTS,
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        check=True,
+    )
+
+
+def _prepare_bench_venv() -> None:
+    try:
+        _bootstrap_bench_venv()
+    except FileNotFoundError as exc:
+        missing = exc.filename or "uv"
+        raise RuntimeError(
+            f"Cannot prepare benchmark venv at {_BENCH_VENV}: {missing!r} was "
+            "not found. Install uv or run this test from an environment that "
+            "already has the benchmark dependencies."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"Cannot prepare benchmark venv at {_BENCH_VENV}; command exited "
+            f"with status {exc.returncode}: {' '.join(map(str, exc.cmd))}"
+        ) from exc
+
+
+def _reexec_in_bench_venv() -> None:
+    if _running_inside_bench_venv():
+        if not _bench_dependencies_ready():
+            _prepare_bench_venv()
+        return
+    if os.getenv(_BENCH_REEXEC_MARKER) == "1":
+        raise RuntimeError(
+            f"pytest was re-executed for the benchmark venv, but is still "
+            f"running from {sys.executable!r} instead of {_BENCH_PYTHON!s}."
+        )
+
+    _prepare_bench_venv()
+
+    env = os.environ.copy()
+    env[_BENCH_REEXEC_MARKER] = "1"
+    env["VIRTUAL_ENV"] = str(_BENCH_VENV)
+    env["PATH"] = f"{_BENCH_VENV / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+    os.execve(
+        str(_BENCH_PYTHON),
+        [str(_BENCH_PYTHON), "-m", "pytest", *sys.argv[1:]],
+        env,
+    )
+
+
+_reexec_in_bench_venv()
+
 import pytest
 import requests
 import yaml
 
-# ── make src/ importable without installing the package ──────────────────────
-REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import sidecar as _sidecar
