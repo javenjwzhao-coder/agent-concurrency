@@ -955,11 +955,13 @@ def main() -> int:
         def _get_agents() -> dict:
             with _live_lock:
                 return dict(_LIVE_AGENTS)
-        threading.Thread(
+        _sc_stop = threading.Event()
+        _sc_thread = threading.Thread(
             target=_sidecar.run_loop,
-            args=(_sc_args, _sc_bpb, _get_agents),
+            args=(_sc_args, _sc_bpb, _get_agents, _sc_stop),
             daemon=True, name="sidecar",
-        ).start()
+        )
+        _sc_thread.start()
         log.info("[sidecar] embedded sidecar started → %s", args.sidecar_log_file)
 
     task_dirs = find_task_dirs(args.dataset_root, args.task_glob)
@@ -1020,6 +1022,13 @@ def main() -> int:
 
     log.info("Done. %d agent(s) ran. Results → %s",
              len(summaries), args.results_root)
+
+    if args.sidecar_log_file:
+        log.info("[sidecar] shutting down…")
+        _sc_stop.set()
+        _sc_thread.join(timeout=args.sidecar_interval + 5)
+        log.info("[sidecar] stopped.")
+
     return 0
 
 

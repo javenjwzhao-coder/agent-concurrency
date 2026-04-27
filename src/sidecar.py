@@ -40,6 +40,7 @@ import math
 import re
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -294,7 +295,8 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
 
 
 def run_loop(args: argparse.Namespace, bytes_per_blk: int,
-             get_agents: Callable[[], dict]) -> None:
+             get_agents: Callable[[], dict],
+             stop_event: Optional[threading.Event] = None) -> None:
     """Main poll loop.
 
     Parameters
@@ -304,6 +306,8 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
     get_agents    Zero-argument callable that returns the current per-agent
                   state dict.  In embedded mode this reads _LIVE_AGENTS
                   directly; in standalone mode it reads the live-state file.
+    stop_event    Optional threading.Event; when set, the loop exits cleanly
+                  after finishing its current tick.
     """
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -315,7 +319,7 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
     print(f"[sidecar] vLLM: {args.vllm_url}", flush=True)
     print(f"[sidecar] block geometry: {bytes_per_blk} bytes/block", flush=True)
 
-    while True:
+    while stop_event is None or not stop_event.is_set():
         tick_start = time.monotonic()
 
         agents = get_agents()           # zero-copy in embedded mode
@@ -344,7 +348,11 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
 
         tick += 1
         elapsed = time.monotonic() - tick_start
-        time.sleep(max(0.0, args.interval - elapsed))
+        remaining = max(0.0, args.interval - elapsed)
+        if stop_event is not None:
+            stop_event.wait(timeout=remaining)
+        else:
+            time.sleep(remaining)
 
 
 # ─────────────────────────────────────── CLI (standalone mode) ────────────────
