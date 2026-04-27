@@ -911,6 +911,10 @@ def parse_args() -> argparse.Namespace:
     sc.add_argument("--sidecar-head-dim",     type=int, default=None)
     sc.add_argument("--sidecar-block-size",   type=int, default=16)
     sc.add_argument("--sidecar-dtype",        default="bfloat16")
+    sc.add_argument("--sidecar-total-gpu-blocks", type=int, default=0,
+                    help="Total GPU/NPU KV-cache blocks. Required when vLLM does not expose "
+                         "a block-count metric in Prometheus (e.g. vllm_ascend). "
+                         "Must match --num-gpu-blocks-override in vLLM args.")
     return p.parse_args()
 
 
@@ -942,6 +946,7 @@ def main() -> int:
             head_dim=args.sidecar_head_dim,
             block_size=args.sidecar_block_size,
             dtype=args.sidecar_dtype,
+            total_gpu_blocks=args.sidecar_total_gpu_blocks,
         )
         _sc_bpb = _sidecar.bytes_per_block(
             _sc_args.num_layers, _sc_args.num_kv_heads,

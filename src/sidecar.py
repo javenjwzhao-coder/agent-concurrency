@@ -85,7 +85,7 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _parse_vllm_kv_metrics(text: str) -> dict:
+def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
     """Extract KV-cache block statistics from Prometheus /metrics text.
 
     Covers every known metric-name variant used by standard vLLM and
@@ -205,6 +205,11 @@ def _parse_vllm_kv_metrics(text: str) -> dict:
         if any(v > 0 for v in parts):
             m["total_blocks"] = sum(parts)
 
+    # Caller-supplied fallback (e.g. from --num-gpu-blocks-override in vLLM args)
+    # used when Prometheus does not expose a total-block metric at all.
+    if "total_blocks" not in m and total_blocks_hint > 0:
+        m["total_blocks"] = total_blocks_hint
+
     # usage_pct from used / total (when only block gauges are present).
     if "usage_pct" not in m:
         used  = m.get("used_blocks")
@@ -249,13 +254,14 @@ def _file_agent_reader(path: Path) -> Callable[[], dict]:
 _kv_metric_warn_emitted = False
 
 
-def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> dict:
+def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
+              total_blocks_hint: int = 0) -> dict:
     """Fetch /metrics and return global KV cache statistics."""
     global _kv_metric_warn_emitted
     try:
         resp = session.get(f"{vllm_url}/metrics", timeout=5)
         resp.raise_for_status()
-        kv = _parse_vllm_kv_metrics(resp.text)
+        kv = _parse_vllm_kv_metrics(resp.text, total_blocks_hint=total_blocks_hint)
 
         used_pct   = kv.get("usage_pct")    # 0..1
         total_blks = kv.get("total_blocks")
@@ -316,7 +322,8 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
         record = {
             "ts":     iso_utc(now_utc()),
             "tick":   tick,
-            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk),
+            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk,
+                                 getattr(args, "total_gpu_blocks", 0)),
             "agents": agents,
         }
 
@@ -362,6 +369,10 @@ def parse_args() -> argparse.Namespace:
     geo.add_argument("--head-dim",     type=int, required=True)
     geo.add_argument("--block-size",   type=int, default=16)
     geo.add_argument("--dtype",        default="bfloat16", choices=list(_DTYPE_BYTES))
+    geo.add_argument("--total-gpu-blocks", type=int, default=0,
+                     help="Total GPU/NPU KV-cache blocks. Required when vLLM does not expose "
+                          "a block-count metric in Prometheus (e.g. vllm_ascend with only a "
+                          "usage-%% gauge). Must match --num-gpu-blocks-override in vLLM args.")
 
     return p.parse_args()
 
