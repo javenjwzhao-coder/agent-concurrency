@@ -501,6 +501,13 @@ def find_task_dirs(dataset_root: Path, task_glob: str) -> list[Path]:
     return sorted(p for p in root.glob(task_glob) if p.is_dir())
 
 
+def expand_tasks_round_robin(task_dirs: list[Path], max_tasks: int) -> list[Path]:
+    """Return up to max_tasks entries, repeating task_dirs in round-robin if needed."""
+    if not task_dirs or max_tasks <= 0:
+        return []
+    return [task_dirs[i % len(task_dirs)] for i in range(max_tasks)]
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -789,6 +796,7 @@ def launch_agents(
     executor = ThreadPoolExecutor(max_workers=args.max_concurrent or 8)
     futures = []
     wave_start = time.monotonic()
+    global_idx = 0  # unique across all agents in all waves
 
     for wave_idx, (delay_s, task_batch) in enumerate(waves):
         # Sleep until this wave's scheduled time.
@@ -800,9 +808,10 @@ def launch_agents(
 
         scheduled_dt = now_utc()
         for task_dir in task_batch:
-            agent_id = f"agent_{task_dir.name}_w{wave_idx}"
+            agent_id = f"agent_{task_dir.name}_w{wave_idx}_{global_idx}"
             work_dir = copy_task_to_workspace(
-                task_dir, args.workspace_root, suffix=f"_w{wave_idx}")
+                task_dir, args.workspace_root, suffix=f"_w{wave_idx}_{global_idx}")
+            global_idx += 1
             result_dir = args.results_root / task_dir.name
 
             fut = executor.submit(
@@ -969,7 +978,12 @@ def main() -> int:
         print(f"ERROR: no tasks found under {args.dataset_root} "
               f"with glob {args.task_glob}", file=sys.stderr)
         return 2
-    task_dirs = task_dirs[:args.max_tasks]
+    if args.max_tasks > len(task_dirs):
+        log.info(
+            "max_tasks=%d > available tasks=%d — repeating in round-robin",
+            args.max_tasks, len(task_dirs),
+        )
+    task_dirs = expand_tasks_round_robin(task_dirs, args.max_tasks)
 
     args.workspace_root.mkdir(parents=True, exist_ok=True)
     args.results_root.mkdir(parents=True, exist_ok=True)
@@ -991,9 +1005,9 @@ def main() -> int:
     else:
         # Sequential fallback (one agent at a time).
         summaries = []
-        for task_dir in task_dirs:
-            agent_id = f"agent_{task_dir.name}_seq"
-            work_dir = copy_task_to_workspace(task_dir, args.workspace_root)
+        for seq_idx, task_dir in enumerate(task_dirs):
+            agent_id = f"agent_{task_dir.name}_seq{seq_idx}"
+            work_dir = copy_task_to_workspace(task_dir, args.workspace_root, suffix=f"_seq{seq_idx}")
             result_dir = args.results_root / task_dir.name
             result_dir.mkdir(parents=True, exist_ok=True)
             try:

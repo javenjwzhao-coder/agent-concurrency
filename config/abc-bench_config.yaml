@@ -112,7 +112,7 @@ testing:
 # Optional: run the tool-duration predictor automatically after the agents
 # finish.  Set enabled: false to skip.
 prediction:
-  enabled: false
+  enabled: true
 
   # Model type: "ridge" (fast, interpretable) or "rf" (random forest).
   model: "rf"
