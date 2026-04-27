@@ -104,7 +104,7 @@ def _patch_via_regex_usage_block(
 
 def patch_protocol() -> None:
     txt = PROTO.read_text()
-    if "kv_blocks_used" in txt and "agent_id" in txt:
+    if "kv_blocks_size_gb" in txt and "agent_id" in txt:
         print("[SKIP] protocol.py already patched")
         return
 
@@ -186,9 +186,12 @@ def patch_protocol() -> None:
     txt = txt[:insert_pos] + "\n" + agent_id_field_indented + txt[insert_pos:]
     print("[OK]  protocol.py: ChatCompletionRequest — agent_id field added")
 
-    # Guard: don't double-patch
     if txt.count("kv_blocks_used") > 2:
-        print("[WARN]  kv_blocks_used appears >2 times — possible double-patch")
+        print("[ERROR] kv_blocks_used appears >2 times after patching — aborting to prevent double-patch",
+              file=sys.stderr)
+        print("        Inspect protocol.py manually; vLLM may already define kv_blocks_used upstream.",
+              file=sys.stderr)
+        sys.exit(1)
 
     PROTO.write_text(txt)
     print(f"[OK]  protocol.py written ({PROTO})")

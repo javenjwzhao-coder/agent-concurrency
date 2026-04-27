@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Platform
+
+This project runs on **Ascend NPU** hardware. The inference backend is **vllm-ascend** (not upstream vLLM). All vLLM patches, config, and references to vLLM behaviour apply to the vllm-ascend fork. When investigating vLLM internals or applying patches, always target the vllm-ascend codebase.
+
 ## Project Purpose
 
 This is an **ABC-Bench agent tracing and tool-duration prediction framework**. It runs concurrent AI agents against the [ABC-Bench](https://github.com/javenjwzhao-coder/agent-concurrency) coding benchmark, records granular execution traces of agent phase transitions (reasoning → tool_call → waiting), then optionally trains ML models to predict tool execution duration.
