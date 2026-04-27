@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -218,6 +219,30 @@ BYTES_PER_BLK = _sidecar.bytes_per_block(
     dtype        = _SC["dtype"],
 )
 
+
+def _total_blocks_hint() -> int:
+    env_hint = os.getenv("SIDECAR_TOTAL_GPU_BLOCKS")
+    if env_hint:
+        try:
+            return int(env_hint)
+        except ValueError:
+            pass
+
+    bench_cfg = REPO_ROOT / "config" / "abc-bench_config.yaml"
+    if bench_cfg.exists():
+        cfg = yaml.safe_load(bench_cfg.read_text()) or {}
+        try:
+            return int((cfg.get("sidecar") or {}).get("total_gpu_blocks") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    extra_args = str((_VLLM_CFG.get("native") or {}).get("extra_args") or "")
+    match = re.search(r"--num-gpu-blocks-override\s+(\d+)", extra_args)
+    return int(match.group(1)) if match else 0
+
+
+TOTAL_BLOCKS_HINT = _total_blocks_hint()
+
 # LiteLLM expects "openai/<model-name>" for OpenAI-compatible endpoints.
 _RAW_MODEL  = _VLLM_CFG["native"]["served_model_name"]  # e.g. Qwen/Qwen3-30B-A3B-Instruct-2507
 LLM_MODEL   = f"openai/{_RAW_MODEL.split('/')[-1]}"  # e.g. openai/Qwen3-30B-A3B-Instruct-2507
@@ -231,7 +256,10 @@ def _fetch_metrics() -> dict[str, float]:
     try:
         r = requests.get(f"{VLLM_URL}/metrics", timeout=5)
         r.raise_for_status()
-        kv = _sidecar._parse_vllm_kv_metrics(r.text)
+        kv = _sidecar._parse_vllm_kv_metrics(
+            r.text,
+            total_blocks_hint=TOTAL_BLOCKS_HINT,
+        )
         return {
             key: float(value)
             for key, value in kv.items()
@@ -422,6 +450,7 @@ def test_single_agent_kv_tracking(vllm_running, task_dir, tmp_path):
     assert peak_prom_blocks >= kv_blocks, (
         f"Prometheus peak blocks ({peak_prom_blocks}) < "
         f"agent kv_blocks_used ({kv_blocks}).\n"
+        f"  total_blocks_hint               : {TOTAL_BLOCKS_HINT}\n"
         f"  Prometheus total_blocks peak      : {total_blks}\n"
         f"  Prometheus usage_pct peak         : {used_pct:.4f}\n"
         f"  Prometheus used_blocks peak       : {peak_prom_blocks}\n"
