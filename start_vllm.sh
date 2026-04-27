@@ -163,7 +163,7 @@ PY
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
           $EXTRA
-    ) # > /dev/null 2>&1 &
+    ) > /dev/null 2>&1 &
     echo $! > "$PID_FILE"
     echo "[INFO] vLLM PID: $(cat $PID_FILE)"
 }
