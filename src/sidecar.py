@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import signal
 import sys
@@ -53,12 +54,26 @@ _DTYPE_BYTES: dict[str, int] = {
     "float8_e4m3fn": 1, "float8_e5m2": 1, "int8": 1,
 }
 
-_METRIC_USAGE_PCT  = "vllm:gpu_cache_usage_perc"
-_METRIC_TOTAL_BLKS = "vllm:num_gpu_blocks"
+# Metric name candidates — tried in order; first match wins.
+# vllm_ascend (Ascend NPU fork) may emit "npu" variants instead of "gpu".
+_METRIC_USAGE_PCT_CANDIDATES  = [
+    "vllm:gpu_cache_usage_perc",   # standard vLLM (GPU)
+    "vllm:npu_cache_usage_perc",   # vllm-ascend (Ascend NPU)
+]
+_METRIC_TOTAL_BLKS_CANDIDATES = [
+    "vllm:num_gpu_blocks",         # standard vLLM (GPU)
+    "vllm:num_npu_blocks",         # vllm-ascend (Ascend NPU)
+]
 
 # Matches one Prometheus text-format sample line, e.g.:
 #   vllm:gpu_cache_usage_perc{model_name="..."} 0.452
-_PROM_RE = re.compile(r'^([\w:]+)(?:\{[^}]*\})?\s+([\d.eE+\-]+)', re.MULTILINE)
+#   vllm:gpu_cache_usage_perc{model_name="..."} NaN
+# Prometheus allows NaN / +Inf / -Inf as sample values; include them so we
+# don't silently skip metrics that haven't been initialised yet.
+_PROM_RE = re.compile(
+    r'^([\w:]+)(?:\{[^}]*\})?\s+(NaN|[+-]?Inf|[\d.eE+\-]+)',
+    re.MULTILINE,
+)
 
 # ─────────────────────────────────────── helpers ──────────────────────────────
 
@@ -71,13 +86,25 @@ def iso_utc(dt: datetime) -> str:
 
 
 def parse_prometheus(text: str) -> dict[str, float]:
-    """Parse Prometheus text format → {metric_name: first_sample_value}."""
+    """Parse Prometheus text format → {metric_name: first_finite_sample_value}.
+
+    NaN / ±Inf samples are kept as-is (math.isfinite can filter them later).
+    """
     result: dict[str, float] = {}
     for m in _PROM_RE.finditer(text):
         name = m.group(1)
         if name not in result:
             result[name] = float(m.group(2))
     return result
+
+
+def _first_metric(metrics: dict[str, float], candidates: list[str]) -> Optional[float]:
+    """Return the first finite value found among candidate metric names, or None."""
+    for name in candidates:
+        val = metrics.get(name)
+        if val is not None and math.isfinite(val):
+            return val
+    return None
 
 
 def bytes_per_block(num_layers: int, num_kv_heads: int, head_dim: int,
@@ -102,15 +129,32 @@ def _file_agent_reader(path: Path) -> Callable[[], dict]:
 
 # ─────────────────────────────────────── core loop ────────────────────────────
 
+# Tracks whether we've already emitted the "no KV metrics found" diagnostic.
+_kv_metric_warn_emitted = False
+
+
 def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> dict:
     """Fetch /metrics and return global KV cache statistics."""
+    global _kv_metric_warn_emitted
     try:
         resp = session.get(f"{vllm_url}/metrics", timeout=5)
         resp.raise_for_status()
         metrics = parse_prometheus(resp.text)
 
-        used_pct   = metrics.get(_METRIC_USAGE_PCT)
-        total_blks = metrics.get(_METRIC_TOTAL_BLKS)
+        used_pct   = _first_metric(metrics, _METRIC_USAGE_PCT_CANDIDATES)
+        total_blks = _first_metric(metrics, _METRIC_TOTAL_BLKS_CANDIDATES)
+
+        if used_pct is None and total_blks is None and not _kv_metric_warn_emitted:
+            _kv_metric_warn_emitted = True
+            known = sorted(k for k in metrics if k.startswith("vllm:"))
+            print(
+                "[sidecar] WARNING: KV cache metrics not found in /metrics response.\n"
+                f"          Tried usage: {_METRIC_USAGE_PCT_CANDIDATES}\n"
+                f"          Tried blocks: {_METRIC_TOTAL_BLKS_CANDIDATES}\n"
+                f"          vllm: metrics present: {known[:20]}",
+                flush=True,
+            )
+
         used_blks: Optional[int] = (
             round(total_blks * used_pct)
             if (total_blks is not None and used_pct is not None) else None
