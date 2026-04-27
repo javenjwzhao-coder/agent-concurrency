@@ -276,7 +276,11 @@ def vllm_running():
 
     if os.getenv("SKIP_VLLM_START") == "1":
         try:
-            requests.get(f"{VLLM_URL}/v1/models", timeout=10).raise_for_status()
+            requests.get(
+                f"{VLLM_URL}/v1/models",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                timeout=10,
+            ).raise_for_status()
         except Exception as exc:
             pytest.fail(
                 f"SKIP_VLLM_START=1 but vLLM is unreachable at {VLLM_URL}: {exc}"
