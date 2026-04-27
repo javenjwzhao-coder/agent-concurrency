@@ -47,6 +47,14 @@ from typing import Callable, Optional
 
 import requests
 
+# Optional: prometheus_client gives robust label-aware Prometheus parsing.
+# Falls back to a regex approach that extracts the device= label manually.
+try:
+    from prometheus_client.parser import text_string_to_metric_families as _prom_parse
+    _HAS_PROM_CLIENT = True
+except ImportError:
+    _HAS_PROM_CLIENT = False
+
 # ─────────────────────────────────────── constants ────────────────────────────
 
 _DTYPE_BYTES: dict[str, int] = {
@@ -54,26 +62,18 @@ _DTYPE_BYTES: dict[str, int] = {
     "float8_e4m3fn": 1, "float8_e5m2": 1, "int8": 1,
 }
 
-# Metric name candidates — tried in order; first match wins.
-# vllm_ascend (Ascend NPU fork) may emit "npu" variants instead of "gpu".
-_METRIC_USAGE_PCT_CANDIDATES  = [
-    "vllm:gpu_cache_usage_perc",   # standard vLLM (GPU)
-    "vllm:npu_cache_usage_perc",   # vllm-ascend (Ascend NPU)
-]
-_METRIC_TOTAL_BLKS_CANDIDATES = [
-    "vllm:num_gpu_blocks",         # standard vLLM (GPU)
-    "vllm:num_npu_blocks",         # vllm-ascend (Ascend NPU)
-]
+# Device label values that map to the primary (NPU/GPU) accelerator.
+_ACCEL_DEVICES = {"gpu", "GPU", "npu", "NPU"}
 
-# Matches one Prometheus text-format sample line, e.g.:
-#   vllm:gpu_cache_usage_perc{model_name="..."} 0.452
-#   vllm:gpu_cache_usage_perc{model_name="..."} NaN
-# Prometheus allows NaN / +Inf / -Inf as sample values; include them so we
-# don't silently skip metrics that haven't been initialised yet.
+# Regex fallback: captures name, full label string, and value.
+# Prometheus allows NaN / ±Inf as sample values; include them so we never
+# silently drop uninitialised gauges.
 _PROM_RE = re.compile(
-    r'^([\w:]+)(?:\{[^}]*\})?\s+(NaN|[+-]?Inf|[\d.eE+\-]+)',
+    r'^([\w:]+)(\{[^}]*\})?\s+(NaN|[+-]?Inf|[\d.eE+\-]+)',
     re.MULTILINE,
 )
+# Extracts device="<val>" from a label string.
+_DEVICE_RE = re.compile(r'\bdevice="([^"]*)"')
 
 # ─────────────────────────────────────── helpers ──────────────────────────────
 
@@ -85,26 +85,142 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def parse_prometheus(text: str) -> dict[str, float]:
-    """Parse Prometheus text format → {metric_name: first_finite_sample_value}.
+def _parse_vllm_kv_metrics(text: str) -> dict:
+    """Extract KV-cache block statistics from Prometheus /metrics text.
 
-    NaN / ±Inf samples are kept as-is (math.isfinite can filter them later).
+    Covers every known metric-name variant used by standard vLLM and
+    vllm_ascend (Ascend NPU fork), including label-keyed block-manager gauges
+    like vllm:block_manager_num_used_blocks{device="npu"}.
+
+    Uses prometheus_client for label-aware parsing when available; otherwise
+    falls back to a regex that manually extracts the device= label.
+
+    Returned keys (any may be absent if the metric was not found):
+        usage_pct     – fractional cache usage 0..1  (derived when missing)
+        total_blocks  – total KV-cache blocks         (derived when missing)
+        used_blocks   – actively allocated blocks
+        free_blocks   – blocks in the free pool
+        cached_blocks – prefix-cached blocks still in VRAM
+        vllm_names    – all vllm: metric names seen (for diagnostics)
     """
-    result: dict[str, float] = {}
-    for m in _PROM_RE.finditer(text):
-        name = m.group(1)
-        if name not in result:
-            result[name] = float(m.group(2))
-    return result
+    m: dict = {}
+    seen: list[str] = []
 
+    def _set_usage(val: float) -> None:
+        m.setdefault("usage_pct", val)
 
-def _first_metric(metrics: dict[str, float], candidates: list[str]) -> Optional[float]:
-    """Return the first finite value found among candidate metric names, or None."""
-    for name in candidates:
-        val = metrics.get(name)
-        if val is not None and math.isfinite(val):
-            return val
-    return None
+    def _set_total(val: float) -> None:
+        m.setdefault("total_blocks", int(val))
+
+    def _set_used(val: float) -> None:
+        m.setdefault("used_blocks", int(val))
+
+    def _set_free(val: float) -> None:
+        m.setdefault("free_blocks", int(val))
+
+    def _set_cached(val: float) -> None:
+        m.setdefault("cached_blocks", int(val))
+
+    if _HAS_PROM_CLIENT:
+        for family in _prom_parse(text):
+            for sample in family.samples:
+                name = sample.name
+                val  = sample.value
+                if name.startswith("vllm:") and name not in seen:
+                    seen.append(name)
+                if not math.isfinite(val):
+                    continue
+                device = (sample.labels or {}).get("device", "")
+
+                if name in ("vllm:gpu_cache_usage_perc",
+                            "vllm:npu_cache_usage_perc",
+                            "vllm:kv_cache_usage_perc"):
+                    _set_usage(val)
+                elif name in ("vllm:num_gpu_blocks", "vllm:num_npu_blocks"):
+                    _set_total(val)
+                elif name in ("vllm:num_gpu_blocks_used",
+                              "vllm:gpu_blocks_used",
+                              "vllm:block_manager_gpu_used_blocks"):
+                    _set_used(val)
+                elif name == "vllm:block_manager_num_used_blocks" and device in _ACCEL_DEVICES:
+                    _set_used(val)
+                elif name in ("vllm:num_gpu_blocks_free",
+                              "vllm:gpu_blocks_free",
+                              "vllm:block_manager_gpu_free_blocks"):
+                    _set_free(val)
+                elif name == "vllm:block_manager_num_free_blocks" and device in _ACCEL_DEVICES:
+                    _set_free(val)
+                elif name in ("vllm:num_gpu_blocks_cached",
+                              "vllm:gpu_blocks_cached",
+                              "vllm:block_manager_gpu_cached_blocks",
+                              "vllm:prefix_cache_num_blocks"):
+                    _set_cached(val)
+                elif name == "vllm:block_manager_num_cached_blocks" and device in _ACCEL_DEVICES:
+                    _set_cached(val)
+
+    else:
+        # Regex fallback — extracts device= label manually.
+        for match in _PROM_RE.finditer(text):
+            name      = match.group(1)
+            label_str = match.group(2) or ""
+            val_str   = match.group(3)
+            if name.startswith("vllm:") and name not in seen:
+                seen.append(name)
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+            if not math.isfinite(val):
+                continue
+            dm     = _DEVICE_RE.search(label_str)
+            device = dm.group(1) if dm else ""
+
+            if name in ("vllm:gpu_cache_usage_perc",
+                        "vllm:npu_cache_usage_perc",
+                        "vllm:kv_cache_usage_perc"):
+                _set_usage(val)
+            elif name in ("vllm:num_gpu_blocks", "vllm:num_npu_blocks"):
+                _set_total(val)
+            elif name in ("vllm:num_gpu_blocks_used", "vllm:gpu_blocks_used",
+                          "vllm:block_manager_gpu_used_blocks"):
+                _set_used(val)
+            elif name == "vllm:block_manager_num_used_blocks" and device in _ACCEL_DEVICES:
+                _set_used(val)
+            elif name in ("vllm:num_gpu_blocks_free", "vllm:gpu_blocks_free",
+                          "vllm:block_manager_gpu_free_blocks"):
+                _set_free(val)
+            elif name == "vllm:block_manager_num_free_blocks" and device in _ACCEL_DEVICES:
+                _set_free(val)
+            elif name in ("vllm:num_gpu_blocks_cached", "vllm:gpu_blocks_cached",
+                          "vllm:block_manager_gpu_cached_blocks",
+                          "vllm:prefix_cache_num_blocks"):
+                _set_cached(val)
+            elif name == "vllm:block_manager_num_cached_blocks" and device in _ACCEL_DEVICES:
+                _set_cached(val)
+
+    # ── Derive missing values from what we have ────────────────────────────────
+    # Total from component gauges.
+    if "total_blocks" not in m:
+        parts = [m.get(k, 0) for k in ("used_blocks", "cached_blocks", "free_blocks")]
+        if any(v > 0 for v in parts):
+            m["total_blocks"] = sum(parts)
+
+    # usage_pct from used / total (when only block gauges are present).
+    if "usage_pct" not in m:
+        used  = m.get("used_blocks")
+        total = m.get("total_blocks")
+        if used is not None and total:
+            m["usage_pct"] = used / total
+
+    # used_blocks from usage_pct × total (when only the percentage is present).
+    if "used_blocks" not in m:
+        pct   = m.get("usage_pct")
+        total = m.get("total_blocks")
+        if pct is not None and total:
+            m["used_blocks"] = round(total * pct)
+
+    m["vllm_names"] = seen
+    return m
 
 
 def bytes_per_block(num_layers: int, num_kv_heads: int, head_dim: int,
@@ -139,26 +255,21 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> d
     try:
         resp = session.get(f"{vllm_url}/metrics", timeout=5)
         resp.raise_for_status()
-        metrics = parse_prometheus(resp.text)
+        kv = _parse_vllm_kv_metrics(resp.text)
 
-        used_pct   = _first_metric(metrics, _METRIC_USAGE_PCT_CANDIDATES)
-        total_blks = _first_metric(metrics, _METRIC_TOTAL_BLKS_CANDIDATES)
+        used_pct   = kv.get("usage_pct")    # 0..1
+        total_blks = kv.get("total_blocks")
+        used_blks  = kv.get("used_blocks")
 
         if used_pct is None and total_blks is None and not _kv_metric_warn_emitted:
             _kv_metric_warn_emitted = True
-            known = sorted(k for k in metrics if k.startswith("vllm:"))
             print(
                 "[sidecar] WARNING: KV cache metrics not found in /metrics response.\n"
-                f"          Tried usage: {_METRIC_USAGE_PCT_CANDIDATES}\n"
-                f"          Tried blocks: {_METRIC_TOTAL_BLKS_CANDIDATES}\n"
-                f"          vllm: metrics present: {known[:20]}",
+                f"          prometheus_client available: {_HAS_PROM_CLIENT}\n"
+                f"          vllm: metrics present: {sorted(kv.get('vllm_names', []))[:30]}",
                 flush=True,
             )
 
-        used_blks: Optional[int] = (
-            round(total_blks * used_pct)
-            if (total_blks is not None and used_pct is not None) else None
-        )
         total_gb: Optional[float] = (
             round(total_blks * bytes_per_blk / 1e9, 3) if total_blks is not None else None
         )
