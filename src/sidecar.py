@@ -200,16 +200,18 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                 _set_cached(val)
 
     # ── Derive missing values from what we have ────────────────────────────────
-    # Total from component gauges.
-    if "total_blocks" not in m:
+    # Caller-supplied hint (from --num-gpu-blocks-override / total_gpu_blocks in
+    # config) takes priority over any Prometheus-derived value. vllm-ascend may
+    # expose a block-count metric that reflects the physical NPU allocation
+    # rather than the scheduler-level limit set by the override, so the hint is
+    # the ground truth when provided.
+    if total_blocks_hint > 0:
+        m["total_blocks"] = total_blocks_hint
+    elif "total_blocks" not in m:
+        # Derive from component gauges when no hint is given.
         parts = [m.get(k, 0) for k in ("used_blocks", "cached_blocks", "free_blocks")]
         if any(v > 0 for v in parts):
             m["total_blocks"] = sum(parts)
-
-    # Caller-supplied fallback (e.g. from --num-gpu-blocks-override in vLLM args)
-    # used when Prometheus does not expose a total-block metric at all.
-    if "total_blocks" not in m and total_blocks_hint > 0:
-        m["total_blocks"] = total_blocks_hint
 
     # usage_pct from used / total (when only block gauges are present).
     if "usage_pct" not in m:

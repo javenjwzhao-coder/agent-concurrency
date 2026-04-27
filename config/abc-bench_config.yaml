@@ -150,9 +150,9 @@ sidecar:
   head_dim: 128         # head dimension
   block_size: 128       # must match --block-size passed to vllm serve
   dtype: "bfloat16"     # must match native.dtype in vllm_config.yaml
-  # Total KV-cache blocks allocated by vLLM. Required when vllm_ascend does not
-  # expose a block-count Prometheus metric (only a usage-% gauge is available).
-  # Must match --num-gpu-blocks-override in vllm_config.yaml extra_args.
+  # Total KV-cache blocks as set by --num-gpu-blocks-override in vllm_config.yaml.
+  # This overrides any value reported by vllm-ascend's Prometheus metrics, which
+  # may reflect the physical NPU allocation rather than the scheduler-level limit.
   total_gpu_blocks: 1000
 
 
