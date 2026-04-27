@@ -85,9 +85,49 @@ _REMAINING_FRACS: list[float] = [0.0, 0.10, 0.25, 0.50, 0.75]
 
 # ─────────────────────────── feature engineering ─────────────────────────────
 
+# Top file-extensions we one-hot for FileEditor `path` arguments.
+_TOP_EXTS: tuple[str, ...] = ("py", "js", "ts", "rs", "go", "md")
+
+
 def _kw(text: str, keywords: list[str]) -> int:
     lower = text.lower()
     return int(any(kw in lower for kw in keywords))
+
+
+def _parse_args(s: str) -> dict:
+    """Best-effort decode of the tool_args_json column. Returns {} on failure."""
+    if not isinstance(s, str) or not s:
+        return {}
+    try:
+        parsed = json.loads(s)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _path_ext(path: str) -> str:
+    if not isinstance(path, str) or not path:
+        return ""
+    return Path(path).suffix.lstrip(".").lower()
+
+
+def _view_range_size(d: dict) -> int:
+    vr = d.get("view_range") if isinstance(d, dict) else None
+    if isinstance(vr, (list, tuple)) and len(vr) == 2:
+        try:
+            return max(0, int(vr[1]) - int(vr[0]))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _timeout(d: dict) -> float:
+    if not isinstance(d, dict):
+        return 0.0
+    try:
+        return float(d.get("timeout", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFrame:
@@ -129,6 +169,69 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
     feat["prior_avg_tool_s"]       = 0.0
     feat["prior_tool_max_s"]       = 0.0
     feat["prior_tool_std_s"]       = 0.0
+
+    # ── Structured action-args features (mine tool_args_json) ────────────────
+    if "tool_args_json" in df.columns:
+        args_series = df["tool_args_json"].fillna("").astype(str).map(_parse_args)
+    else:
+        args_series = pd.Series([{}] * len(df), index=df.index)
+
+    tn = feat["tool_name"]
+    feat["is_terminal"]     = (tn == "terminal").astype(int)
+    feat["is_file_editor"]  = (tn == "file_editor").astype(int)
+    feat["is_task_tracker"] = (tn == "task_tracker").astype(int)
+
+    feat["args_key_count"] = args_series.map(len).astype(int)
+    feat["args_total_str_bytes"] = args_series.map(
+        lambda d: sum(len(str(v)) for v in d.values())
+    ).astype(int)
+
+    # FileEditor sub-command (zero unless tool is file_editor)
+    sub_cmd = args_series.map(lambda d: str(d.get("command", "")))
+    is_fe   = feat["is_file_editor"].astype(bool)
+    feat["editor_cmd_view"]        = (is_fe & (sub_cmd == "view")).astype(int)
+    feat["editor_cmd_create"]      = (is_fe & (sub_cmd == "create")).astype(int)
+    feat["editor_cmd_str_replace"] = (
+        is_fe & sub_cmd.isin(["str_replace", "str_replace_based_edit_tool"])
+    ).astype(int)
+    feat["editor_cmd_insert"]      = (is_fe & (sub_cmd == "insert")).astype(int)
+
+    # Path extension one-hot (file_editor only)
+    ed_ext = args_series.map(lambda d: _path_ext(str(d.get("path", ""))))
+    for ext in _TOP_EXTS:
+        feat[f"path_ext_{ext}"] = (is_fe & (ed_ext == ext)).astype(int)
+    feat["path_ext_other"] = (
+        is_fe & ed_ext.ne("") & ~ed_ext.isin(list(_TOP_EXTS))
+    ).astype(int)
+
+    # Edit-size signals
+    feat["old_str_len"]     = args_series.map(
+        lambda d: len(str(d.get("old_str", "")))
+    ).astype(int)
+    feat["new_str_len"]     = args_series.map(
+        lambda d: len(str(d.get("new_str", "")))
+    ).astype(int)
+    feat["edit_size_delta"] = (feat["new_str_len"] - feat["old_str_len"]).abs()
+    feat["file_text_len"]   = args_series.map(
+        lambda d: len(str(d.get("file_text", "")))
+    ).astype(int)
+    feat["view_range_size"] = args_series.map(_view_range_size).astype(int)
+
+    # Terminal-specific
+    is_term = feat["is_terminal"].astype(bool)
+    feat["terminal_timeout_s"] = (args_series.map(_timeout) * is_term).astype(float)
+
+    # TaskTracker sub-command
+    is_tt = feat["is_task_tracker"].astype(bool)
+    feat["tracker_cmd_add"]      = (
+        is_tt & sub_cmd.isin(["add_task", "add"])
+    ).astype(int)
+    feat["tracker_cmd_list"]     = (
+        is_tt & sub_cmd.isin(["list_tasks", "view"])
+    ).astype(int)
+    feat["tracker_cmd_complete"] = (
+        is_tt & sub_cmd.isin(["mark_complete", "complete"])
+    ).astype(int)
 
     if remaining_mode:
         # Set to 0 here; overwritten per-snapshot in augment_remaining()
