@@ -103,6 +103,7 @@ _BENCH_ROOT_DEFAULTS = (REPO_ROOT.parent / "tasks", REPO_ROOT / "tasks")
 
 def _set_defaults() -> None:
     os.environ.setdefault("LLM_API_KEY", "sk-local-ascend")
+    os.environ.setdefault("PREDICTOR_TRACE_DIR", str(Path(__file__).parent))
     if not os.getenv("ABC_BENCH_ROOT"):
         for c in _BENCH_ROOT_DEFAULTS:
             if c.is_dir():
@@ -347,7 +348,11 @@ class _Split(NamedTuple):
     full_df: pd.DataFrame   # entire trace (for sequential context)
 
 
-def _build_split(trace_dir: Path, seed: int = 42) -> _Split:
+def _build_split(
+    trace_dir: Path,
+    seed: int = 42,
+    out_csv: Path | None = None,
+) -> _Split:
     """
     Load all *_trace.csv files from trace_dir, build raw (pre-encoded)
     features for every tool_call row, split 70 / 30 by row index.
@@ -356,6 +361,9 @@ def _build_split(trace_dir: Path, seed: int = 42) -> _Split:
     0 for every row.  Both are handled at inference time by RealtimePredictor.
     The split is deterministic via the fixed seed so both test functions see
     the same partition.
+
+    If out_csv is given, the full feature DataFrame (all rows, before the
+    split) is written there alongside key trace columns for inspection.
     """
     full_df = load_traces(trace_dir)
     tool_df = (
@@ -371,6 +379,18 @@ def _build_split(trace_dir: Path, seed: int = 42) -> _Split:
 
     feat = build_features(tool_df, remaining_mode=True)
     feat = enrich_sequential_features(full_df, feat).reset_index(drop=True)
+
+    if out_csv is not None:
+        _TRACE_META = ["agent_id", "task_id", "phase_seq", "tool_name",
+                       "tool_command", "duration_s", "outcome"]
+        meta_cols   = [c for c in _TRACE_META if c in tool_df.columns]
+        out_df = pd.concat(
+            [tool_df[meta_cols].reset_index(drop=True), feat],
+            axis=1,
+        )
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_df.to_csv(out_csv, index=False)
+        print(f"\n[features] Full feature table ({len(out_df)} rows) → {out_csv}")
 
     n      = len(tool_df)
     idx    = np.random.default_rng(seed).permutation(n)
@@ -494,7 +514,8 @@ def saved_model(trace_dir):
       • PREDICTOR_MODEL_FILE   if the env var is set
       • <trace_dir>/duration_predictor.joblib  otherwise
     """
-    split = _build_split(trace_dir)
+    features_csv = trace_dir / "tool_call_features.csv"
+    split = _build_split(trace_dir, out_csv=features_csv)
 
     if split.feat_tr.empty:
         pytest.skip("No tool-call rows found in traces")
