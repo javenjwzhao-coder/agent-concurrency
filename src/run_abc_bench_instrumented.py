@@ -224,6 +224,7 @@ class AgentPhaseTracker:
         self.scheduled_dt = scheduled_dt   # when the launch was *scheduled*
 
         self.records: list[PhaseRecord] = []
+        self._event_log_lines: list[str] = []
         self._seq = 0
         self._current_phase: Optional[str] = None
         self._phase_start_dt: Optional[datetime] = None
@@ -359,6 +360,9 @@ class AgentPhaseTracker:
                     start_dt=event_dt,
                     detail=getattr(event, "summary", "") or tool_name,
                 )
+
+                # Human-readable event log (separate from the CSV).
+                self._log_action(event, raw_args, event_dt)
                 return
 
             # ── observation event: tool call completed ──
@@ -391,10 +395,13 @@ class AgentPhaseTracker:
                         conversation_id=self._conversation_id,
                     ))
                     self._seq += 1
+                    self._log_observation(event, outcome,
+                                          max(dur, 0.0), event_dt)
                 else:
                     # No matching pending action – close generically.
                     self._close_phase(event_dt, outcome=outcome,
                                       detail="tool result (no matching action)")
+                    self._log_observation(event, outcome, 0.0, event_dt)
 
                 # After a tool result the LLM starts reasoning again.
                 self._open_phase("reasoning", event_dt)
@@ -425,6 +432,69 @@ class AgentPhaseTracker:
                 except (json.JSONDecodeError, TypeError):
                     return {"raw": str(val)}
         return {}
+
+    @staticmethod
+    def _extract_observation_content(event: Any) -> str:
+        """Best-effort string content from an ObservationEvent."""
+        for attr in ("content", "output", "result", "text", "observation",
+                     "data", "stdout", "message"):
+            val = getattr(event, attr, None)
+            if val is not None and val != "":
+                return str(val)
+        return ""
+
+    def _log_action(self, event: ActionEvent, raw_args: dict, event_dt: datetime) -> None:
+        tool   = getattr(event, "tool_name", "unknown") or "unknown"
+        kind   = type(event).__name__
+        action = getattr(event, "action", None)
+        action_kind = type(action).__name__ if action is not None else kind
+        summary = (getattr(event, "summary", "") or "").strip()
+
+        lines = [
+            "═" * 8 + " Agent Action " + "═" * 8,
+            f"  Time:    {iso_utc(event_dt)}",
+            f"  Tool:    {tool}",
+            f"  Action:  {action_kind}",
+        ]
+        if summary:
+            lines.append(f"  Summary: {summary}")
+        lines.append("  Arguments:")
+        if isinstance(raw_args, dict) and raw_args:
+            for k, v in raw_args.items():
+                v_str = v if isinstance(v, str) else json_dumps_safe(v)
+                if len(v_str) > 400:
+                    v_str = v_str[:400] + f"... [+{len(v_str) - 400} chars]"
+                lines.append(f"    {k}: {v_str}")
+        else:
+            lines.append("    (none)")
+        lines.append("")
+        self._event_log_lines.extend(lines)
+
+    def _log_observation(self, event: Any, outcome: str, duration_s: float,
+                         event_dt: datetime) -> None:
+        tool    = getattr(event, "tool_name", "") or ""
+        content = self._extract_observation_content(event)
+
+        lines = [
+            "─" * 8 + " Observation " + "─" * 8,
+            f"  Time:     {iso_utc(event_dt)}",
+            f"  Tool:     {tool}",
+            f"  Outcome:  {outcome}",
+            f"  Duration: {duration_s:.3f}s",
+            "  Result:",
+        ]
+        if content:
+            content_lines = content.splitlines() or [content]
+            for cl in content_lines[:30]:
+                if len(cl) > 400:
+                    cl = cl[:400] + f"... [+{len(cl) - 400} chars]"
+                lines.append(f"    {cl}")
+            if len(content_lines) > 30:
+                lines.append(f"    ... [+{len(content_lines) - 30} more lines]")
+        else:
+            lines.append("    (no content)")
+        lines.append("")
+        self._event_log_lines.extend(lines)
 
     @staticmethod
     def _extract_terminal_command(event: ActionEvent, args: dict) -> str:
@@ -464,6 +534,22 @@ class AgentPhaseTracker:
             for rec in self.records:
                 writer.writerow(dataclasses.asdict(rec))
         log.info("Wrote %d phase records → %s", len(self.records), path)
+        return path
+
+    def write_event_log(self, out_dir: Path):
+        """Write the human-readable event log to ``<out_dir>/<agent_id>_events.log``."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{self.agent_id}_events.log"
+        header = [
+            f"# Agent event log",
+            f"# agent_id: {self.agent_id}",
+            f"# task_id:  {self.task_id}",
+            f"# scheduled: {iso_utc(self.scheduled_dt)}",
+            "",
+        ]
+        path.write_text("\n".join(header) + "\n".join(self._event_log_lines),
+                        encoding="utf-8")
+        log.info("Wrote event log → %s", path)
         return path
 
     def summary(self) -> dict[str, Any]:
@@ -681,9 +767,10 @@ def run_single_agent(
         except (ValueError, AttributeError):
             pass
 
-    # Persist trace CSV.
+    # Persist trace CSV + human-readable event log.
     results_dir.mkdir(parents=True, exist_ok=True)
     tracker.write_csv(results_dir)
+    tracker.write_event_log(results_dir)
 
     # Persist prompt for reproducibility.
     (results_dir / f"{agent_id}_prompt.txt").write_text(prompt, encoding="utf-8")

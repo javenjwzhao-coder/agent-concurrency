@@ -59,6 +59,7 @@ from sklearn.ensemble import (
     HistGradientBoostingRegressor,
     RandomForestRegressor,
 )
+from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import (
     mean_absolute_error,
@@ -87,6 +88,19 @@ _REMAINING_FRACS: list[float] = [0.0, 0.10, 0.25, 0.50, 0.75]
 
 # Top file-extensions we one-hot for FileEditor `path` arguments.
 _TOP_EXTS: tuple[str, ...] = ("py", "js", "ts", "rs", "go", "md")
+
+# Text-hash features over the action's natural-language signal:
+# summary + tool_command + path + sub-command. Stateless (no fitting), so
+# safe to call at both train and inference time without leakage.
+_TEXT_HASH_DIM: int = 32
+_TEXT_HASHER = HashingVectorizer(
+    n_features=_TEXT_HASH_DIM,
+    analyzer="char_wb",
+    ngram_range=(3, 5),
+    alternate_sign=False,
+    norm=None,
+    lowercase=True,
+)
 
 
 def _kw(text: str, keywords: list[str]) -> int:
@@ -232,6 +246,24 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
     feat["tracker_cmd_complete"] = (
         is_tt & sub_cmd.isin(["mark_complete", "complete"])
     ).astype(int)
+
+    # ── Text-hash features over summary + command + path + sub-cmd ──────────
+    # Captures the free-form action description ("View handler.js to ...",
+    # "$ ls -R", etc.) that repeats across runs and predicts duration.
+    summaries = (
+        df.get("detail", pd.Series("", index=df.index))
+          .fillna("").astype(str)
+    )
+    paths = args_series.map(lambda d: str(d.get("path", "")))
+    text_blob = (
+        summaries + " | " + cmd + " | " + sub_cmd + " | " + paths
+    ).tolist()
+    if len(text_blob) > 0:
+        hash_matrix = _TEXT_HASHER.transform(text_blob).toarray()
+    else:
+        hash_matrix = np.zeros((0, _TEXT_HASH_DIM))
+    for i in range(_TEXT_HASH_DIM):
+        feat[f"text_hash_{i}"] = hash_matrix[:, i]
 
     if remaining_mode:
         # Set to 0 here; overwritten per-snapshot in augment_remaining()
