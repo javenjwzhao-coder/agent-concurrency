@@ -105,18 +105,6 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def parse_ts(ts: Optional[str]) -> datetime:
-    """Parse an ISO 8601 timestamp, handling the trailing-Z convention."""
-    if not ts:
-        return now_utc()
-    if ts.endswith("Z"):
-        ts = ts[:-1] + "+00:00"
-    dt = datetime.fromisoformat(ts)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 # ──────────────────────── per-agent phase tracker ─────────────────────────────
 
 class AgentPhaseTracker:
@@ -267,7 +255,8 @@ class AgentPhaseTracker:
         """OpenHands SDK event callback – drives phase transitions."""
         with self._lock:
             self._conversation_id = getattr(event, "conversation_id", self._conversation_id) or ""
-            event_dt = parse_ts(getattr(event, "timestamp", None))
+            # Use the runner clock; SDK event.timestamp is naive local-time on some hosts.
+            event_dt = now_utc()
 
             # ── user message: context delivered, reasoning continues ──
             if isinstance(event, MessageEvent):
