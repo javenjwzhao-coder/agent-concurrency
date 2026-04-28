@@ -212,6 +212,11 @@ flat_keys = [
     ("SIDECAR_BLOCK_SIZE",       "sidecar.block_size"),
     ("SIDECAR_DTYPE",            "sidecar.dtype"),
     ("SIDECAR_TOTAL_GPU_BLOCKS", "sidecar.total_gpu_blocks"),
+    ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
+    ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
+    ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
+    ("SIDECAR_EVICTION_ENDPOINT", "sidecar.admission_control.eviction_endpoint"),
+    ("SIDECAR_EVICTION_TIMEOUT_S", "sidecar.admission_control.eviction_timeout_s"),
 ]
 
 for bash_name, dotted in flat_keys:
@@ -260,6 +265,13 @@ if [[ -n "${MIN_WAVE_DELAY_S:-}" && -n "${MAX_WAVE_DELAY_S:-}" ]]; then
     else
         ERRORS+=("launch.min_wave_delay_s (${MIN_WAVE_DELAY_S}) must be <= launch.max_wave_delay_s (${MAX_WAVE_DELAY_S})")
     fi
+fi
+
+if [[ -z "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
+    SIDECAR_ADMISSION_PREDICTOR_MODEL="${PREDICTION_SAVE_MODEL:-}"
+fi
+if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" && "${SIDECAR_ENABLED:-false}" != "true" ]]; then
+    ERRORS+=("sidecar.admission_control.enabled requires sidecar.enabled=true")
 fi
 
 RUNNER_SCRIPT="${SCRIPT_DIR}/src/run_abc_bench_instrumented.py"
@@ -326,6 +338,19 @@ build_runner_cmd() {
             --sidecar-dtype             "${SIDECAR_DTYPE:-bfloat16}"
             --sidecar-total-gpu-blocks  "${SIDECAR_TOTAL_GPU_BLOCKS:-0}"
         )
+        if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
+            cmd+=(
+                --sidecar-admission-control
+                --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+                --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
+            )
+            if [[ -n "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
+                cmd+=(--sidecar-admission-predictor-model "$SIDECAR_ADMISSION_PREDICTOR_MODEL")
+            fi
+            if [[ -n "${SIDECAR_EVICTION_ENDPOINT:-}" ]]; then
+                cmd+=(--sidecar-eviction-endpoint "$SIDECAR_EVICTION_ENDPOINT")
+            fi
+        fi
     fi
 
     echo "${cmd[@]}"
@@ -405,6 +430,13 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
     echo "    vllm_url:           ${SIDECAR_VLLM_URL:-http://localhost:8000}"
     echo "    interval:           ${SIDECAR_INTERVAL:-5.0}s"
     echo "    geometry:           layers=${SIDECAR_NUM_LAYERS}  kv_heads=${SIDECAR_NUM_KV_HEADS}  head_dim=${SIDECAR_HEAD_DIM}  block=${SIDECAR_BLOCK_SIZE}  dtype=${SIDECAR_DTYPE:-bfloat16}"
+    echo "    admission_control:  ${SIDECAR_ADMISSION_ENABLED:-false}"
+    if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
+        echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+        echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"
+        echo "    eviction_endpoint:  ${SIDECAR_EVICTION_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/evict}"
+        echo "    eviction_timeout_s: ${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
+    fi
 fi
 echo ""
 echo -e "${BOLD}════════════════════════════════════════════════════════════════════════${RESET}"

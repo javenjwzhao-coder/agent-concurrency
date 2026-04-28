@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-apply_patches.py — KV-block tracking patches for vLLM v0.13.x
+apply_patches.py — KV-block tracking patches for vLLM / vllm-ascend 0.11.x–0.13.x
 
 Run during bare-metal venv setup to add per-agent KV
 cache block reporting to:
   • vllm/entrypoints/openai/protocol.py  — UsageInfo + ChatCompletionRequest
   • vllm/entrypoints/openai/serving_chat.py — computation + population
+  • vllm/entrypoints/openai/api_server.py — admin endpoint for proactive
+    per-agent KV eviction, backed by an engine/scheduler evict_agent_kv hook
 
 Pass --vllm-dir to target a specific vllm package directory (e.g. a
 project-local venv's site-packages/vllm). Defaults to the shared venv path.
@@ -28,6 +30,13 @@ _args = _parser.parse_args()
 VLLM_DIR = pathlib.Path(_args.vllm_dir)
 PROTO   = VLLM_DIR / "entrypoints/openai/protocol.py"
 SERVING = VLLM_DIR / "entrypoints/openai/serving_chat.py"
+API_SERVER = VLLM_DIR / "entrypoints/openai/api_server.py"
+ASYNC_LLM = VLLM_DIR / "v1/engine/async_llm.py"
+CORE_CLIENT = VLLM_DIR / "v1/engine/core_client.py"
+ENGINE_CORE = VLLM_DIR / "v1/engine/core.py"
+SCHEDULER = VLLM_DIR / "v1/core/sched/scheduler.py"
+KV_CACHE_MANAGER = VLLM_DIR / "v1/core/kv_cache_manager.py"
+BLOCK_POOL = VLLM_DIR / "v1/core/block_pool.py"
 
 
 def _replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -52,6 +61,48 @@ def _try_replace_candidates(
                 print(f"[WARN]  Pattern found {count} times in {label} — replacing first occurrence only")
             return text.replace(old, new, 1), True
     return text, False
+
+
+def _insert_before_anchor(
+    text: str,
+    anchors: list[str],
+    insertion: str,
+    label: str,
+    *,
+    required: bool = False,
+) -> tuple[str, bool]:
+    """Insert text before the first matching anchor."""
+    for anchor in anchors:
+        if anchor in text:
+            return text.replace(anchor, insertion + anchor, 1), True
+    print(f"[WARN] Could not find insertion anchor for {label}", file=sys.stderr)
+    if required:
+        sys.exit(1)
+    return text, False
+
+
+def _insert_after_anchor(
+    text: str,
+    anchors: list[str],
+    insertion: str,
+    label: str,
+    *,
+    required: bool = False,
+) -> tuple[str, bool]:
+    """Insert text after the first matching anchor."""
+    for anchor in anchors:
+        if anchor in text:
+            return text.replace(anchor, anchor + insertion, 1), True
+    print(f"[WARN] Could not find insertion anchor for {label}", file=sys.stderr)
+    if required:
+        sys.exit(1)
+    return text, False
+
+
+def _code_block(indent: int, code: str, *, leading_newline: bool = False) -> str:
+    """Return dedented code re-indented for insertion into a target file."""
+    body = textwrap.indent(textwrap.dedent(code).strip("\n") + "\n", " " * indent)
+    return ("\n" if leading_newline else "") + body
 
 
 def _patch_via_regex_usage_block(
@@ -370,6 +421,632 @@ def patch_serving_chat() -> None:
     print(f"[OK]  serving_chat.py written ({SERVING})")
 
 
+def patch_serving_chat_agent_registration() -> None:
+    """Register the OpenAI request_id that belongs to a patched agent_id."""
+    if not SERVING.exists():
+        print(f"[WARN] serving_chat.py not found ({SERVING}); skipping agent registration",
+              file=sys.stderr)
+        return
+
+    txt = SERVING.read_text()
+    if "register_agent_request" in txt:
+        print("[SKIP] serving_chat.py already registers agent requests")
+        return
+
+    registration = _code_block(20, """\
+        if getattr(request, "agent_id", None) and hasattr(
+                self.engine_client, "register_agent_request"):
+            import inspect as _agent_kv_inspect
+            _agent_kv_registered = (
+                self.engine_client.register_agent_request(
+                    request.agent_id, request_id))
+            if _agent_kv_inspect.isawaitable(_agent_kv_registered):
+                await _agent_kv_registered
+    """) + "\n"
+
+    anchors = [
+        "                    trace_headers = (None if raw_request is None else await",
+        "                    if isinstance(sampling_params, BeamSearchParams):",
+        "                    generator = self.engine_client.generate(",
+    ]
+    txt, ok = _insert_before_anchor(
+        txt, anchors, registration, "serving_chat.py agent request registration"
+    )
+    if not ok:
+        print("[WARN] serving_chat.py: agent_id will not be mapped to request_id; "
+              "evict_agent_kv will only work for request IDs registered elsewhere.",
+              file=sys.stderr)
+        return
+
+    SERVING.write_text(txt)
+    print("[OK]  serving_chat.py: agent_id → request_id registration added")
+
+
+# ───────────────────── proactive per-agent eviction API ──────────────────────
+
+def patch_agent_kv_engine_hooks() -> None:
+    """Patch vLLM v1 engine/scheduler surfaces for per-agent KV eviction."""
+    _patch_async_llm_agent_kv()
+    _patch_core_client_agent_kv()
+    _patch_engine_core_agent_kv()
+    _patch_block_pool_agent_kv()
+    _patch_kv_cache_manager_agent_kv()
+    _patch_scheduler_agent_kv()
+
+
+def _patch_async_llm_agent_kv() -> None:
+    if not ASYNC_LLM.exists():
+        print(f"[WARN] async_llm.py not found ({ASYNC_LLM}); skipping AsyncLLM hook",
+              file=sys.stderr)
+        return
+
+    txt = ASYNC_LLM.read_text()
+    if "async def evict_agent_kv" in txt and "async def register_agent_request" in txt:
+        print("[SKIP] async_llm.py already has agent KV methods")
+        return
+
+    methods = _code_block(4, """\
+        async def register_agent_request(self, agent_id: str, request_id: str) -> None:
+            if not agent_id:
+                return
+            await self.engine_core.register_agent_request_async(
+                str(agent_id), request_id)
+
+        async def evict_agent_kv(
+                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+            return await self.engine_core.evict_agent_kv_async(
+                str(agent_id), only_ref_cnt_zero)
+    """, leading_newline=True)
+
+    txt, ok = _insert_before_anchor(
+        txt,
+        ["    async def reset_prefix_cache(", "    async def sleep("],
+        methods,
+        "async_llm.py agent KV methods",
+    )
+    if not ok:
+        return
+    ASYNC_LLM.write_text(txt)
+    print("[OK]  async_llm.py: register_agent_request + evict_agent_kv added")
+
+
+def _patch_core_client_agent_kv() -> None:
+    if not CORE_CLIENT.exists():
+        print(f"[WARN] core_client.py not found ({CORE_CLIENT}); skipping core client hook",
+              file=sys.stderr)
+        return
+
+    txt = CORE_CLIENT.read_text()
+    changed = False
+
+    if not re.search(
+            r"def register_agent_request\([^)]*\).*?"
+            r"raise NotImplementedError", txt, re.DOTALL):
+        abstract_sync = _code_block(4, """\
+            def register_agent_request(self, agent_id: str, request_id: str) -> None:
+                raise NotImplementedError
+
+            def evict_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                raise NotImplementedError
+        """, leading_newline=True)
+        txt, ok = _insert_after_anchor(
+            txt,
+            [
+                "    def reset_prefix_cache(self) -> None:\n"
+                "        raise NotImplementedError\n",
+            ],
+            abstract_sync,
+            "core_client.py abstract sync agent KV methods",
+        )
+        changed = changed or ok
+
+    if not re.search(
+            r"async def register_agent_request_async\([^)]*\).*?"
+            r"raise NotImplementedError", txt, re.DOTALL):
+        abstract_async = _code_block(4, """\
+            async def register_agent_request_async(
+                    self, agent_id: str, request_id: str) -> None:
+                raise NotImplementedError
+
+            async def evict_agent_kv_async(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                raise NotImplementedError
+        """, leading_newline=True)
+        txt, ok = _insert_after_anchor(
+            txt,
+            [
+                "    async def reset_prefix_cache_async(self) -> None:\n"
+                "        raise NotImplementedError\n",
+            ],
+            abstract_async,
+            "core_client.py abstract async agent KV methods",
+        )
+        changed = changed or ok
+
+    if not re.search(
+            r"def register_agent_request\([^)]*\).*?"
+            r"self\.engine_core\.register_agent_request\(agent_id, request_id\)",
+            txt,
+            re.DOTALL,
+    ):
+        inproc_sync = _code_block(4, """\
+            def register_agent_request(self, agent_id: str, request_id: str) -> None:
+                self.engine_core.register_agent_request(agent_id, request_id)
+
+            def evict_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return self.engine_core.evict_agent_kv(agent_id, only_ref_cnt_zero)
+        """, leading_newline=True)
+        txt, ok = _insert_after_anchor(
+            txt,
+            [
+                "    def reset_prefix_cache(self) -> None:\n"
+                "        self.engine_core.reset_prefix_cache()\n",
+            ],
+            inproc_sync,
+            "core_client.py in-process agent KV methods",
+        )
+        changed = changed or ok
+
+    if not re.search(
+            r"def register_agent_request\([^)]*\).*?"
+            r"self\.call_utility\(\s*\"register_agent_request\"",
+            txt,
+            re.DOTALL,
+    ):
+        mp_sync = _code_block(4, """\
+            def register_agent_request(self, agent_id: str, request_id: str) -> None:
+                self.call_utility("register_agent_request", agent_id, request_id)
+
+            def evict_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return self.call_utility(
+                    "evict_agent_kv", agent_id, only_ref_cnt_zero)
+        """, leading_newline=True)
+        txt, ok = _insert_after_anchor(
+            txt,
+            [
+                "    def reset_prefix_cache(self) -> None:\n"
+                "        self.call_utility(\"reset_prefix_cache\")\n",
+            ],
+            mp_sync,
+            "core_client.py sync MP agent KV methods",
+        )
+        changed = changed or ok
+
+    if not re.search(
+            r"async def register_agent_request_async\([^)]*\).*?"
+            r"self\.call_utility_async\(\s*\"register_agent_request\"",
+            txt,
+            re.DOTALL,
+    ):
+        async_mp = _code_block(4, """\
+            async def register_agent_request_async(
+                    self, agent_id: str, request_id: str) -> None:
+                await self.call_utility_async(
+                    "register_agent_request", agent_id, request_id)
+
+            async def evict_agent_kv_async(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return await self.call_utility_async(
+                    "evict_agent_kv", agent_id, only_ref_cnt_zero)
+        """, leading_newline=True)
+        txt, ok = _insert_after_anchor(
+            txt,
+            [
+                "    async def reset_prefix_cache_async(self) -> None:\n"
+                "        await self.call_utility_async(\"reset_prefix_cache\")\n",
+            ],
+            async_mp,
+            "core_client.py async MP agent KV methods",
+        )
+        changed = changed or ok
+
+    if changed:
+        CORE_CLIENT.write_text(txt)
+        print("[OK]  core_client.py: agent KV forwarding methods added")
+    else:
+        print("[SKIP] core_client.py agent KV hooks already present or no anchors matched")
+
+
+def _patch_engine_core_agent_kv() -> None:
+    if not ENGINE_CORE.exists():
+        print(f"[WARN] core.py not found ({ENGINE_CORE}); skipping EngineCore hook",
+              file=sys.stderr)
+        return
+
+    txt = ENGINE_CORE.read_text()
+    if "def evict_agent_kv(" in txt:
+        print("[SKIP] core.py already has evict_agent_kv")
+        return
+
+    methods = _code_block(4, """\
+        def register_agent_request(self, agent_id: str, request_id: str) -> None:
+            self.scheduler.register_agent_request(agent_id, request_id)
+
+        def evict_agent_kv(
+                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+            return self.scheduler.evict_agent_kv(agent_id, only_ref_cnt_zero)
+    """, leading_newline=True)
+    txt, ok = _insert_after_anchor(
+        txt,
+        [
+            "    def reset_prefix_cache(self):\n"
+            "        self.scheduler.reset_prefix_cache()\n",
+            "    def reset_prefix_cache(self) -> bool:\n"
+            "        return self.scheduler.reset_prefix_cache()\n",
+        ],
+        methods,
+        "core.py agent KV methods",
+    )
+    if not ok:
+        return
+    ENGINE_CORE.write_text(txt)
+    print("[OK]  core.py: register_agent_request + evict_agent_kv added")
+
+
+def _patch_block_pool_agent_kv() -> None:
+    if not BLOCK_POOL.exists():
+        print(f"[WARN] block_pool.py not found ({BLOCK_POOL}); skipping BlockPool hook",
+              file=sys.stderr)
+        return
+
+    txt = BLOCK_POOL.read_text()
+    if "only_ref_cnt_zero" in txt and "def evict_blocks" in txt:
+        print("[SKIP] block_pool.py already has ref-count-aware evict_blocks")
+        return
+
+    method = _code_block(4, """\
+        def evict_blocks(
+                self,
+                block_ids: set[int] | list[int] | tuple[int, ...],
+                only_ref_cnt_zero: bool = False) -> int:
+            \"\"\"Evict cached metadata for selected KV blocks.
+
+            This intentionally uses the same cached-block eviction primitive as
+            normal prefix-cache pressure.  It only touches blocks whose
+            ref_cnt is zero when requested, so live requests can keep their KV
+            blocks for proactive agent eviction.
+            \"\"\"
+            evicted = 0
+            for block_id in list(block_ids):
+                if block_id is None:
+                    continue
+                try:
+                    block = self.blocks[int(block_id)]
+                except (IndexError, TypeError, ValueError):
+                    continue
+                if getattr(block, "is_null", False):
+                    continue
+                if only_ref_cnt_zero and getattr(block, "ref_cnt", 0) != 0:
+                    continue
+                if self._maybe_evict_cached_block(block):
+                    evicted += 1
+            return evicted
+    """)
+
+    if "def evict_blocks(" in txt:
+        pattern = re.compile(
+            r"    def evict_blocks\([\s\S]*?\n(?=    def free_blocks\()"
+        )
+        txt, count = pattern.subn(method, txt, count=1)
+        ok = count == 1
+        if not ok:
+            print("[WARN] Could not replace existing BlockPool.evict_blocks; "
+                  "trying insertion fallback.", file=sys.stderr)
+    else:
+        ok = False
+
+    if not ok:
+        txt, ok = _insert_before_anchor(
+            txt,
+            ["    def touch(", "    def free_blocks("],
+            method,
+            "block_pool.py evict_blocks",
+        )
+    if not ok:
+        return
+    BLOCK_POOL.write_text(txt)
+    print("[OK]  block_pool.py: ref-count-aware evict_blocks(block_ids) added")
+
+
+def _patch_kv_cache_manager_agent_kv() -> None:
+    if not KV_CACHE_MANAGER.exists():
+        print(f"[WARN] kv_cache_manager.py not found ({KV_CACHE_MANAGER}); "
+              "skipping KVCacheManager hook", file=sys.stderr)
+        return
+
+    txt = KV_CACHE_MANAGER.read_text()
+    if "only_ref_cnt_zero" in txt and "def evict_blocks" in txt:
+        print("[SKIP] kv_cache_manager.py already has ref-count-aware evict_blocks")
+        return
+
+    method = _code_block(4, """\
+        def evict_blocks(
+                self,
+                block_ids: set[int] | list[int] | tuple[int, ...],
+                only_ref_cnt_zero: bool = False) -> int:
+            return self.block_pool.evict_blocks(
+                block_ids, only_ref_cnt_zero=only_ref_cnt_zero)
+    """)
+
+    if "def evict_blocks(" in txt:
+        pattern = re.compile(r"    def evict_blocks\([\s\S]*?\n(?=    def )")
+        txt, count = pattern.subn(method, txt, count=1)
+        ok = count == 1
+        if not ok:
+            print("[WARN] Could not replace existing KVCacheManager.evict_blocks; "
+                  "trying insertion fallback.", file=sys.stderr)
+    else:
+        ok = False
+
+    if not ok:
+        txt, ok = _insert_before_anchor(
+            txt,
+            [
+                "    def reset_prefix_cache(self) -> bool:",
+                "    def get_num_common_prefix_blocks(",
+                "    def get_block_ids(",
+            ],
+            method,
+            "kv_cache_manager.py evict_blocks",
+        )
+    if not ok:
+        return
+    KV_CACHE_MANAGER.write_text(txt)
+    print("[OK]  kv_cache_manager.py: ref-count-aware evict_blocks delegate added")
+
+
+def _patch_scheduler_agent_kv() -> None:
+    if not SCHEDULER.exists():
+        print(f"[WARN] scheduler.py not found ({SCHEDULER}); skipping Scheduler hook",
+              file=sys.stderr)
+        return
+
+    txt = SCHEDULER.read_text()
+    changed = False
+
+    if "_agent_kv_request_to_agent" not in txt:
+        state = _code_block(8, """\
+            self._agent_kv_agent_to_requests: dict[str, set[str]] = {}
+            self._agent_kv_request_to_agent: dict[str, str] = {}
+            self._agent_kv_cached_blocks: dict[str, set[int]] = {}
+            self._agent_kv_bytes_per_block_gb = 0.0
+            try:
+                _agent_kv_model_config = vllm_config.model_config
+                _agent_kv_hf_text_config = getattr(
+                    _agent_kv_model_config, "hf_text_config", None)
+                _agent_kv_dtype = str(
+                    getattr(_agent_kv_model_config, "dtype", ""))
+                _agent_kv_dtype_bytes = (
+                    4 if "float32" in _agent_kv_dtype else
+                    1 if "float8" in _agent_kv_dtype else 2)
+                self._agent_kv_bytes_per_block_gb = (
+                    self.block_size
+                    * getattr(_agent_kv_hf_text_config, "num_hidden_layers", 1)
+                    * 2
+                    * _agent_kv_model_config.get_total_num_kv_heads()
+                    * _agent_kv_model_config.get_head_size()
+                    * _agent_kv_dtype_bytes
+                ) / 1e9
+            except Exception:
+                pass
+        """)
+        txt, ok = _insert_after_anchor(
+            txt,
+            [
+                "        self.requests: dict[str, Request] = {}\n",
+                "        self.requests = {}\n",
+            ],
+            state,
+            "scheduler.py agent KV ownership state",
+        )
+        changed = changed or ok
+
+    if "def register_agent_request(self, agent_id: str, request_id: str)" not in txt:
+        methods = _code_block(4, """\
+            def register_agent_request(self, agent_id: str, request_id: str) -> None:
+                if not agent_id or not request_id:
+                    return
+                self._agent_kv_agent_to_requests.setdefault(
+                    agent_id, set()).add(request_id)
+                self._agent_kv_request_to_agent[request_id] = agent_id
+
+            def _agent_kv_record_cached_blocks(
+                    self, agent_id: str, request_id: str) -> None:
+                try:
+                    block_id_groups = self.kv_cache_manager.get_block_ids(request_id)
+                except Exception:
+                    return
+                cached_blocks = self._agent_kv_cached_blocks.setdefault(
+                    agent_id, set())
+                for block_ids in block_id_groups:
+                    cached_blocks.update(
+                        int(block_id) for block_id in block_ids
+                        if block_id is not None)
+
+            def evict_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                if not agent_id:
+                    return {
+                        "evicted": False,
+                        "freed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": "missing agent_id",
+                    }
+
+                block_ids = set(self._agent_kv_cached_blocks.get(agent_id, set()))
+                for request_id in self._agent_kv_agent_to_requests.get(
+                        agent_id, set()):
+                    if request_id in self.requests:
+                        self._agent_kv_record_cached_blocks(agent_id, request_id)
+                block_ids.update(self._agent_kv_cached_blocks.get(agent_id, set()))
+
+                if not block_ids:
+                    return {
+                        "evicted": False,
+                        "freed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": "no cached blocks for agent",
+                    }
+
+                freed_blocks = self.kv_cache_manager.evict_blocks(
+                    block_ids, only_ref_cnt_zero=only_ref_cnt_zero)
+                freed_gb = round(
+                    freed_blocks * getattr(
+                        self, "_agent_kv_bytes_per_block_gb", 0.0),
+                    6)
+                return {
+                    "evicted": freed_blocks > 0,
+                    "freed_blocks": freed_blocks,
+                    "freed_gb": freed_gb,
+                    "reason": (
+                        "ok" if freed_blocks else
+                        "no matching cached blocks with ref_cnt == 0"),
+                }
+        """)
+        txt, ok = _insert_before_anchor(
+            txt,
+            ["    def reset_prefix_cache(self) -> bool:", "    def make_stats("],
+            methods,
+            "scheduler.py agent KV methods",
+        )
+        changed = changed or ok
+
+    if "_agent_kv_record_cached_blocks" in txt and "agent_id = self._agent_kv_request_to_agent.pop" not in txt:
+        old = _code_block(4, """\
+            def _free_blocks(self, request: Request):
+                assert request.is_finished()
+                self.kv_cache_manager.free(request)
+                del self.requests[request.request_id]
+        """)
+        new = _code_block(4, """\
+            def _free_blocks(self, request: Request):
+                assert request.is_finished()
+                request_id = request.request_id
+                agent_id = self._agent_kv_request_to_agent.pop(request_id, None)
+                if agent_id:
+                    self._agent_kv_record_cached_blocks(agent_id, request_id)
+                    request_ids = self._agent_kv_agent_to_requests.get(agent_id)
+                    if request_ids is not None:
+                        request_ids.discard(request_id)
+                        if not request_ids:
+                            self._agent_kv_agent_to_requests.pop(agent_id, None)
+                self.kv_cache_manager.free(request)
+                del self.requests[request_id]
+        """)
+        if old in txt:
+            txt = txt.replace(old, new, 1)
+            changed = True
+        else:
+            print("[WARN] Could not patch Scheduler._free_blocks for agent KV "
+                  "ownership; eviction may miss finished request blocks.",
+                  file=sys.stderr)
+
+    if changed:
+        SCHEDULER.write_text(txt)
+        print("[OK]  scheduler.py: agent KV ownership + eviction added")
+    else:
+        print("[SKIP] scheduler.py agent KV hooks already present or no anchors matched")
+
+
+def patch_agent_kv_eviction_api() -> None:
+    """
+    Add the HTTP endpoint consumed by sidecar.py's dynamic admission controller.
+
+    The route intentionally calls an engine-client method named
+    ``evict_agent_kv(agent_id, only_ref_cnt_zero=True)``.  In vllm-ascend this
+    should be routed down to ``vllm/v1/core/sched/scheduler.py``, where the
+    scheduler can resolve agent-owned block IDs, store/swap them through the
+    configured KV connector when available, and call
+    ``KVCacheManager.evict_blocks(block_ids)`` only for blocks whose ref_cnt is 0.
+    """
+    if not API_SERVER.exists():
+        print(f"[WARN] api_server.py not found ({API_SERVER}); skipping agent KV eviction API",
+              file=sys.stderr)
+        return
+
+    txt = API_SERVER.read_text()
+    if '"/agent_kv_cache/evict"' in txt:
+        print("[SKIP] api_server.py already has /agent_kv_cache/evict")
+        return
+
+    route = textwrap.dedent('''\
+
+        @router.post("/agent_kv_cache/evict")
+        async def evict_agent_kv_cache(raw_request: Request):
+            """Evict KV blocks owned by one agent when they are not referenced."""
+            import inspect as _agent_kv_inspect
+            from fastapi.responses import JSONResponse as _AgentKVJSONResponse
+
+            try:
+                body = await raw_request.json()
+            except Exception:
+                body = {}
+            agent_id = str(body.get("agent_id") or "")
+            only_ref_cnt_zero = bool(body.get("only_ref_cnt_zero", True))
+            if not agent_id:
+                return _AgentKVJSONResponse(
+                    {
+                        "evicted": False,
+                        "freed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": "missing agent_id",
+                    },
+                    status_code=400,
+                )
+
+            client = engine_client(raw_request)
+            if not hasattr(client, "evict_agent_kv"):
+                return _AgentKVJSONResponse(
+                    {
+                        "evicted": False,
+                        "freed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": (
+                            "engine client missing evict_agent_kv(agent_id, "
+                            "only_ref_cnt_zero=True); route this to the "
+                            "vLLM/vllm-ascend scheduler"
+                        ),
+                    },
+                    status_code=501,
+                )
+
+            result = client.evict_agent_kv(
+                agent_id, only_ref_cnt_zero=only_ref_cnt_zero
+            )
+            if _agent_kv_inspect.isawaitable(result):
+                result = await result
+            if result is None:
+                result = {
+                    "evicted": False,
+                    "freed_blocks": 0,
+                    "freed_gb": 0.0,
+                    "reason": "engine returned no result",
+                }
+            return _AgentKVJSONResponse(result)
+    ''')
+
+    anchors = [
+        '@router.post("/reset_prefix_cache")',
+        '@router.post("/reset_mm_cache")',
+        '@router.post("/reset_encoder_cache")',
+        '@router.get("/health")',
+    ]
+    for anchor in anchors:
+        if anchor in txt:
+            txt = txt.replace(anchor, route + "\n" + anchor, 1)
+            API_SERVER.write_text(txt)
+            print("[OK]  api_server.py: /agent_kv_cache/evict route added")
+            print("[INFO] vllm-ascend hook target: engine_client.evict_agent_kv "
+                  "→ scheduler.evict_agent_kv → KVCacheManager.evict_blocks")
+            return
+
+    print("[WARN] Could not find a stable API route anchor in api_server.py; "
+          "skipping agent KV eviction API.", file=sys.stderr)
+
+
 # ─────────────────────────── validation ──────────────────────────────────────
 
 def validate() -> None:
@@ -398,6 +1075,21 @@ def validate() -> None:
         errors.append("serving_chat.py missing _compute_kv_blocks method")
     if "_kv_block_size" not in serving_txt:
         errors.append("serving_chat.py missing KV geometry init block")
+    if "register_agent_request" not in serving_txt:
+        errors.append("serving_chat.py missing agent_id request registration")
+
+    hook_checks = [
+        (ASYNC_LLM, "async def evict_agent_kv", "async_llm.py missing evict_agent_kv"),
+        (CORE_CLIENT, "evict_agent_kv", "core_client.py missing evict_agent_kv forwarding"),
+        (ENGINE_CORE, "def evict_agent_kv", "core.py missing evict_agent_kv"),
+        (SCHEDULER, "def evict_agent_kv", "scheduler.py missing evict_agent_kv"),
+        (SCHEDULER, "_agent_kv_request_to_agent", "scheduler.py missing ownership state"),
+        (KV_CACHE_MANAGER, "def evict_blocks", "kv_cache_manager.py missing evict_blocks"),
+        (BLOCK_POOL, "def evict_blocks", "block_pool.py missing evict_blocks"),
+    ]
+    for path, needle, message in hook_checks:
+        if path.exists() and needle not in path.read_text():
+            errors.append(message)
 
     if errors:
         for e in errors:
@@ -410,6 +1102,13 @@ def validate() -> None:
               "— non-streaming and streaming patches both skipped.", file=sys.stderr)
     else:
         print(f"[OK]  serving_chat.py: kv_blocks_used injected into {kv_injected} response path(s)")
+    if API_SERVER.exists():
+        api_txt = API_SERVER.read_text()
+        if "/agent_kv_cache/evict" in api_txt:
+            print("[OK]  api_server.py: /agent_kv_cache/evict endpoint present")
+        else:
+            print("[WARN] api_server.py: /agent_kv_cache/evict endpoint not present",
+                  file=sys.stderr)
     print("[OK]  Validation passed: all expected fields present")
 
 
@@ -417,6 +1116,9 @@ if __name__ == "__main__":
     print("=== Applying vLLM KV-block tracking patches ===")
     patch_protocol()
     patch_serving_chat()
+    patch_serving_chat_agent_registration()
+    patch_agent_kv_engine_hooks()
+    patch_agent_kv_eviction_api()
     validate()
 
     print("=== All patches applied successfully ===")

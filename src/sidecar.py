@@ -35,6 +35,7 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import re
@@ -42,9 +43,12 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
+from urllib.parse import urljoin
 
 import requests
 
@@ -251,6 +255,494 @@ def _file_agent_reader(path: Path) -> Callable[[], dict]:
     return _read
 
 
+def default_eviction_endpoint(vllm_url: str) -> str:
+    """Return the default local vLLM agent-KV eviction endpoint."""
+    base = vllm_url.rstrip("/") + "/"
+    return urljoin(base, "agent_kv_cache/evict")
+
+
+def _parse_iso_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+
+def _agent_kv_gb(agent: dict[str, Any], bytes_per_blk: int) -> Optional[float]:
+    """Return per-agent KV usage in GB, preferring block counts when present."""
+    blocks = agent.get("kv_blocks")
+    if isinstance(blocks, int) and blocks >= 0:
+        return blocks * bytes_per_blk / 1e9
+    gb = _finite_float(agent.get("kv_gb"))
+    if gb is not None and gb >= 0:
+        return gb
+    return None
+
+
+@dataclass
+class AgentLaunchSpec:
+    """A launch request owned by the admission controller."""
+
+    agent_id: str
+    payload: Any = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    previously_evicted: bool = False
+    queued_ts: str = field(default_factory=lambda: iso_utc(now_utc()))
+
+
+@dataclass
+class _IdleAgentCandidate:
+    agent_id: str
+    kv_gb: float
+    predicted_remaining_s: float
+    score: float
+
+
+class DynamicAdmissionController:
+    """Admission/eviction policy for multi-agent vLLM KV-cache pressure."""
+
+    ACTIVE_STATES = {"reasoning", "tool_call", "waiting"}
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        threshold_gb: float = 0.1,
+        eviction_endpoint: Optional[str] = None,
+        eviction_timeout_s: float = 2.0,
+        predictor_model: Optional[Path | str] = None,
+        predictor: Any = None,
+        admit_callback: Optional[Callable[[AgentLaunchSpec], Any]] = None,
+        state_update_callback: Optional[Callable[[str, dict[str, Any]], None]] = None,
+        evict_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
+        session: Optional[requests.Session] = None,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.threshold_gb = max(0.0, float(threshold_gb))
+        self.eviction_endpoint = str(eviction_endpoint) if eviction_endpoint else ""
+        self.eviction_timeout_s = max(0.1, float(eviction_timeout_s))
+        self._admit_callback = admit_callback
+        self._state_update_callback = state_update_callback
+        self._evict_callback = evict_callback
+        self._session = session or requests.Session()
+
+        self._fresh: deque[AgentLaunchSpec] = deque()
+        self._evicted_ready: deque[str] = deque()
+        self._evicted_ready_set: set[str] = set()
+        self._evicted_events: dict[str, threading.Event] = {}
+        self._evicted_pending: set[str] = set()
+        self._prev_avg_gb: Optional[float] = None
+        self._lock = threading.RLock()
+
+        self._predictor = predictor
+        self._build_features: Any = None
+        self._predictor_error: Optional[str] = None
+        if predictor is None and predictor_model:
+            self._load_predictor(Path(predictor_model))
+
+    def set_admit_callback(
+        self, callback: Optional[Callable[[AgentLaunchSpec], Any]]
+    ) -> None:
+        with self._lock:
+            self._admit_callback = callback
+
+    def enqueue_fresh(self, spec: AgentLaunchSpec) -> None:
+        with self._lock:
+            spec.previously_evicted = False
+            self._fresh.append(spec)
+
+    def pending_counts(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "fresh": len(self._fresh),
+                "evicted_ready": len(self._evicted_ready),
+                "evicted_pending_tool": len(self._evicted_pending),
+            }
+
+    def wait_if_evicted(self, agent_id: str) -> bool:
+        """Block an agent after a tool call until the sidecar re-admits it."""
+        with self._lock:
+            event = self._evicted_events.get(agent_id)
+            if event is None:
+                return False
+            if event.is_set():
+                self._clear_evicted_locked(agent_id)
+                return False
+            if agent_id not in self._evicted_ready_set:
+                self._evicted_ready.append(agent_id)
+                self._evicted_ready_set.add(agent_id)
+            self._evicted_pending.discard(agent_id)
+            self._update_agent_state_locked(
+                agent_id,
+                {
+                    "state": "evicted_waiting",
+                    "state_since": iso_utc(now_utc()),
+                    "admission_state": "evicted_ready",
+                },
+            )
+
+        event.wait()
+        with self._lock:
+            self._clear_evicted_locked(agent_id)
+            self._update_agent_state_locked(
+                agent_id,
+                {
+                    "kv_evicted": False,
+                    "admission_state": "admitted",
+                    "admitted_since": iso_utc(now_utc()),
+                },
+            )
+        return True
+
+    def finish_agent(self, agent_id: str) -> None:
+        """Clean up any queued/blocked admission state for a finished agent."""
+        with self._lock:
+            event = self._evicted_events.get(agent_id)
+            if event is not None:
+                event.set()
+            self._clear_evicted_locked(agent_id)
+
+    def on_tick(
+        self,
+        *,
+        tick: int,
+        vllm_info: dict[str, Any],
+        agents: dict[str, dict[str, Any]],
+        bytes_per_blk: int,
+    ) -> dict[str, Any]:
+        """Apply one admission-control decision tick and return log metadata."""
+        with self._lock:
+            free_gb = self._kv_free_gb(vllm_info, bytes_per_blk)
+            avg_gb, avg_count = self._average_active_kv_gb(agents, bytes_per_blk)
+            prev_avg_gb = self._prev_avg_gb
+            w = self._headroom(free_gb, avg_gb, prev_avg_gb)
+            report: dict[str, Any] = {
+                "enabled": self.enabled,
+                "tick": tick,
+                "C": self._round(free_gb),
+                "s_t": self._round(avg_gb),
+                "s_prev": self._round(prev_avg_gb),
+                "active_agent_samples": avg_count,
+                "w": self._round(w),
+                "threshold_gb": self.threshold_gb,
+                "queue": self.pending_counts(),
+                "heap_candidates": [],
+                "evictions": [],
+                "admissions": [],
+                "reasons": [],
+            }
+
+            if self._predictor_error:
+                report["reasons"].append(f"predictor_error: {self._predictor_error}")
+            if not self.enabled:
+                report["reasons"].append("disabled")
+                self._prev_avg_gb = avg_gb
+                return report
+            if free_gb is None:
+                report["reasons"].append("missing_kv_free_gb")
+                self._prev_avg_gb = avg_gb
+                return report
+
+            heap = self._idle_agent_heap(agents, bytes_per_blk)
+            report["heap_candidates"] = [
+                {
+                    "agent_id": cand.agent_id,
+                    "kv_gb": self._round(cand.kv_gb),
+                    "predicted_remaining_s": self._round(cand.predicted_remaining_s),
+                    "e_s": self._round(cand.score),
+                }
+                for _, _, cand in heap
+            ]
+
+            if w is not None and w < 1.0:
+                report["reasons"].append("saturation_guard")
+
+            current_free_gb = free_gb
+            while current_free_gb <= self.threshold_gb and heap:
+                _, _, cand = heapq.heappop(heap)
+                evict_result = self._evict_candidate(cand)
+                report["evictions"].append(evict_result)
+                if evict_result.get("evicted"):
+                    freed_gb = _finite_float(evict_result.get("freed_gb"))
+                    if freed_gb is None:
+                        freed_gb = cand.kv_gb
+                    current_free_gb += max(0.0, freed_gb)
+                    self._mark_agent_evicted_locked(cand.agent_id, evict_result)
+
+            if current_free_gb <= self.threshold_gb:
+                report["reasons"].append("pressure_threshold")
+
+            admit_limit = self._admission_limit(current_free_gb, w)
+            if admit_limit <= 0 and w is not None and w < 1.0:
+                report["reasons"].append("admission_blocked_by_headroom")
+            elif admit_limit <= 0 and current_free_gb <= self.threshold_gb:
+                report["reasons"].append("admission_blocked_by_pressure")
+
+            if admit_limit > 0 and self._admit_callback is None:
+                report["reasons"].append("no_admit_callback")
+                admit_limit = 0
+
+            for _ in range(admit_limit):
+                item = self._pop_next_waiting_locked()
+                if item is None:
+                    break
+                report["admissions"].append(self._admit_locked(item))
+
+            report["queue"] = self.pending_counts()
+            self._prev_avg_gb = avg_gb
+            return report
+
+    def _load_predictor(self, path: Path) -> None:
+        try:
+            from build_tool_predictor import RealtimePredictor, build_features
+
+            self._predictor = RealtimePredictor.load(path)
+            self._build_features = build_features
+        except Exception as exc:
+            self._predictor_error = f"{path}: {exc}"
+            self._predictor = None
+            self._build_features = None
+
+    def _kv_free_gb(
+        self, vllm_info: dict[str, Any], bytes_per_blk: int
+    ) -> Optional[float]:
+        free_gb = _finite_float(vllm_info.get("kv_free_gb"))
+        if free_gb is not None:
+            return max(0.0, free_gb)
+
+        free_blocks = _finite_float(vllm_info.get("num_gpu_blocks_free"))
+        if free_blocks is not None:
+            return max(0.0, free_blocks * bytes_per_blk / 1e9)
+
+        total = _finite_float(vllm_info.get("kv_total_gb"))
+        used = _finite_float(vllm_info.get("kv_used_gb"))
+        if total is not None and used is not None:
+            return max(0.0, total - used)
+        return None
+
+    def _average_active_kv_gb(
+        self, agents: dict[str, dict[str, Any]], bytes_per_blk: int
+    ) -> tuple[Optional[float], int]:
+        samples: list[float] = []
+        for agent in agents.values():
+            if agent.get("state") not in self.ACTIVE_STATES:
+                continue
+            if agent.get("kv_evicted"):
+                continue
+            kv_gb = _agent_kv_gb(agent, bytes_per_blk)
+            if kv_gb is not None and kv_gb > 0:
+                samples.append(kv_gb)
+        if not samples:
+            return None, 0
+        return sum(samples) / len(samples), len(samples)
+
+    def _headroom(
+        self,
+        free_gb: Optional[float],
+        avg_gb: Optional[float],
+        prev_avg_gb: Optional[float],
+    ) -> Optional[float]:
+        if free_gb is None:
+            return None
+        recent = [v for v in (avg_gb, prev_avg_gb) if v is not None and v > 0]
+        if len(recent) < 2:
+            return None
+        denom = min(recent)
+        return free_gb / denom if denom > 0 else None
+
+    def _idle_agent_heap(
+        self, agents: dict[str, dict[str, Any]], bytes_per_blk: int
+    ) -> list[tuple[float, str, _IdleAgentCandidate]]:
+        heap: list[tuple[float, str, _IdleAgentCandidate]] = []
+        for agent_id, agent in agents.items():
+            if agent.get("state") != "tool_call":
+                continue
+            if agent_id in self._evicted_events or agent.get("kv_evicted"):
+                continue
+            kv_gb = _agent_kv_gb(agent, bytes_per_blk)
+            if kv_gb is None or kv_gb <= 0:
+                continue
+            remaining_s = self._predict_remaining(agent)
+            score = kv_gb * remaining_s
+            cand = _IdleAgentCandidate(
+                agent_id=agent_id,
+                kv_gb=kv_gb,
+                predicted_remaining_s=remaining_s,
+                score=score,
+            )
+            heapq.heappush(heap, (-score, agent_id, cand))
+        return heap
+
+    def _predict_remaining(self, agent: dict[str, Any]) -> float:
+        start_dt = _parse_iso_ts(agent.get("tool_started_at")) or _parse_iso_ts(
+            agent.get("state_since")
+        )
+        elapsed_s = 0.0
+        if start_dt is not None:
+            elapsed_s = max(0.0, (now_utc() - start_dt).total_seconds())
+
+        if hasattr(self._predictor, "predict_agent_remaining"):
+            try:
+                return max(0.0, float(self._predictor.predict_agent_remaining(agent, elapsed_s)))
+            except Exception as exc:
+                self._predictor_error = str(exc)
+                return 0.0
+
+        if self._predictor is None or self._build_features is None:
+            return 0.0
+
+        try:
+            import pandas as pd
+
+            row = {
+                "tool_name": agent.get("tool_name") or "unknown",
+                "tool_command": agent.get("tool_command") or "",
+                "tool_args_json": agent.get("tool_args_json") or "{}",
+                "tool_payload_bytes": agent.get("tool_payload_bytes") or 0,
+                "phase_seq": agent.get("phase_seq") or 0,
+                "start_active_agents": agent.get("start_active_agents") or 0,
+                "start_active_tool_calls": agent.get("start_active_tool_calls") or 0,
+                "start_cumulative_reasoning_s": (
+                    agent.get("start_cumulative_reasoning_s")
+                    or agent.get("cumulative_reasoning_s")
+                    or 0.0
+                ),
+            }
+            feat = self._build_features(pd.DataFrame([row]), remaining_mode=True)
+            return float(self._predictor.predict_remaining(feat, elapsed_s=elapsed_s))
+        except Exception as exc:
+            self._predictor_error = str(exc)
+            return 0.0
+
+    def _evict_candidate(self, cand: _IdleAgentCandidate) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "agent_id": cand.agent_id,
+            "e_s": self._round(cand.score),
+            "kv_gb": self._round(cand.kv_gb),
+            "predicted_remaining_s": self._round(cand.predicted_remaining_s),
+        }
+        try:
+            if self._evict_callback is not None:
+                payload = self._evict_callback(cand) or {}
+            else:
+                if not self.eviction_endpoint:
+                    return {**result, "evicted": False, "reason": "missing_eviction_endpoint"}
+                resp = self._session.post(
+                    self.eviction_endpoint,
+                    json={"agent_id": cand.agent_id, "only_ref_cnt_zero": True},
+                    timeout=self.eviction_timeout_s,
+                )
+                if resp.status_code >= 400:
+                    return {
+                        **result,
+                        "evicted": False,
+                        "status_code": resp.status_code,
+                        "reason": resp.text[:300],
+                    }
+                payload = resp.json()
+            evicted = bool(payload.get("evicted", True))
+            return {**result, **payload, "evicted": evicted}
+        except Exception as exc:
+            return {**result, "evicted": False, "reason": str(exc)}
+
+    def _mark_agent_evicted_locked(
+        self, agent_id: str, evict_result: dict[str, Any]
+    ) -> None:
+        event = self._evicted_events.get(agent_id)
+        if event is None or event.is_set():
+            event = threading.Event()
+            self._evicted_events[agent_id] = event
+        self._evicted_pending.add(agent_id)
+        self._update_agent_state_locked(
+            agent_id,
+            {
+                "kv_evicted": True,
+                "admission_state": "evicted_pending_tool",
+                "last_eviction": iso_utc(now_utc()),
+                "last_eviction_result": evict_result,
+            },
+        )
+
+    def _admission_limit(self, free_gb: float, w: Optional[float]) -> int:
+        if free_gb <= self.threshold_gb:
+            return 0
+        if w is None:
+            return 1
+        if w < 1.0:
+            return 0
+        return max(0, int(math.floor(w)))
+
+    def _pop_next_waiting_locked(self) -> Optional[AgentLaunchSpec | str]:
+        while self._evicted_ready:
+            agent_id = self._evicted_ready.popleft()
+            self._evicted_ready_set.discard(agent_id)
+            if agent_id in self._evicted_events:
+                return agent_id
+        if self._fresh:
+            return self._fresh.popleft()
+        return None
+
+    def _admit_locked(self, item: AgentLaunchSpec | str) -> dict[str, Any]:
+        if isinstance(item, str):
+            agent_id = item
+            event = self._evicted_events.get(agent_id)
+            if event is not None:
+                event.set()
+            self._update_agent_state_locked(
+                agent_id,
+                {
+                    "admission_state": "admitted",
+                    "admitted_since": iso_utc(now_utc()),
+                },
+            )
+            return {"agent_id": agent_id, "previously_evicted": True, "admitted": True}
+
+        assert self._admit_callback is not None
+        self._admit_callback(item)
+        return {
+            "agent_id": item.agent_id,
+            "previously_evicted": item.previously_evicted,
+            "admitted": True,
+        }
+
+    def _clear_evicted_locked(self, agent_id: str) -> None:
+        self._evicted_events.pop(agent_id, None)
+        self._evicted_pending.discard(agent_id)
+        self._evicted_ready_set.discard(agent_id)
+        if self._evicted_ready:
+            self._evicted_ready = deque(
+                aid for aid in self._evicted_ready if aid != agent_id
+            )
+
+    def _update_agent_state_locked(
+        self, agent_id: str, patch: dict[str, Any]
+    ) -> None:
+        if self._state_update_callback is not None:
+            self._state_update_callback(agent_id, patch)
+
+    @staticmethod
+    def _round(value: Optional[float], digits: int = 6) -> Optional[float]:
+        if value is None:
+            return None
+        return round(float(value), digits)
+
+
 # ─────────────────────────────────────── core loop ────────────────────────────
 
 # Tracks whether we've already emitted the "no KV metrics found" diagnostic.
@@ -269,6 +761,9 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
         used_pct   = kv.get("usage_pct")    # 0..1
         total_blks = kv.get("total_blocks")
         used_blks  = kv.get("used_blocks")
+        free_blks  = kv.get("free_blocks")
+        if free_blks is None and total_blks is not None and used_blks is not None:
+            free_blks = max(0, int(total_blks) - int(used_blks))
 
         if used_pct is None and total_blks is None and not _kv_metric_warn_emitted:
             _kv_metric_warn_emitted = True
@@ -285,12 +780,17 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
         used_gb: Optional[float] = (
             round(used_blks * bytes_per_blk / 1e9, 3) if used_blks is not None else None
         )
+        free_gb: Optional[float] = (
+            round(free_blks * bytes_per_blk / 1e9, 3) if free_blks is not None else None
+        )
         return {
             "kv_cache_used_pct":    round(used_pct * 100, 2) if used_pct is not None else None,
             "num_gpu_blocks_total": int(total_blks) if total_blks is not None else None,
             "num_gpu_blocks_used":  used_blks,
+            "num_gpu_blocks_free":  int(free_blks) if free_blks is not None else None,
             "kv_total_gb":          total_gb,
             "kv_used_gb":           used_gb,
+            "kv_free_gb":           free_gb,
         }
     except Exception as exc:
         return {"error": str(exc)}
@@ -298,7 +798,8 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
 
 def run_loop(args: argparse.Namespace, bytes_per_blk: int,
              get_agents: Callable[[], dict],
-             stop_event: Optional[threading.Event] = None) -> None:
+             stop_event: Optional[threading.Event] = None,
+             admission_controller: Optional[DynamicAdmissionController] = None) -> None:
     """Main poll loop.
 
     Parameters
@@ -332,6 +833,15 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
                                  getattr(args, "total_gpu_blocks", 0)),
             "agents": agents,
         }
+        if admission_controller is not None:
+            record["admission"] = admission_controller.on_tick(
+                tick=tick,
+                vllm_info=record["vllm"],
+                agents=agents,
+                bytes_per_blk=bytes_per_blk,
+            )
+        else:
+            record["admission"] = {"enabled": False, "reasons": ["not_configured"]}
 
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
@@ -384,6 +894,19 @@ def parse_args() -> argparse.Namespace:
                           "a block-count metric in Prometheus (e.g. vllm_ascend with only a "
                           "usage-%% gauge). Must match --num-gpu-blocks-override in vLLM args.")
 
+    ac = p.add_argument_group("dynamic admission control")
+    ac.add_argument("--admission-control", action="store_true",
+                    help="Enable admission/eviction policy decisions in the sidecar.")
+    ac.add_argument("--admission-threshold-gb", type=float, default=0.1,
+                    help="Free KV-cache GB threshold that triggers pressure eviction.")
+    ac.add_argument("--admission-predictor-model", default=None,
+                    help="Saved remaining-time predictor model for idle-agent scoring.")
+    ac.add_argument("--eviction-endpoint", default=None,
+                    help="vLLM admin endpoint for per-agent KV eviction. Defaults to "
+                         "<vllm-url>/agent_kv_cache/evict.")
+    ac.add_argument("--eviction-timeout-s", type=float, default=2.0,
+                    help="HTTP timeout for one eviction request.")
+
     return p.parse_args()
 
 
@@ -398,6 +921,15 @@ def main() -> int:
         dtype=args.dtype,
     )
     get_agents = _file_agent_reader(Path(args.live_state))
+    admission_controller = None
+    if args.admission_control:
+        admission_controller = DynamicAdmissionController(
+            enabled=True,
+            threshold_gb=args.admission_threshold_gb,
+            eviction_endpoint=args.eviction_endpoint or default_eviction_endpoint(args.vllm_url),
+            eviction_timeout_s=args.eviction_timeout_s,
+            predictor_model=args.admission_predictor_model,
+        )
 
     def _stop(sig, frame):
         print("\n[sidecar] shutting down.", flush=True)
@@ -406,7 +938,7 @@ def main() -> int:
     signal.signal(signal.SIGINT,  _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    run_loop(args, bpb, get_agents)
+    run_loop(args, bpb, get_agents, admission_controller=admission_controller)
     return 0
 
 

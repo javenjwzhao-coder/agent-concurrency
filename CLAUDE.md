@@ -1,140 +1,298 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file guides Claude Code and other coding agents working in this
+repository.
 
 ## Platform
 
-This project runs on **Ascend NPU** hardware. The inference backend is **vllm-ascend** (not upstream vLLM). All vLLM patches, config, and references to vLLM behaviour apply to the vllm-ascend fork. When investigating vLLM internals or applying patches, always target the vllm-ascend codebase.
+This project runs on **Ascend NPU** hardware. The inference backend is
+**vllm-ascend**, not plain upstream vLLM. The NPU machine currently uses vLLM
+0.11.0 through vllm-ascend. When investigating internals or applying patches,
+target the installed vllm-ascend/vLLM package and keep version-specific anchors
+in mind.
 
 ## Project Purpose
 
-This is an **ABC-Bench agent tracing and tool-duration prediction framework**. It runs concurrent AI agents against the [ABC-Bench](https://github.com/javenjwzhao-coder/agent-concurrency) coding benchmark, records one rich trace row per tool call, then optionally trains ML models to predict tool execution duration.
+This repository is a **proactive, growth-aware concurrency management framework
+for agentic AI workloads**.
+
+The original tool-call predictor is still important, but it is one part of a
+larger runtime control loop:
+
+1. Run many ABC-Bench coding agents through OpenHands.
+2. Trace their reasoning/tool phases and per-agent KV-cache usage.
+3. Train or load a tool remaining-time predictor.
+4. Run a sidecar that polls vLLM and live agent state.
+5. Dynamically admit new agents when KV headroom allows.
+6. Proactively evict idle tool-call agents when KV pressure rises.
+
+The goal is to maximize useful agent concurrency without exhausting KV cache on
+vllm-ascend.
+
+## Mental Model
+
+Agent workloads have bursty KV growth:
+
+- During `reasoning`, an agent is actively using vLLM and grows KV state.
+- During `tool_call`, the agent is idle from the model's perspective, but its
+  KV blocks may remain resident.
+- Fresh agents should be admitted only when recent average KV growth suggests
+  there is safe headroom.
+- Idle tool-call agents are the best eviction candidates because their current
+  tool can keep running while their next model call is deferred.
+
+The sidecar implements this policy. The predictor helps rank idle agents by:
+
+```text
+eviction_score = kv_usage_gb * predicted_remaining_tool_seconds
+```
 
 ## Dependencies
 
-There is no `requirements.txt`. Install manually:
+There is no `requirements.txt`. Install manually as needed:
 
 ```bash
-pip install openhands-sdk openhands-tools pyyaml pydantic scikit-learn numpy pandas joblib
+pip install openhands-sdk openhands-tools pyyaml pydantic scikit-learn numpy pandas joblib requests
 ```
+
+`pytest` may not be installed in the base environment. Existing lightweight
+tests can be run through direct Python harnesses.
 
 ## Common Commands
 
-**Run agents (direct CLI):**
-```bash
-python src/run_abc_bench_instrumented.py \
-    --dataset-root /data/ABC-Bench \
-    --task-glob 'task_*' \
-    --max-tasks 6 \
-    --model openai/Qwen3-30B-A3B-Instruct \
-    --base-url http://127.0.0.1:8000/v1 \
-    --api-key dummy \
-    --randomise-launch \
-    --max-agents-per-wave 4 \
-    --min-wave-delay-s 2 \
-    --max-wave-delay-s 15 \
-    --launch-seed 42 \
-    --run-tests \
-    --results-root ./abc_results
-```
+Run agents via YAML config:
 
-**Run agents (via YAML config wrapper — preferred):**
 ```bash
 bash run_abc-bench.sh --config config/abc-bench_config.yaml
 bash run_abc-bench.sh --config config/abc-bench_config.yaml --dry-run
 bash run_abc-bench.sh --config config/abc-bench_config.yaml --override dataset.max_tasks=2
 ```
 
-**Train tool-duration predictor:**
+Run agents directly:
+
 ```bash
-python src/build_tool_predictor.py --trace-dir ./abc_results --model hgb --remaining --save-model ./duration_model.joblib
-# model choices: hgb (recommended) | ridge (linear, fast) | rf (random forest)
+python src/run_abc_bench_instrumented.py \
+  --dataset-root /data/ABC-Bench \
+  --task-glob 'task_*' \
+  --max-tasks 6 \
+  --model openai/Qwen3-30B-A3B-Instruct \
+  --base-url http://127.0.0.1:8000/v1 \
+  --api-key dummy \
+  --randomise-launch \
+  --max-agents-per-wave 4 \
+  --min-wave-delay-s 2 \
+  --max-wave-delay-s 15 \
+  --launch-seed 42 \
+  --run-tests \
+  --results-root ./abc_results
 ```
 
-**Run inference on new traces:**
+Train the remaining-time predictor:
+
 ```bash
 python src/build_tool_predictor.py \
-    --trace-dir ./new_traces \
-    --load-model ./duration_model.joblib \
-    --predict-only \
-    --output-predictions ./predictions.csv
+  --trace-dir ./abc_results \
+  --model hgb \
+  --remaining \
+  --save-model ./duration_model.joblib
 ```
 
-**Start vLLM backend (Ascend NPU):**
+Run predictor inference:
+
+```bash
+python src/build_tool_predictor.py \
+  --trace-dir ./new_traces \
+  --load-model ./duration_model.joblib \
+  --predict-only \
+  --output-predictions ./predictions.csv
+```
+
+Start vLLM backend on Ascend:
+
 ```bash
 bash start_vllm.sh
 ```
 
+Patch vllm-ascend/vLLM for per-agent KV telemetry and eviction:
+
+```bash
+python src/vllm_patches/apply_patches.py \
+  --vllm-dir /path/to/site-packages/vllm
+```
+
 ## Architecture
 
-### Execution Pipeline
+### Runner
 
-```
-ABC-Bench Tasks
-  → parse CLI args / YAML config (run_abc-bench.sh expands env vars)
-  → plan_launch_waves()     # randomize task grouping + staggered wave delays
-  → ThreadPoolExecutor      # max_concurrent workers
-      → _agent_thread()     # one thread per task
-          → copy task to isolated workspace
-          → run_single_agent()
-              → build prompt from task.yaml
-              → create LLM handle (vLLM OpenAI-compatible API)
-              → create Agent with tools (Terminal, FileEditor, TaskTracker)
-              → AgentPhaseTracker attached via event callbacks
-              → conversation.send_message() + .run()
-              → write *_trace.csv, *_summary.json, *_llm_metrics.json
-          → maybe_run_tests()   # ./run-tests.sh if --run-tests
-  → aggregate → run_summary.json
-  → (optional) build_tool_predictor.py
+`src/run_abc_bench_instrumented.py` is the orchestrator:
+
+```text
+ABC-Bench tasks
+  -> YAML/CLI config
+  -> launch wave planning
+  -> ThreadPoolExecutor
+  -> one OpenHands agent per task
+  -> AgentPhaseTracker callbacks
+  -> per-tool traces, summaries, LLM metrics
+  -> optional embedded sidecar
+  -> optional predictor build
 ```
 
-### AgentPhaseTracker / ToolCallTraceCollector (core mechanism)
+When dynamic admission is disabled, planned waves submit directly to the thread
+pool. When admission is enabled, planned agents become `AgentLaunchSpec`s in the
+sidecar waiting queue, and the sidecar submits them when headroom allows.
 
-The runner still detects phase boundaries internally for live sidecar state and
-summaries, but `*_trace.csv` is now a detailed tool-call trace, not a phase
-trace. `ToolCallTraceCollector` correlates `ActionEvent` to `ObservationEvent`
-and writes one row per tool call.
+### AgentPhaseTracker and Tool Tracing
+
+The tracker keeps live phase state for the sidecar and writes detailed
+tool-call traces:
 
 | Phase | Opens on | Closes on |
 |-------|----------|-----------|
-| `waiting` | `run_start()` or `MessageEvent(source=agent)` | next event or `run_end()` |
+| `waiting` | `run_start()` or agent message | next event or `run_end()` |
 | `reasoning` | `run_start()` or `ObservationEvent` | `ActionEvent` |
 | `tool_call` | `ActionEvent` | `ObservationEvent` |
 
-Each row in the output `*_trace.csv` includes tool ids, tool name, command,
-serialized arguments, start/end timestamps, duration, outcome, output
-size/preview/hash, and dispatch-time concurrency/KV-cache snapshots. A matching
-`*_trace.jsonl` is written for lossless JSONL consumption.
+On `ActionEvent`, the live state includes tool metadata such as tool name,
+serialized args, payload bytes, phase sequence, and start time. On
+`ObservationEvent`, an evicted agent blocks before re-entering `reasoning`
+until the sidecar re-admits it.
 
-### Prediction Model (`build_tool_predictor.py`)
+### Sidecar
 
-Loads all detailed `*_trace.csv` files, engineers dispatch-time features (tool
-name, command length/tokens/pipes/keywords, payload bytes, text hashes,
-concurrency/KV snapshots, cumulative reasoning, prior-tool stats), trains a
-weighted regression model, and saves model + per-call predictions.
+`src/sidecar.py` can run embedded in the runner or standalone. It polls:
 
-## Key Configuration Files
+- vLLM Prometheus metrics for total/used/free KV blocks.
+- Live per-agent state from the runner.
+- Per-agent KV telemetry mirrored from vLLM responses.
 
-- **`config/abc-bench_config.yaml`** — LLM endpoint, dataset path/glob, launch strategy (wave sizing, delays, seed), and prediction settings. LLM API key read from `$LLM_API_KEY`.
-- **`config/vllm_config.yaml`** — Ascend NPU-specific vLLM bare-metal config (model, memory, tensor parallelism, NUMA topology).
+Dynamic admission computes:
+
+```text
+C = free KV capacity in GB
+s_t = average KV usage across active agents at this tick
+s_prev = previous tick's average
+w = C / min(s_t, s_prev)
+```
+
+Policy order:
+
+1. If `w < 1`, admit no new fresh agents.
+2. If `C <= threshold_gb`, evict highest-scoring idle `tool_call` agents.
+3. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
+
+The waiting queue has two lanes: previously evicted agents first, then fresh
+agents FIFO.
+
+### vllm-ascend Patch
+
+`src/vllm_patches/apply_patches.py` patches vLLM/vllm-ascend to support both
+telemetry and control.
+
+Telemetry:
+
+- Adds `agent_id` to chat requests.
+- Adds `kv_blocks_used` and `kv_blocks_size_gb` to usage responses.
+
+Control:
+
+- Adds `POST /agent_kv_cache/evict`.
+- Forwards `evict_agent_kv(...)` through AsyncLLM, core client, engine core,
+  scheduler, KV cache manager, and block pool.
+- Tracks `agent_id -> request_id -> block_ids` in the scheduler.
+- Evicts only cached blocks with `ref_cnt == 0` for proactive sidecar eviction.
+
+Do not try to evict from sidecar using only `kv_blocks_size_gb`; those fields
+are telemetry. Safe mutation requires scheduler/block-pool state.
+
+## Key Configuration
+
+- `config/abc-bench_config.yaml`
+  - `llm.*`: OpenAI-compatible vLLM endpoint.
+  - `dataset.*`: ABC-Bench task selection.
+  - `launch.*`: baseline launch wave behavior and thread-pool size.
+  - `prediction.*`: optional predictor training.
+  - `sidecar.*`: embedded sidecar and KV geometry.
+  - `sidecar.admission_control.*`: dynamic admission and eviction.
+
+- `config/vllm_config.yaml`
+  - Ascend/vllm-ascend serving configuration.
+  - Geometry must match the sidecar config.
+
+Important admission-control knobs:
+
+```yaml
+sidecar:
+  admission_control:
+    enabled: true
+    threshold_gb: 0.1
+    predictor_model: null
+    eviction_endpoint: null
+    eviction_timeout_s: 2.0
+```
+
+`predictor_model: null` defaults to `prediction.save_model` in the wrapper.
+`eviction_endpoint: null` defaults to
+`<sidecar.vllm_url>/agent_kv_cache/evict`.
 
 ## Output Artifacts
 
-Per agent run (under `results_root/<task_id>/`):
-- `agent_*_trace.csv` — detailed per-tool-call trace
-- `agent_*_trace.jsonl` — JSONL companion for the same tool-call records
-- `agent_*_summary.json` — phase time breakdown and tool-call stats
-- `agent_*_llm_metrics.json` — token usage and inference latency
-- `agent_*_prompt.txt`, `agent_*_test_result.json` — task prompt and test results
+Per agent under `results_root/<task_id>/`:
+
+- `agent_*_trace.csv`
+- `agent_*_trace.jsonl`
+- `agent_*_summary.json`
+- `agent_*_llm_metrics.json`
+- `agent_*_prompt.txt`
+- `agent_*_test_result.json`
 
 Aggregate:
-- `run_summary.json` — all agent summaries combined
-- `prediction_metrics.json` — MAE / RMSE / R² (if prediction was enabled)
+
+- `run_summary.json`
+- `prediction_metrics.json`
+- `sidecar.log` JSONL when sidecar is enabled
+
+Sidecar records include an `admission` object when dynamic admission is enabled,
+with KV capacity, averages, headroom, heap candidates, evictions, admissions,
+and error/disabled reasons.
+
+## Test and Verification Commands
+
+Syntax check:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/agent-concurrency-pyc python3 -m py_compile \
+  src/sidecar.py \
+  src/run_abc_bench_instrumented.py \
+  src/vllm_patches/apply_patches.py \
+  tests/test_sidecar_admission.py
+```
+
+Sidecar admission tests without pytest:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/agent-concurrency-pyc python3 - <<'PY'
+import tests.test_sidecar_admission as t
+for name in sorted(n for n in dir(t) if n.startswith("test_")):
+    getattr(t, name)()
+print("sidecar admission tests: ok")
+PY
+```
+
+Wrapper syntax:
+
+```bash
+bash -n run_abc-bench.sh
+```
 
 ## Design Assumptions
 
-- **OpenHands SDK event ordering**: `ActionEvent` always precedes its corresponding `ObservationEvent`.
-- **Timestamps**: prefer `event.timestamp` from the SDK; fall back to `datetime.now()`. No clock-skew correction.
-- **Thread safety**: each agent runs in its own thread; `AgentPhaseTracker` uses locks for callbacks.
-- **Per-agent KV-cache tracking**: `agent_id` passed via `litellm_extra_body`; requires vLLM support but is optional.
-- **Prediction scope**: models predict individual tool-call duration only — not end-to-end task time.
+- OpenHands emits `ActionEvent` before the matching `ObservationEvent`.
+- Per-agent traces use SDK timestamps when available and UTC wall clock as a
+  fallback.
+- Each agent runs in its own thread; live state and callbacks require locks.
+- Dynamic admission is opt-in to preserve baseline behavior.
+- Per-agent KV telemetry is approximate from the sidecar's perspective; exact
+  block ownership lives inside vLLM.
+- Evicted agents finish their current tool call, then block before the next LLM
+  call until re-admitted.

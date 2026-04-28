@@ -141,10 +141,17 @@ class AgentPhaseTracker:
     └─────────────────────────────────────────────────────────────────────┘
     """
 
-    def __init__(self, agent_id: str, task_id: str, scheduled_dt: datetime):
+    def __init__(
+        self,
+        agent_id: str,
+        task_id: str,
+        scheduled_dt: datetime,
+        admission_controller: Any = None,
+    ):
         self.agent_id = agent_id
         self.task_id = task_id
         self.scheduled_dt = scheduled_dt   # when the launch was *scheduled*
+        self.admission_controller = admission_controller
 
         self._event_log_lines: list[str] = []
         self._phase_durations: dict[str, float] = defaultdict(float)
@@ -218,6 +225,8 @@ class AgentPhaseTracker:
                 "kv_blocks": None,
                 "kv_gb": None,
                 "last_kv_updated": None,
+                "kv_evicted": False,
+                "admission_state": "admitted",
             }
         with self._lock:
             start_dt = now_utc()
@@ -294,6 +303,30 @@ class AgentPhaseTracker:
                     start_dt=event_dt,
                     conversation_id=self._conversation_id,
                 )
+                with _live_lock:
+                    live = _LIVE_AGENTS.get(self.agent_id)
+                    if live is not None:
+                        live.update({
+                            "tool_name": pending.tool_name,
+                            "tool_call_id": pending.tool_call_id,
+                            "tool_command": pending.tool_command,
+                            "tool_args_json": pending.tool_args_json,
+                            "tool_args_keys": pending.tool_args_keys,
+                            "tool_payload_bytes": pending.tool_payload_bytes,
+                            "tool_started_at": iso_utc(event_dt),
+                            "phase_seq": self.tool_collector._seq,
+                            "start_active_agents": pending.start_snapshot.get(
+                                "active_agents", 0
+                            ),
+                            "start_active_tool_calls": pending.start_snapshot.get(
+                                "active_tool_calls", 0
+                            ),
+                            "start_cumulative_reasoning_s": (
+                                pending.start_snapshot.get(
+                                    "cumulative_reasoning_s", 0.0
+                                )
+                            ),
+                        })
 
                 # Human-readable event log (separate from the CSV).
                 self._log_action(event, pending.tool_args, event_dt)
@@ -321,6 +354,23 @@ class AgentPhaseTracker:
                     self._close_phase(event_dt, outcome=outcome,
                                       detail="tool result (no matching action)")
                     self._log_observation(event, outcome, 0.0, event_dt)
+
+                with _live_lock:
+                    live = _LIVE_AGENTS.get(self.agent_id)
+                    if live is not None:
+                        for key in (
+                            "tool_name",
+                            "tool_call_id",
+                            "tool_command",
+                            "tool_args_json",
+                            "tool_args_keys",
+                            "tool_payload_bytes",
+                            "tool_started_at",
+                        ):
+                            live.pop(key, None)
+
+                if self.admission_controller is not None:
+                    self.admission_controller.wait_if_evicted(self.agent_id)
 
                 # After a tool result the LLM starts reasoning again.
                 self._open_phase("reasoning", event_dt)
@@ -577,6 +627,7 @@ def run_single_agent(
     max_iterations: int,
     results_dir: Path,
     scheduled_dt: datetime,
+    admission_controller: Any = None,
 ) -> dict[str, Any]:
     """
     Execute one agent on one task and return a summary dict.
@@ -592,7 +643,8 @@ def run_single_agent(
     llm = make_llm(llm_model, llm_base_url, llm_api_key, agent_id)
     agent = make_agent(llm)
     tracker = AgentPhaseTracker(agent_id=agent_id, task_id=task_dir.name,
-                                scheduled_dt=scheduled_dt)
+                                scheduled_dt=scheduled_dt,
+                                admission_controller=admission_controller)
 
     conversation = Conversation(
         agent=agent,
@@ -664,6 +716,8 @@ def run_single_agent(
                 tracker.run_end()
             else:
                 tracker.run_end(outcome="error", detail=repr(run_exc_info[1]))
+        if admission_controller is not None:
+            admission_controller.finish_agent(agent_id)
 
         with _litellm_cb_lock:
             try:
@@ -785,12 +839,16 @@ def plan_launch_waves(
 def launch_agents(
     waves: list[tuple[float, list[Path]]],
     args: argparse.Namespace,
+    admission_controller: Any = None,
 ) -> list[dict[str, Any]]:
     """
     Execute the planned launch waves using a thread pool.
     Each agent runs in its own thread; waves are staggered by sleeping
     on the main thread.
     """
+    if admission_controller is not None:
+        return launch_agents_with_admission_control(waves, args, admission_controller)
+
     all_summaries: list[dict[str, Any]] = []
     executor = ThreadPoolExecutor(max_workers=args.max_concurrent or 8)
     futures = []
@@ -839,6 +897,102 @@ def launch_agents(
     return all_summaries
 
 
+def launch_agents_with_admission_control(
+    waves: list[tuple[float, list[Path]]],
+    args: argparse.Namespace,
+    admission_controller: Any,
+) -> list[dict[str, Any]]:
+    """Queue planned agents and let the sidecar admit them into the executor."""
+    import sidecar as _sidecar
+
+    all_summaries: list[dict[str, Any]] = []
+    executor = ThreadPoolExecutor(max_workers=args.max_concurrent or 8)
+    futures = []
+    futures_lock = threading.Lock()
+    wave_start = time.monotonic()
+    global_idx = 0
+    total_agents = sum(len(batch) for _, batch in waves)
+
+    def _submit_admitted(spec: _sidecar.AgentLaunchSpec):
+        payload = spec.payload
+        fut = executor.submit(
+            _agent_thread,
+            agent_id=payload["agent_id"],
+            task_dir=payload["task_dir"],
+            original_task_dir=payload["original_task_dir"],
+            args=payload["args"],
+            result_dir=payload["result_dir"],
+            scheduled_dt=payload["scheduled_dt"],
+            admission_controller=admission_controller,
+        )
+        with futures_lock:
+            futures.append(fut)
+        log.info("[admission] admitted %s", spec.agent_id)
+        return fut
+
+    admission_controller.set_admit_callback(_submit_admitted)
+    try:
+        for wave_idx, (delay_s, task_batch) in enumerate(waves):
+            elapsed = time.monotonic() - wave_start
+            sleep_needed = delay_s - elapsed
+            if sleep_needed > 0:
+                log.info("Sleeping %.1fs before wave %d …", sleep_needed, wave_idx)
+                time.sleep(sleep_needed)
+
+            scheduled_dt = now_utc()
+            for task_dir in task_batch:
+                agent_id = f"agent_{task_dir.name}_w{wave_idx}_{global_idx}"
+                work_dir = copy_task_to_workspace(
+                    task_dir, args.workspace_root,
+                    suffix=f"_w{wave_idx}_{global_idx}",
+                )
+                global_idx += 1
+                result_dir = args.results_root / task_dir.name
+                spec = _sidecar.AgentLaunchSpec(
+                    agent_id=agent_id,
+                    payload={
+                        "agent_id": agent_id,
+                        "task_dir": work_dir,
+                        "original_task_dir": task_dir,
+                        "args": args,
+                        "result_dir": result_dir,
+                        "scheduled_dt": scheduled_dt,
+                    },
+                    metadata={
+                        "task_id": task_dir.name,
+                        "wave_idx": wave_idx,
+                        "scheduled_ts": iso_utc(scheduled_dt),
+                    },
+                )
+                admission_controller.enqueue_fresh(spec)
+
+            log.info("Wave %d: queued %d agent(s) for admission  [%s]",
+                     wave_idx, len(task_batch),
+                     ", ".join(t.name for t in task_batch))
+
+        seen = set()
+        while len(seen) < total_agents:
+            with futures_lock:
+                current = list(futures)
+            for fut in current:
+                if fut in seen or not fut.done():
+                    continue
+                seen.add(fut)
+                try:
+                    all_summaries.append(fut.result())
+                except Exception as exc:
+                    log.error("Agent failed: %s", exc, exc_info=True)
+                    all_summaries.append({"error": repr(exc)})
+            if len(seen) >= total_agents:
+                break
+            time.sleep(0.2)
+    finally:
+        admission_controller.set_admit_callback(None)
+        executor.shutdown(wait=True)
+
+    return all_summaries
+
+
 def _agent_thread(
     agent_id: str,
     task_dir: Path,
@@ -846,6 +1000,7 @@ def _agent_thread(
     args: argparse.Namespace,
     result_dir: Path,
     scheduled_dt: datetime,
+    admission_controller: Any = None,
 ) -> dict[str, Any]:
     """Target function for each agent thread."""
     try:
@@ -858,6 +1013,7 @@ def _agent_thread(
             max_iterations=args.max_iterations,
             results_dir=result_dir,
             scheduled_dt=scheduled_dt,
+            admission_controller=admission_controller,
         )
         if args.run_tests:
             test_result = maybe_run_tests(
@@ -923,6 +1079,16 @@ def parse_args() -> argparse.Namespace:
                     help="Total GPU/NPU KV-cache blocks. Required when vLLM does not expose "
                          "a block-count metric in Prometheus (e.g. vllm_ascend). "
                          "Must match --num-gpu-blocks-override in vLLM args.")
+    sc.add_argument("--sidecar-admission-control", action="store_true",
+                    help="Let the embedded sidecar admit queued agents dynamically.")
+    sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=0.1,
+                    help="Free KV-cache GB threshold that triggers pressure eviction.")
+    sc.add_argument("--sidecar-admission-predictor-model", default=None,
+                    help="Saved remaining-time predictor model for tool-call scoring.")
+    sc.add_argument("--sidecar-eviction-endpoint", default=None,
+                    help="vLLM admin endpoint for per-agent KV eviction.")
+    sc.add_argument("--sidecar-eviction-timeout-s", type=float, default=2.0,
+                    help="HTTP timeout for one eviction request.")
     return p.parse_args()
 
 
@@ -935,8 +1101,15 @@ def main() -> int:
             print(f"ERROR: missing --{name.replace('_','-')} or "
                   f"{name.upper()}", file=sys.stderr)
             return 2
+    if args.sidecar_admission_control and not args.sidecar_log_file:
+        print("ERROR: --sidecar-admission-control requires --sidecar-log-file",
+              file=sys.stderr)
+        return 2
 
     # ── optional embedded sidecar ────────────────────────────────────────────
+    _sc_stop = None
+    _sc_thread = None
+    _sc_admission_controller = None
     if args.sidecar_log_file:
         missing = [f"--sidecar-{f}" for f in ("num-layers", "num-kv-heads", "head-dim")
                    if getattr(args, f"sidecar_{f.replace('-', '_')}") is None]
@@ -960,13 +1133,30 @@ def main() -> int:
             _sc_args.num_layers, _sc_args.num_kv_heads,
             _sc_args.head_dim, _sc_args.block_size, _sc_args.dtype,
         )
+        def _update_live_agent(agent_id: str, patch: dict[str, Any]) -> None:
+            with _live_lock:
+                if agent_id in _LIVE_AGENTS:
+                    _LIVE_AGENTS[agent_id].update(patch)
+
         def _get_agents() -> dict:
             with _live_lock:
-                return dict(_LIVE_AGENTS)
+                return {agent_id: dict(state) for agent_id, state in _LIVE_AGENTS.items()}
+        if args.sidecar_admission_control:
+            _sc_admission_controller = _sidecar.DynamicAdmissionController(
+                enabled=True,
+                threshold_gb=args.sidecar_admission_threshold_gb,
+                eviction_endpoint=(
+                    args.sidecar_eviction_endpoint
+                    or _sidecar.default_eviction_endpoint(args.sidecar_vllm_url)
+                ),
+                eviction_timeout_s=args.sidecar_eviction_timeout_s,
+                predictor_model=args.sidecar_admission_predictor_model,
+                state_update_callback=_update_live_agent,
+            )
         _sc_stop = threading.Event()
         _sc_thread = threading.Thread(
             target=_sidecar.run_loop,
-            args=(_sc_args, _sc_bpb, _get_agents, _sc_stop),
+            args=(_sc_args, _sc_bpb, _get_agents, _sc_stop, _sc_admission_controller),
             daemon=True, name="sidecar",
         )
         _sc_thread.start()
@@ -988,7 +1178,26 @@ def main() -> int:
     args.results_root.mkdir(parents=True, exist_ok=True)
 
     # ── choose launch strategy ──
-    if args.randomise_launch:
+    if _sc_admission_controller is not None:
+        if args.randomise_launch:
+            waves = plan_launch_waves(
+                task_dirs,
+                max_agents_per_wave=args.max_agents_per_wave,
+                min_delay_s=args.min_wave_delay_s,
+                max_delay_s=args.max_wave_delay_s,
+                seed=args.launch_seed,
+            )
+        else:
+            waves = [(0.0, task_dirs)]
+        log.info("Planned %d admission-controlled wave(s) for %d task(s):",
+                 len(waves), len(task_dirs))
+        for i, (delay, batch) in enumerate(waves):
+            log.info("  wave %d @ +%.1fs: %s", i, delay,
+                     [t.name for t in batch])
+        summaries = launch_agents(
+            waves, args, admission_controller=_sc_admission_controller
+        )
+    elif args.randomise_launch:
         waves = plan_launch_waves(
             task_dirs,
             max_agents_per_wave=args.max_agents_per_wave,
@@ -1019,6 +1228,7 @@ def main() -> int:
                     max_iterations=args.max_iterations,
                     results_dir=result_dir,
                     scheduled_dt=now_utc(),
+                    admission_controller=None,
                 )
                 if args.run_tests:
                     summary["test_result"] = maybe_run_tests(

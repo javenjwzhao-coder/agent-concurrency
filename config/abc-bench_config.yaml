@@ -162,6 +162,17 @@ sidecar:
   # may reflect the physical NPU allocation rather than the scheduler-level limit.
   total_gpu_blocks: 1000
 
+  # Optional dynamic admission/eviction policy. Disabled preserves the current
+  # monitor-only sidecar behavior.
+  admission_control:
+    enabled: false
+    threshold_gb: 0.1
+    # null → defaults to prediction.save_model in run_abc-bench.sh.
+    predictor_model: null
+    # null → <sidecar.vllm_url>/agent_kv_cache/evict
+    eviction_endpoint: null
+    eviction_timeout_s: 2.0
+
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Logging                                                                 ║
