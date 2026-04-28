@@ -109,13 +109,14 @@ testing:
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Prediction Model (Step 2)                                               ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-# Optional: run the tool-duration predictor automatically after the agents
-# finish.  Set enabled: false to skip.
+# Optional: run build_tool_predictor.py automatically after the agents finish.
+# Tool-call traces are always collected by the runner; this controls model
+# training only. Set enabled: false to collect traces without building a model.
 prediction:
   enabled: true
 
-  # Model type: "ridge" (fast, interpretable) or "rf" (random forest).
-  model: "rf"
+  # Model type: "hgb" (default, weighted gradient boosting), "ridge", or "rf".
+  model: "hgb"
 
   # Train/test split fraction.
   test_fraction: 0.2

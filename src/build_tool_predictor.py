@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-predict_tool_duration.py  (v2)
+build_tool_predictor.py  (v2)
 ──────────────────────────────
 Train and evaluate a regression model that predicts tool-call
 duration **or remaining time** from per-agent trace CSVs produced by
@@ -23,22 +23,22 @@ Improvements over v1
 Usage
 ─────
     # Train + evaluate (default: hgb, log-target, agent-group split):
-    python predict_tool_duration.py --trace-dir ./abc_results
+    python src/build_tool_predictor.py --trace-dir ./abc_results
 
     # Remaining-time prediction with 5-fold CV:
-    python predict_tool_duration.py \\
+    python src/build_tool_predictor.py \\
         --trace-dir ./abc_results --remaining --cv 5
 
     # Quantile bands (P10/P50/P90) saved to CSV:
-    python predict_tool_duration.py \\
+    python src/build_tool_predictor.py \\
         --trace-dir ./abc_results --quantiles --output-predictions preds.csv
 
     # Save trained model:
-    python predict_tool_duration.py \\
+    python src/build_tool_predictor.py \\
         --trace-dir ./abc_results --model hgb --save-model model.joblib
 
     # Inference on new traces:
-    python predict_tool_duration.py \\
+    python src/build_tool_predictor.py \\
         --trace-dir ./new_results --load-model model.joblib --predict-only
 
 Install:
@@ -50,7 +50,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -83,6 +83,11 @@ except ImportError:
 # Each completed tool call → len(_REMAINING_FRACS) training rows.
 _REMAINING_FRACS: list[float] = [0.0, 0.10, 0.25, 0.50, 0.75]
 
+# Calls at or above this duration get extra training weight.  The model still
+# predicts all calls, but this nudges fitting toward the high-impact tail.
+LONG_CALL_THRESHOLD_S: float = 2.0
+LONG_CALL_WEIGHT: float = 3.0
+
 
 # ─────────────────────────── feature engineering ─────────────────────────────
 
@@ -92,7 +97,7 @@ _TOP_EXTS: tuple[str, ...] = ("py", "js", "ts", "rs", "go", "md")
 # Text-hash features over the action's natural-language signal:
 # summary + tool_command + path + sub-command. Stateless (no fitting), so
 # safe to call at both train and inference time without leakage.
-_TEXT_HASH_DIM: int = 32
+_TEXT_HASH_DIM: int = 64
 _TEXT_HASHER = HashingVectorizer(
     n_features=_TEXT_HASH_DIM,
     analyzer="char_wb",
@@ -144,6 +149,12 @@ def _timeout(d: dict) -> float:
         return 0.0
 
 
+def _num_col(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(default, index=df.index)
+    return pd.to_numeric(df[col], errors="coerce").fillna(default)
+
+
 def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFrame:
     """Build numeric feature matrix from tool_call rows (preserves df.index)."""
     feat = pd.DataFrame(index=df.index)
@@ -175,10 +186,22 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
     feat["command_semicolon_count"] = cmd.str.count(r";")
     feat["command_redirect_count"]  = cmd.str.count(r">")
 
-    feat["phase_seq"] = pd.to_numeric(df["phase_seq"], errors="coerce").fillna(0)
+    feat["phase_seq"] = _num_col(df, "phase_seq", 0)
 
-    # Filled later by enrich_sequential_features
-    feat["cumulative_reasoning_s"] = 0.0
+    # Detailed traces expose these at dispatch time.  They are safe for
+    # training because they are captured when the ActionEvent fires.
+    feat["start_active_agents"] = _num_col(df, "start_active_agents", 0)
+    feat["start_active_tool_calls"] = _num_col(df, "start_active_tool_calls", 0)
+    feat["start_kv_blocks"] = _num_col(df, "start_kv_blocks", 0)
+    raw_start_kv = df.get("start_kv_blocks", pd.Series("", index=df.index))
+    feat["start_kv_blocks_missing"] = (
+        raw_start_kv.isna() | raw_start_kv.astype(str).eq("")
+    ).astype(int)
+    feat["start_kv_gb"] = _num_col(df, "start_kv_gb", 0)
+
+    # Filled from detailed traces when available, then refined/fallback-filled
+    # by enrich_sequential_features for legacy trace directories.
+    feat["cumulative_reasoning_s"] = _num_col(df, "start_cumulative_reasoning_s", 0.0)
     feat["prior_tool_calls"]       = 0
     feat["prior_avg_tool_s"]       = 0.0
     feat["prior_tool_max_s"]       = 0.0
@@ -251,7 +274,10 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
     # Captures the free-form action description ("View handler.js to ...",
     # "$ ls -R", etc.) that repeats across runs and predicts duration.
     summaries = (
-        df.get("detail", pd.Series("", index=df.index))
+        df.get("action_summary", pd.Series("", index=df.index))
+          .fillna("").astype(str)
+        + " | "
+        + df.get("detail", pd.Series("", index=df.index))
           .fillna("").astype(str)
     )
     paths = args_series.map(lambda d: str(d.get("path", "")))
@@ -262,8 +288,12 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
         hash_matrix = _TEXT_HASHER.transform(text_blob).toarray()
     else:
         hash_matrix = np.zeros((0, _TEXT_HASH_DIM))
-    for i in range(_TEXT_HASH_DIM):
-        feat[f"text_hash_{i}"] = hash_matrix[:, i]
+    hash_df = pd.DataFrame(
+        hash_matrix,
+        index=df.index,
+        columns=[f"text_hash_{i}" for i in range(_TEXT_HASH_DIM)],
+    )
+    feat = pd.concat([feat, hash_df], axis=1)
 
     if remaining_mode:
         # Set to 0 here; overwritten per-snapshot in augment_remaining()
@@ -272,29 +302,75 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
     return feat
 
 
-def enrich_sequential_features(full_df: pd.DataFrame,
-                                feat: pd.DataFrame) -> pd.DataFrame:
+def enrich_sequential_features(
+    full_df: pd.DataFrame,
+    feat: pd.DataFrame,
+    tool_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     """
     Fill per-agent rolling context: cumulative reasoning time,
     count / mean / max / std of prior tool-call durations.
     """
     feat = feat.copy()
+    if tool_df is None:
+        tool_df = full_df.loc[full_df["phase"] == "tool_call"].copy()
 
-    for _agent, group in full_df.groupby("agent_id"):
+    # Detailed tool-call CSVs have their own RangeIndex, so match to rows by
+    # stable dispatch-time keys and fall back to per-agent order.
+    key_to_feat_idxs: dict[tuple[str, str], list[Any]] = {}
+    order_by_agent: dict[str, list[Any]] = {}
+    for idx, row in tool_df.iterrows():
+        agent = str(row.get("agent_id", ""))
+        start = str(row.get("start_ts", ""))
+        key_to_feat_idxs.setdefault((agent, start), []).append(idx)
+        order_by_agent.setdefault(agent, []).append(idx)
+    used: set[Any] = set()
+
+    full_sorted = full_df.copy()
+    has_reasoning_rows = (
+        "phase" in full_sorted.columns
+        and full_sorted["phase"].astype(str).eq("reasoning").any()
+    )
+    if "phase_seq" in full_sorted.columns:
+        full_sorted["_phase_seq_sort"] = pd.to_numeric(
+            full_sorted["phase_seq"], errors="coerce"
+        ).fillna(0)
+        full_sorted = full_sorted.sort_values(["agent_id", "_phase_seq_sort"])
+
+    for agent, group in full_sorted.groupby("agent_id", sort=False):
         cum_reasoning = 0.0
         tool_durs: list[float] = []
 
         for idx, row in group.iterrows():
             if row["phase"] == "reasoning":
-                cum_reasoning += float(row.get("duration_s") or 0)
-            elif row["phase"] == "tool_call" and idx in feat.index:
-                n = len(tool_durs)
-                feat.at[idx, "cumulative_reasoning_s"] = cum_reasoning
-                feat.at[idx, "prior_tool_calls"]       = n
-                feat.at[idx, "prior_avg_tool_s"] = float(np.mean(tool_durs)) if n > 0 else 0.0
-                feat.at[idx, "prior_tool_max_s"] = float(max(tool_durs))     if n > 0 else 0.0
-                feat.at[idx, "prior_tool_std_s"] = float(np.std(tool_durs))  if n > 1 else 0.0
-                tool_durs.append(float(row.get("duration_s") or 0))
+                dur = float(row.get("duration_s") or 0)
+                cum_reasoning += dur if np.isfinite(dur) else 0.0
+            elif row["phase"] == "tool_call":
+                key = (str(row.get("agent_id", "")), str(row.get("start_ts", "")))
+                feat_idx = None
+                candidates = key_to_feat_idxs.get(key, [])
+                while candidates and candidates[0] in used:
+                    candidates.pop(0)
+                if candidates:
+                    feat_idx = candidates.pop(0)
+                else:
+                    queue = order_by_agent.get(str(agent), [])
+                    while queue and queue[0] in used:
+                        queue.pop(0)
+                    if queue:
+                        feat_idx = queue.pop(0)
+
+                if feat_idx is not None and feat_idx in feat.index:
+                    used.add(feat_idx)
+                    n = len(tool_durs)
+                    if has_reasoning_rows:
+                        feat.at[feat_idx, "cumulative_reasoning_s"] = cum_reasoning
+                    feat.at[feat_idx, "prior_tool_calls"]       = n
+                    feat.at[feat_idx, "prior_avg_tool_s"] = float(np.mean(tool_durs)) if n > 0 else 0.0
+                    feat.at[feat_idx, "prior_tool_max_s"] = float(max(tool_durs))     if n > 0 else 0.0
+                    feat.at[feat_idx, "prior_tool_std_s"] = float(np.std(tool_durs))  if n > 1 else 0.0
+                dur = float(row.get("duration_s") or 0)
+                tool_durs.append(dur if np.isfinite(dur) else 0.0)
 
     return feat
 
@@ -346,6 +422,20 @@ def inv_transform(arr: np.ndarray) -> np.ndarray:
     return np.maximum(0.0, np.expm1(arr))
 
 
+def build_sample_weights(
+    tool_df: pd.DataFrame,
+    remaining_mode: bool = False,
+    long_threshold_s: float = LONG_CALL_THRESHOLD_S,
+    long_weight: float = LONG_CALL_WEIGHT,
+) -> pd.Series:
+    """Weight long source calls more heavily while keeping all samples."""
+    durs = pd.to_numeric(tool_df["duration_s"], errors="coerce").fillna(0).values
+    if remaining_mode:
+        durs = np.tile(durs, len(_REMAINING_FRACS))
+    weights = np.where(durs >= long_threshold_s, long_weight, 1.0)
+    return pd.Series(weights, name="sample_weight")
+
+
 # ─────────────────────────── data loading ────────────────────────────────────
 
 def load_traces(trace_dir: Path) -> pd.DataFrame:
@@ -363,12 +453,129 @@ def load_traces(trace_dir: Path) -> pd.DataFrame:
         raise ValueError("All trace CSVs failed to load")
 
     combined = pd.concat(frames, ignore_index=True)
-    for col in ("phase_seq", "duration_s", "tool_payload_bytes"):
+    if "phase" not in combined.columns:
+        combined["phase"] = "tool_call"
+    else:
+        combined["phase"] = combined["phase"].fillna("tool_call")
+    for col in (
+        "phase_seq",
+        "tool_seq",
+        "duration_s",
+        "tool_payload_bytes",
+        "start_active_agents",
+        "start_active_tool_calls",
+        "start_cumulative_reasoning_s",
+        "start_kv_blocks",
+        "start_kv_gb",
+    ):
         if col in combined.columns:
             combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
-    print(f"Loaded {len(combined)} phase records from {len(csv_files)} file(s)")
+    print(f"Loaded {len(combined)} trace records from {len(csv_files)} file(s)")
     return combined
+
+
+def _normalise_tool_call_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Make detailed and legacy tool-call rows share a common shape."""
+    df = df.copy()
+    if "phase" not in df.columns:
+        df["phase"] = "tool_call"
+    else:
+        df["phase"] = df["phase"].fillna("tool_call")
+    if "phase_seq" not in df.columns:
+        df["phase_seq"] = df.get("tool_seq", 0)
+    if "detail" not in df.columns:
+        df["detail"] = df.get("action_summary", "")
+    else:
+        df["detail"] = df["detail"].fillna(df.get("action_summary", ""))
+    if "tool_args_json" not in df.columns:
+        df["tool_args_json"] = "{}"
+    if "tool_payload_bytes" not in df.columns:
+        df["tool_payload_bytes"] = df["tool_args_json"].fillna("{}").astype(str).map(
+            lambda s: len(s.encode("utf-8"))
+        )
+    for col in (
+        "phase_seq",
+        "tool_seq",
+        "duration_s",
+        "tool_payload_bytes",
+        "start_active_agents",
+        "start_active_tool_calls",
+        "start_cumulative_reasoning_s",
+        "start_kv_blocks",
+        "start_kv_gb",
+        "observation_bytes",
+        "observation_line_count",
+        "returncode",
+        "timed_out",
+    ):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def load_detailed_tool_calls(trace_dir: Path) -> pd.DataFrame:
+    """Load rich collector artifacts, preferring CSV over JSONL."""
+    csv_files = sorted(trace_dir.rglob("*_tool_calls.csv"))
+    frames = []
+    for p in csv_files:
+        try:
+            frames.append(pd.read_csv(p, dtype=str))
+        except Exception as exc:
+            print(f"WARNING: skipping {p}: {exc}", file=sys.stderr)
+
+    if not frames:
+        jsonl_files = sorted(trace_dir.rglob("*_tool_calls.jsonl"))
+        rows: list[dict[str, Any]] = []
+        for p in jsonl_files:
+            try:
+                with p.open("r", encoding="utf-8") as f:
+                    rows.extend(json.loads(line) for line in f if line.strip())
+            except Exception as exc:
+                print(f"WARNING: skipping {p}: {exc}", file=sys.stderr)
+        if rows:
+            frames.append(pd.DataFrame(rows))
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = _normalise_tool_call_frame(pd.concat(frames, ignore_index=True))
+    print(f"Loaded {len(combined)} detailed tool-call records")
+    return combined
+
+
+def _tool_key_frame(df: pd.DataFrame) -> pd.Series:
+    parts = []
+    for col in ("agent_id", "start_ts", "end_ts"):
+        if col in df.columns:
+            parts.append(df[col].fillna("").astype(str))
+        else:
+            parts.append(pd.Series("", index=df.index))
+    return parts[0] + "\0" + parts[1] + "\0" + parts[2]
+
+
+def load_tool_calls(trace_dir: Path, full_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return training rows for tool calls.
+
+    New ``*_trace.csv`` files already contain detailed tool-call rows.  Older
+    ``*_tool_calls.csv/jsonl`` files are merged when present, preserving
+    compatibility with trace directories produced during the transition.
+    """
+    legacy = _normalise_tool_call_frame(
+        full_df.loc[full_df["phase"] == "tool_call"].copy()
+    )
+    detailed = load_detailed_tool_calls(trace_dir)
+    if detailed.empty:
+        return legacy
+
+    detailed_keys = set(_tool_key_frame(detailed).tolist())
+    legacy_missing = legacy.loc[~_tool_key_frame(legacy).isin(detailed_keys)]
+    if not legacy_missing.empty:
+        combined = pd.concat([detailed, legacy_missing], ignore_index=True, sort=False)
+    else:
+        combined = detailed
+    return _normalise_tool_call_frame(combined)
 
 
 def prepare_dataset(
@@ -387,14 +594,14 @@ def prepare_dataset(
     tool_names – tool name per X row (for per-tool breakdown)
     """
     full_df = load_traces(trace_dir)
-    tool_df = full_df.loc[full_df["phase"] == "tool_call"].copy()
+    tool_df = load_tool_calls(trace_dir, full_df)
 
     if tool_df.empty:
         raise ValueError("No tool_call rows found in traces")
     tool_df = tool_df.dropna(subset=["duration_s"])
 
     feat = build_features(tool_df, remaining_mode=remaining_mode)
-    feat = enrich_sequential_features(full_df, feat)
+    feat = enrich_sequential_features(full_df, feat, tool_df)
 
     if remaining_mode:
         X, y_raw, tool_names = augment_remaining(tool_df, feat, _REMAINING_FRACS)
@@ -457,6 +664,23 @@ def build_model(name: str) -> Pipeline:
     raise ValueError(f"Unknown model: {name!r}.  Use 'ridge', 'rf', or 'hgb'.")
 
 
+def fit_pipeline(
+    pipeline: Pipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    sample_weight: Optional[pd.Series] = None,
+) -> Pipeline:
+    """Fit a pipeline, passing weights to the final estimator when provided."""
+    if sample_weight is None:
+        pipeline.fit(X, y)
+        return pipeline
+    try:
+        pipeline.fit(X, y, model__sample_weight=sample_weight.values)
+    except TypeError:
+        pipeline.fit(X, y)
+    return pipeline
+
+
 def build_quantile_pipelines() -> dict[str, Pipeline]:
     """Three GradientBoostingRegressor pipelines for P10, P50, P90."""
     return {
@@ -507,6 +731,21 @@ def evaluate(
     print(f"  R²       = {r2:.4f}")
     print(f"  n        = {len(y_true)}")
 
+    long_mask = y_true >= LONG_CALL_THRESHOLD_S
+    if long_mask.any():
+        long_mae = mean_absolute_error(y_true[long_mask], y_pred[long_mask])
+        long_rmse = np.sqrt(mean_squared_error(y_true[long_mask], y_pred[long_mask]))
+        metrics["long_calls"] = {
+            "threshold_s": LONG_CALL_THRESHOLD_S,
+            "mae": round(float(long_mae), 4),
+            "rmse": round(float(long_rmse), 4),
+            "n": int(long_mask.sum()),
+        }
+        print(
+            f"  Long-call MAE/RMSE (>= {LONG_CALL_THRESHOLD_S:.1f}s) "
+            f"= {long_mae:.4f}s / {long_rmse:.4f}s  n={int(long_mask.sum())}"
+        )
+
     if tool_names is not None and len(tool_names) == len(y_true):
         print(f"\n── Per-tool breakdown ({label}) ──")
         breakdown: dict = {}
@@ -531,6 +770,7 @@ def cross_validate(
     groups: pd.Series,
     n_splits: int,
     log_target: bool,
+    sample_weights: Optional[pd.Series] = None,
 ) -> dict:
     """GroupKFold CV; agents never straddle train/test folds."""
     n_unique = groups.nunique()
@@ -543,7 +783,8 @@ def cross_validate(
 
     for fold, (tr_idx, te_idx) in enumerate(gkf.split(X, y, groups)):
         p = build_model(model_name)
-        p.fit(X.iloc[tr_idx], y.iloc[tr_idx])
+        w_tr = sample_weights.iloc[tr_idx].reset_index(drop=True) if sample_weights is not None else None
+        fit_pipeline(p, X.iloc[tr_idx], y.iloc[tr_idx], w_tr)
         pred = p.predict(X.iloc[te_idx])
         y_te = inv_transform(y.iloc[te_idx].values) if log_target else y.iloc[te_idx].values
         y_pr = inv_transform(pred) if log_target else np.maximum(0.0, pred)
@@ -580,6 +821,29 @@ def print_feature_importance(pipeline: Pipeline, feature_names: list[str]) -> No
 
 # ─────────────────────────── group-based split ───────────────────────────────
 
+def group_train_test_indices(
+    groups: pd.Series,
+    test_fraction: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    unique = groups.unique()
+
+    if len(unique) < 2:
+        print("WARNING: only one agent group — using random row split", file=sys.stderr)
+        n = len(groups)
+        split = int(n * (1 - test_fraction))
+        idx = np.arange(n)
+        rng = np.random.default_rng(seed)
+        rng.shuffle(idx)
+        return idx[:split], idx[split:]
+
+    rng = np.random.default_rng(seed)
+    n_test = max(1, int(len(unique) * test_fraction))
+    test_agents = set(rng.choice(unique, size=n_test, replace=False))
+    te_mask = groups.isin(test_agents).values
+    return np.where(~te_mask)[0], np.where(te_mask)[0]
+
+
 def group_train_test_split(
     X: pd.DataFrame,
     y: pd.Series,
@@ -592,23 +856,7 @@ def group_train_test_split(
     Split by unique agent_id values so no agent's rows appear in both
     train and test.  Falls back to random split if there is only one agent.
     """
-    unique = groups.unique()
-
-    if len(unique) < 2:
-        print("WARNING: only one agent group — using random row split", file=sys.stderr)
-        n = len(X)
-        split = int(n * (1 - test_fraction))
-        idx = np.arange(n)
-        rng = np.random.default_rng(seed)
-        rng.shuffle(idx)
-        tr_idx, te_idx = idx[:split], idx[split:]
-    else:
-        rng = np.random.default_rng(seed)
-        n_test = max(1, int(len(unique) * test_fraction))
-        test_agents = set(rng.choice(unique, size=n_test, replace=False))
-        te_mask = groups.isin(test_agents).values
-        tr_idx  = np.where(~te_mask)[0]
-        te_idx  = np.where( te_mask)[0]
+    tr_idx, te_idx = group_train_test_indices(groups, test_fraction, seed)
 
     return (
         X.iloc[tr_idx].reset_index(drop=True),
@@ -618,6 +866,64 @@ def group_train_test_split(
         groups.iloc[tr_idx].reset_index(drop=True),
         tool_names.iloc[te_idx].reset_index(drop=True),
     )
+
+
+# ─────────────────────────── realtime inference ──────────────────────────────
+
+class RealtimePredictor:
+    """
+    Deployment wrapper around a saved remaining-time or duration pipeline.
+
+    Callers pass rows from ``build_features`` before one-hot encoding; the
+    wrapper aligns columns to the schema saved with the model.
+    """
+
+    def __init__(
+        self,
+        pipeline: Pipeline,
+        feature_names: list[str],
+        log_target: bool = True,
+    ) -> None:
+        self._pipeline = pipeline
+        self._feat_cols = feature_names
+        self._log = log_target
+
+    @classmethod
+    def load(cls, path: Path, log_target: Optional[bool] = None) -> "RealtimePredictor":
+        pipeline = joblib.load(path)
+        feature_names = getattr(pipeline, "_trained_feature_names", None)
+        if feature_names is None:
+            raise ValueError(
+                f"Model at {path!r} is missing _trained_feature_names; "
+                "save it with build_tool_predictor.py first."
+            )
+        saved_log = getattr(pipeline, "_log_target", True)
+        return cls(
+            pipeline,
+            list(feature_names),
+            log_target=saved_log if log_target is None else log_target,
+        )
+
+    def _prepare(self, feat: pd.DataFrame, elapsed_s: float = 0.0) -> pd.DataFrame:
+        x = feat.copy()
+        if "elapsed_s" in self._feat_cols:
+            x["elapsed_s"] = elapsed_s
+        if "tool_name" in x.columns:
+            x = pd.get_dummies(x, columns=["tool_name"], prefix="tool", dtype=float)
+        x = x.astype(float)
+        for col in self._feat_cols:
+            if col not in x.columns:
+                x[col] = 0.0
+        return x[self._feat_cols]
+
+    def predict_remaining(self, feat: pd.DataFrame, elapsed_s: float = 0.0) -> float:
+        x = self._prepare(feat, elapsed_s=elapsed_s)
+        raw = self._pipeline.predict(x)
+        val = inv_transform(raw)[0] if self._log else float(raw[0])
+        return float(max(0.0, val))
+
+    def predict_duration(self, feat: pd.DataFrame) -> float:
+        return self.predict_remaining(feat, elapsed_s=0.0)
 
 
 # ──────────────────────────────── CLI ─────────────────────────────────────────
@@ -664,6 +970,7 @@ def main() -> int:
         log_target=log_target,
     )
     feature_names = list(X.columns)
+    sample_weights = build_sample_weights(tool_df, remaining_mode=args.remaining)
 
     # ── inference-only mode ──────────────────────────────────────────────────
     if args.predict_only:
@@ -672,6 +979,7 @@ def main() -> int:
             return 2
         pipeline = joblib.load(args.load_model)
         print(f"Loaded model from {args.load_model}")
+        log_target = getattr(pipeline, "_log_target", log_target)
 
         train_cols = getattr(pipeline, "_trained_feature_names", None)
         if train_cols is not None:
@@ -694,23 +1002,34 @@ def main() -> int:
         return 0
 
     # ── group-based train / test split ───────────────────────────────────────
-    X_tr, X_te, y_tr, y_te, g_tr, tn_te = group_train_test_split(
-        X, y, groups, tool_names, args.test_fraction, args.seed)
+    tr_idx, te_idx = group_train_test_indices(groups, args.test_fraction, args.seed)
+    X_tr = X.iloc[tr_idx].reset_index(drop=True)
+    X_te = X.iloc[te_idx].reset_index(drop=True)
+    y_tr = y.iloc[tr_idx].reset_index(drop=True)
+    y_te = y.iloc[te_idx].reset_index(drop=True)
+    tn_te = tool_names.iloc[te_idx].reset_index(drop=True)
+    w_tr = sample_weights.iloc[tr_idx].reset_index(drop=True)
 
     print(f"\nSplit (by agent): {len(X_tr)} train / {len(X_te)} test")
-    print(f"Model: {args.model}  |  log-target: {log_target}  |  remaining: {args.remaining}")
+    print(
+        f"Model: {args.model}  |  log-target: {log_target}  |  remaining: {args.remaining}  "
+        f"| long-call weight: >= {LONG_CALL_THRESHOLD_S:.1f}s x{LONG_CALL_WEIGHT:.1f}"
+    )
 
     # ── optional cross-validation ─────────────────────────────────────────────
     all_metrics: dict = {}
     if args.cv > 0:
         print(f"\n── {args.cv}-fold GroupKFold CV ──")
         all_metrics["cv"] = cross_validate(
-            args.model, X, y, groups, args.cv, log_target)
+            args.model, X, y, groups, args.cv, log_target, sample_weights)
 
     # ── train point-estimate model ────────────────────────────────────────────
     pipeline = build_model(args.model)
-    pipeline.fit(X_tr, y_tr)
+    fit_pipeline(pipeline, X_tr, y_tr, w_tr)
     pipeline._trained_feature_names = feature_names  # for inference alignment
+    pipeline._log_target = log_target
+    pipeline._remaining_mode = args.remaining
+    pipeline._long_call_threshold_s = LONG_CALL_THRESHOLD_S
 
     # ── evaluate point estimates ──────────────────────────────────────────────
     pred_log  = pipeline.predict(X_te)
@@ -725,7 +1044,7 @@ def main() -> int:
     if args.quantiles:
         print("\n── Training quantile models (P10 / P50 / P90) ──")
         for label, qp in build_quantile_pipelines().items():
-            qp.fit(X_tr, y_tr)
+            fit_pipeline(qp, X_tr, y_tr, w_tr)
             q_raw = qp.predict(X_te)
             q_preds_te[label] = inv_transform(q_raw) if log_target else np.maximum(0.0, q_raw)
             print(f"  {label}: median={np.median(q_preds_te[label]):.3f}s  "

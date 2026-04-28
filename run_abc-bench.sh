@@ -10,7 +10,7 @@
 #   • --override key.path=value for quick tweaks without editing YAML.
 #   • Validates the config before launching (fails fast on missing fields).
 #   • --dry-run prints the resolved commands without executing.
-#   • Optionally runs predict_tool_duration.py after agents finish.
+#   • Optionally runs build_tool_predictor.py after agents finish.
 #
 # Usage:
 #   bash run_with_config.sh --config abc_bench_config.yaml
@@ -22,7 +22,7 @@
 # Requirements:
 #   • Python 3 with PyYAML installed (used only for YAML parsing)
 #   • run_abc_bench_instrumented.py in the same directory as this script
-#   • predict_tool_duration.py in the same directory (if prediction enabled)
+#   • src/build_tool_predictor.py (if prediction enabled)
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -266,7 +266,7 @@ if [[ ! -f "$RUNNER_SCRIPT" ]]; then
     ERRORS+=("Runner script not found: ${RUNNER_SCRIPT}")
 fi
 
-PREDICTOR_SCRIPT="${SCRIPT_DIR}/src/predict_tool_duration.py"
+PREDICTOR_SCRIPT="${SCRIPT_DIR}/src/build_tool_predictor.py"
 
 if [[ ${#ERRORS[@]} -gt 0 ]]; then
     echo -e "\n${RED}Config validation failed:${RESET}" >&2
@@ -334,7 +334,7 @@ build_predictor_cmd() {
     local -a cmd=(
         python3 "$PREDICTOR_SCRIPT"
         --trace-dir      "${RESULTS_ROOT:-./abc_results}"
-        --model          "${PREDICTION_MODEL:-ridge}"
+        --model          "${PREDICTION_MODEL:-hgb}"
         --test-fraction  "${PREDICTION_TEST_FRAC:-0.2}"
         --seed           "${PREDICTION_SEED:-42}"
     )
@@ -461,6 +461,10 @@ fi
 bench_dependencies_ready() {
     python3 - <<'PYEOF' >/dev/null 2>&1
 import openhands.sdk
+import joblib
+import numpy
+import pandas
+import sklearn
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
@@ -472,7 +476,7 @@ install_bench_dependencies() {
     while (( attempt <= BENCH_UV_INSTALL_RETRIES )); do
         echo -e "${CYAN}  Installing benchmark dependencies (attempt ${attempt}/${BENCH_UV_INSTALL_RETRIES}, UV_HTTP_TIMEOUT=${BENCH_UV_HTTP_TIMEOUT}s)...${RESET}"
         if UV_HTTP_TIMEOUT="${BENCH_UV_HTTP_TIMEOUT}" \
-            uv pip install openhands-sdk openhands-tools; then
+            uv pip install openhands-sdk openhands-tools pandas numpy scikit-learn joblib; then
             return 0
         fi
 

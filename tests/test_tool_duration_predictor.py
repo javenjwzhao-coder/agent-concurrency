@@ -185,13 +185,16 @@ except ImportError:
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from predict_tool_duration import (
+from build_tool_predictor import (
     _REMAINING_FRACS,
+    RealtimePredictor,
     augment_remaining,
     build_features,
     build_model,
+    build_sample_weights,
     enrich_sequential_features,
-    inv_transform,
+    fit_pipeline,
+    load_tool_calls,
     load_traces,
     log_transform,
 )
@@ -277,69 +280,6 @@ def _collect_traces_concurrent(
                 print(f"  WARNING: {task.name} failed: {exc}", file=sys.stderr)
 
 
-# ─────────────────────────── RealtimePredictor ───────────────────────────────
-
-class RealtimePredictor:
-    """
-    Wraps a saved remaining-time pipeline for deployment-style inference.
-
-    Accepts feature rows from build_features() / enrich_sequential_features()
-    where tool_name is still a raw string column.  One-hot encoding and column
-    alignment are handled internally so callers do not need to know the exact
-    training schema.
-
-    This is exactly how the predictor would be used in production:
-        predictor = RealtimePredictor.load("duration_predictor.joblib")
-        # on ActionEvent:
-        pred_total    = predictor.predict_duration(feat_row)
-        # mid-execution:
-        pred_remaining = predictor.predict_remaining(feat_row, elapsed_s=3.7)
-    """
-
-    def __init__(
-        self,
-        pipeline,
-        feature_names: list[str],
-        log_target: bool = True,
-    ) -> None:
-        self._pipeline  = pipeline
-        self._feat_cols = feature_names
-        self._log       = log_target
-
-    @classmethod
-    def load(cls, path: Path | str, log_target: bool = True) -> "RealtimePredictor":
-        pipeline = joblib.load(path)
-        feature_names = getattr(pipeline, "_trained_feature_names", None)
-        if feature_names is None:
-            raise ValueError(
-                f"Model at {path!r} is missing _trained_feature_names — "
-                "was it saved by this test suite?"
-            )
-        return cls(pipeline, feature_names, log_target=log_target)
-
-    def _prepare(self, feat: pd.DataFrame, elapsed_s: float) -> pd.DataFrame:
-        x = feat.copy()
-        x["elapsed_s"] = elapsed_s
-        if "tool_name" in x.columns:
-            x = pd.get_dummies(x, columns=["tool_name"], prefix="tool", dtype=float)
-        x = x.astype(float)
-        for col in self._feat_cols:
-            if col not in x.columns:
-                x[col] = 0.0
-        return x[self._feat_cols]
-
-    def predict_remaining(self, feat: pd.DataFrame, elapsed_s: float) -> float:
-        """Predicted remaining seconds at the given elapsed point in the call."""
-        x   = self._prepare(feat, elapsed_s)
-        raw = self._pipeline.predict(x)
-        val = inv_transform(raw)[0] if self._log else float(raw[0])
-        return float(max(0.0, val))
-
-    def predict_duration(self, feat: pd.DataFrame) -> float:
-        """Predicted total duration at dispatch time (elapsed_s = 0)."""
-        return self.predict_remaining(feat, elapsed_s=0.0)
-
-
 # ────────────────────────── shared data helpers ───────────────────────────────
 
 class _Split(NamedTuple):
@@ -369,10 +309,10 @@ def _build_split(
     """
     full_df = load_traces(trace_dir)
     tool_df = (
-        full_df.loc[full_df["phase"] == "tool_call"]
-               .dropna(subset=["duration_s"])
-               .copy()
-               .reset_index(drop=True)
+        load_tool_calls(trace_dir, full_df)
+        .dropna(subset=["duration_s"])
+        .copy()
+        .reset_index(drop=True)
     )
 
     if tool_df.empty:
@@ -380,7 +320,7 @@ def _build_split(
         return _Split(empty, empty, empty, empty, full_df)
 
     feat = build_features(tool_df, remaining_mode=True)
-    feat = enrich_sequential_features(full_df, feat).reset_index(drop=True)
+    feat = enrich_sequential_features(full_df, feat, tool_df).reset_index(drop=True)
 
     if out_csv is not None:
         _TRACE_META = ["agent_id", "task_id", "phase_seq", "tool_name",
@@ -428,8 +368,10 @@ def _fit_and_save(
     ).astype(float)
 
     pipeline = build_model(model_name)
-    pipeline.fit(X_enc, log_transform(y_raw))
+    sample_weights = build_sample_weights(tool_tr, remaining_mode=True)
+    fit_pipeline(pipeline, X_enc, log_transform(y_raw), sample_weights)
     pipeline._trained_feature_names = list(X_enc.columns)
+    pipeline._log_target = True
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipeline, save_path)

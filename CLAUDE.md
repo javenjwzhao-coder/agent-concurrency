@@ -8,7 +8,7 @@ This project runs on **Ascend NPU** hardware. The inference backend is **vllm-as
 
 ## Project Purpose
 
-This is an **ABC-Bench agent tracing and tool-duration prediction framework**. It runs concurrent AI agents against the [ABC-Bench](https://github.com/javenjwzhao-coder/agent-concurrency) coding benchmark, records granular execution traces of agent phase transitions (reasoning → tool_call → waiting), then optionally trains ML models to predict tool execution duration.
+This is an **ABC-Bench agent tracing and tool-duration prediction framework**. It runs concurrent AI agents against the [ABC-Bench](https://github.com/javenjwzhao-coder/agent-concurrency) coding benchmark, records one rich trace row per tool call, then optionally trains ML models to predict tool execution duration.
 
 ## Dependencies
 
@@ -47,13 +47,13 @@ bash run_abc-bench.sh --config abc-bench_config.yaml --override dataset.max_task
 
 **Train tool-duration predictor:**
 ```bash
-python predict_tool_duration.py --trace-dir ./abc_results --model rf --save-model ./duration_model.joblib
-# model choices: ridge (linear, fast) | rf (Random Forest, 100 estimators, max_depth=12)
+python src/build_tool_predictor.py --trace-dir ./abc_results --model hgb --remaining --save-model ./duration_model.joblib
+# model choices: hgb (recommended) | ridge (linear, fast) | rf (random forest)
 ```
 
 **Run inference on new traces:**
 ```bash
-python predict_tool_duration.py \
+python src/build_tool_predictor.py \
     --trace-dir ./new_traces \
     --load-model ./duration_model.joblib \
     --predict-only \
@@ -85,12 +85,15 @@ ABC-Bench Tasks
               → write *_trace.csv, *_summary.json, *_llm_metrics.json
           → maybe_run_tests()   # ./run-tests.sh if --run-tests
   → aggregate → run_summary.json
-  → (optional) predict_tool_duration.py
+  → (optional) build_tool_predictor.py
 ```
 
-### AgentPhaseTracker (core mechanism)
+### AgentPhaseTracker / ToolCallTraceCollector (core mechanism)
 
-Detects phase boundaries from OpenHands SDK events:
+The runner still detects phase boundaries internally for live sidecar state and
+summaries, but `*_trace.csv` is now a detailed tool-call trace, not a phase
+trace. `ToolCallTraceCollector` correlates `ActionEvent` to `ObservationEvent`
+and writes one row per tool call.
 
 | Phase | Opens on | Closes on |
 |-------|----------|-----------|
@@ -98,11 +101,17 @@ Detects phase boundaries from OpenHands SDK events:
 | `reasoning` | `run_start()` or `ObservationEvent` | `ActionEvent` |
 | `tool_call` | `ActionEvent` | `ObservationEvent` |
 
-Each row in the output `*_trace.csv` is one phase record with 14 columns: `agent_id`, `task_id`, `conversation_id`, `phase_seq`, `phase`, `start_ts`, `end_ts`, `duration_s`, `tool_name`, `tool_command`, `tool_args_json`, `tool_payload_bytes`, `outcome`, `detail`.
+Each row in the output `*_trace.csv` includes tool ids, tool name, command,
+serialized arguments, start/end timestamps, duration, outcome, output
+size/preview/hash, and dispatch-time concurrency/KV-cache snapshots. A matching
+`*_trace.jsonl` is written for lossless JSONL consumption.
 
-### Prediction Model (`predict_tool_duration.py`)
+### Prediction Model (`build_tool_predictor.py`)
 
-Loads all `*_trace.csv` files, filters to `tool_call` phase rows, engineers features (tool name, command length/tokens/pipes/keywords, payload bytes, phase position, cumulative reasoning time, prior-tool stats), trains Ridge or Random Forest regressor, and saves model + per-call predictions.
+Loads all detailed `*_trace.csv` files, engineers dispatch-time features (tool
+name, command length/tokens/pipes/keywords, payload bytes, text hashes,
+concurrency/KV snapshots, cumulative reasoning, prior-tool stats), trains a
+weighted regression model, and saves model + per-call predictions.
 
 ## Key Configuration Files
 
@@ -112,7 +121,8 @@ Loads all `*_trace.csv` files, filters to `tool_call` phase rows, engineers feat
 ## Output Artifacts
 
 Per agent run (under `results_root/<task_id>/`):
-- `agent_*_trace.csv` — phase-level execution trace
+- `agent_*_trace.csv` — detailed per-tool-call trace
+- `agent_*_trace.jsonl` — JSONL companion for the same tool-call records
 - `agent_*_summary.json` — phase time breakdown and tool-call stats
 - `agent_*_llm_metrics.json` — token usage and inference latency
 - `agent_*_prompt.txt`, `agent_*_test_result.json` — task prompt and test results

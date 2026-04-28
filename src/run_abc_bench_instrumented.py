@@ -3,30 +3,20 @@
 run_abc_bench_instrumented.py
 ─────────────────────────────
 Run ABC-Bench tasks via the OpenHands SDK against a local vLLM endpoint.
-Records a per-agent execution trace of three phases:
-
-    reasoning   – LLM is generating tokens (between receiving context and
-                  emitting an action or final message)
-    tool_call   – a tool is executing (ActionEvent → ObservationEvent)
-    waiting     – the agent is idle (before launch, between conversation
-                  rounds, or after completion)
-
-Each agent's trace is saved to a separate CSV file whose columns are
-documented in ``TRACE_CSV_FIELDS`` below.
+Records a per-agent execution trace with one rich row per tool call.  The
+state machine still tracks reasoning / tool_call / waiting internally for live
+sidecar state and summaries, but ``*_trace.csv`` is no longer a phase trace.
 
 Key differences from the original script:
   • Multi-agent: a randomised launcher starts groups of agents at staggered
     wall-clock offsets so that multiple agents overlap on the same vLLM
     instance (to study KV-cache contention).
-  • Phase-level tracing: every phase transition is recorded with wall-clock
-    timestamps in ISO 8601 UTC – the same format vLLM uses internally – so
-    traces can be aligned with vLLM scheduler / block-manager logs.
-  • Tool-call metadata: the trace captures tool name, arguments, terminal
-    commands, and payload sizes to feed the downstream duration-prediction
-    model (see ``predict_tool_duration.py``).
+  • Tool-call tracing: every ActionEvent → ObservationEvent pair is recorded
+    with arguments, command text, outcome, output preview/hash, and live
+    concurrency / KV-cache snapshots for duration-prediction features.
 
 Install:
-    pip install openhands-sdk openhands-tools pyyaml pydantic scikit-learn
+    pip install openhands-sdk openhands-tools pyyaml pydantic
 
 Environment variables (or CLI flags):
     LLM_MODEL      e.g. openai/Qwen3-30B-A3B-Instruct
@@ -47,8 +37,6 @@ Example – launch 1-4 agents at random intervals over 6 tasks:
 from __future__ import annotations
 
 import argparse
-import csv
-import dataclasses
 import json
 import logging
 import os
@@ -59,7 +47,6 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -80,6 +67,8 @@ from openhands.sdk.event import (
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
+
+from collect_tool_trace import ToolCallTraceCollector
 
 logging.basicConfig(
     level=logging.INFO,
@@ -128,61 +117,7 @@ def parse_ts(ts: Optional[str]) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-# ────────────────────────── trace schema & data classes ───────────────────────
-
-# CSV columns written per agent.  Downstream consumers (predict_tool_duration.py)
-# rely on these names, so treat them as a stable interface.
-TRACE_CSV_FIELDS = [
-    "agent_id",          # unique agent identifier (e.g. "agent_task_042_wave0")
-    "task_id",           # ABC-Bench task directory name
-    "phase_seq",         # 0-based sequential index of this phase within the agent run
-    "phase",             # "reasoning" | "tool_call" | "waiting"
-    "start_ts",          # ISO 8601 UTC wall-clock start
-    "end_ts",            # ISO 8601 UTC wall-clock end
-    "duration_s",        # wall-clock seconds (float)
-    "tool_name",         # e.g. "terminal", "file_editor" (tool_call only)
-    "tool_command",      # terminal command string if available
-    "tool_args_json",    # JSON-serialised tool arguments / payload
-    "tool_payload_bytes",# byte-length of the serialised arguments
-    "outcome",           # "ok" | "rejected" | "error" | "agent_message" | etc.
-    "detail",            # human-readable short description
-    "conversation_id",   # OpenHands conversation id
-]
-
-
-@dataclass
-class PhaseRecord:
-    """One row in the per-agent trace CSV."""
-    agent_id: str
-    task_id: str
-    phase_seq: int
-    phase: str             # reasoning | tool_call | waiting
-    start_ts: str
-    end_ts: str
-    duration_s: float
-    tool_name: str = ""
-    tool_command: str = ""
-    tool_args_json: str = ""
-    tool_payload_bytes: int = 0
-    outcome: str = ""
-    detail: str = ""
-    conversation_id: str = ""
-
-
 # ──────────────────────── per-agent phase tracker ─────────────────────────────
-
-@dataclass
-class _PendingToolCall:
-    """Bookkeeping for an in-flight tool call."""
-    action_id: str
-    tool_call_id: Optional[str]
-    tool_name: str
-    tool_command: str
-    tool_args_json: str
-    tool_payload_bytes: int
-    start_dt: datetime
-    detail: str = ""
-
 
 class AgentPhaseTracker:
     """
@@ -223,37 +158,30 @@ class AgentPhaseTracker:
         self.task_id = task_id
         self.scheduled_dt = scheduled_dt   # when the launch was *scheduled*
 
-        self.records: list[PhaseRecord] = []
         self._event_log_lines: list[str] = []
-        self._seq = 0
+        self._phase_durations: dict[str, float] = defaultdict(float)
+        self._phase_counts: dict[str, int] = defaultdict(int)
         self._current_phase: Optional[str] = None
         self._phase_start_dt: Optional[datetime] = None
-        self._pending_tools: dict[str, _PendingToolCall] = {}
+        self.tool_collector = ToolCallTraceCollector(
+            agent_id=agent_id,
+            task_id=task_id,
+            live_snapshot_fn=self._live_tool_snapshot,
+        )
         self._conversation_id: str = ""
         self._lock = threading.Lock()
 
     # ── internal helpers ──
 
     def _close_phase(self, end_dt: datetime, outcome: str = "", detail: str = ""):
-        """Close the current phase and append a PhaseRecord."""
+        """Close the current internal phase and update summary counters."""
         if self._current_phase is None or self._phase_start_dt is None:
             return
         dur = (end_dt - self._phase_start_dt).total_seconds()
         if dur < 0:
             dur = 0.0
-        self.records.append(PhaseRecord(
-            agent_id=self.agent_id,
-            task_id=self.task_id,
-            phase_seq=self._seq,
-            phase=self._current_phase,
-            start_ts=iso_utc(self._phase_start_dt),
-            end_ts=iso_utc(end_dt),
-            duration_s=round(dur, 6),
-            outcome=outcome,
-            detail=detail,
-            conversation_id=self._conversation_id,
-        ))
-        self._seq += 1
+        self._phase_durations[self._current_phase] += dur
+        self._phase_counts[self._current_phase] += 1
         self._current_phase = None
         self._phase_start_dt = None
 
@@ -264,6 +192,31 @@ class AgentPhaseTracker:
             if self.agent_id in _LIVE_AGENTS:
                 _LIVE_AGENTS[self.agent_id]["state"] = phase
                 _LIVE_AGENTS[self.agent_id]["state_since"] = iso_utc(start_dt)
+
+    def _live_tool_snapshot(self) -> dict[str, Any]:
+        """Return live concurrency/KV state for detailed tool-call traces."""
+        with _live_lock:
+            agents = {aid: dict(state) for aid, state in _LIVE_AGENTS.items()}
+
+        current = agents.get(self.agent_id, {})
+        active_states = {"reasoning", "tool_call", "waiting"}
+        return {
+            "active_agents": sum(
+                1 for state in agents.values()
+                if state.get("state") in active_states
+            ),
+            "active_tool_calls": sum(
+                1 for state in agents.values()
+                if state.get("state") == "tool_call"
+            ),
+            "agent_state": current.get("state", ""),
+            "state_since": current.get("state_since", ""),
+            "cumulative_reasoning_s": round(
+                self._phase_durations.get("reasoning", 0.0), 6
+            ),
+            "kv_blocks": current.get("kv_blocks"),
+            "kv_gb": current.get("kv_gb"),
+        }
 
     # ── public API ──
 
@@ -283,22 +236,12 @@ class AgentPhaseTracker:
             # Record the waiting gap between scheduled time and actual start.
             wait_dur = (start_dt - self.scheduled_dt).total_seconds()
             if wait_dur > 0.01:
-                self.records.append(PhaseRecord(
-                    agent_id=self.agent_id,
-                    task_id=self.task_id,
-                    phase_seq=self._seq,
-                    phase="waiting",
-                    start_ts=iso_utc(self.scheduled_dt),
-                    end_ts=iso_utc(start_dt),
-                    duration_s=round(wait_dur, 6),
-                    outcome="launch_delay",
-                    detail="time between scheduled launch and actual start",
-                ))
-                self._seq += 1
+                self._phase_durations["waiting"] += wait_dur
+                self._phase_counts["waiting"] += 1
             # The agent is now reasoning (processing the initial prompt).
             self._open_phase("reasoning", start_dt)
 
-    def run_end(self):
+    def run_end(self, outcome: str = "run_complete", detail: str = "agent finished"):
         """Called after conversation.run() returns."""
         with _live_lock:
             if self.agent_id in _LIVE_AGENTS:
@@ -306,7 +249,19 @@ class AgentPhaseTracker:
                 _LIVE_AGENTS[self.agent_id]["state_since"] = iso_utc(now_utc())
         with self._lock:
             end_dt = now_utc()
-            self._close_phase(end_dt, outcome="run_complete", detail="agent finished")
+            finalized = self.tool_collector.finalize_unfinished(
+                end_dt,
+                outcome="unfinished" if outcome == "run_complete" else outcome,
+                detail="tool call ended without observation",
+                conversation_id=self._conversation_id,
+            )
+            if self._current_phase == "tool_call" and finalized:
+                self._current_phase = None
+                self._phase_start_dt = None
+                for rec in finalized:
+                    self._phase_durations["tool_call"] += rec.duration_s
+                    self._phase_counts["tool_call"] += 1
+            self._close_phase(end_dt, outcome=outcome, detail=detail)
 
     def on_event(self, event: Event):
         """OpenHands SDK event callback – drives phase transitions."""
@@ -336,11 +291,6 @@ class AgentPhaseTracker:
             # ── action event: agent issues a tool call ──
             if isinstance(event, ActionEvent):
                 tool_name = getattr(event, "tool_name", "unknown") or "unknown"
-                tool_call_id = getattr(event, "tool_call_id", None)
-                # Capture as much metadata as possible for the predictor.
-                raw_args = self._extract_tool_args(event)
-                args_json = json_dumps_safe(raw_args)
-                tool_command = self._extract_terminal_command(event, raw_args)
 
                 # Close the reasoning phase that preceded this tool call.
                 self._close_phase(event_dt, outcome="tool_call", detail=tool_name)
@@ -348,55 +298,35 @@ class AgentPhaseTracker:
                 # Open a tool_call phase.
                 self._open_phase("tool_call", event_dt)
 
-                # Stash metadata so we can enrich the record when the
-                # ObservationEvent arrives.
-                self._pending_tools[event.id] = _PendingToolCall(
-                    action_id=event.id,
-                    tool_call_id=tool_call_id,
-                    tool_name=tool_name,
-                    tool_command=tool_command,
-                    tool_args_json=args_json,
-                    tool_payload_bytes=len(args_json.encode("utf-8")),
+                # Stash detailed metadata so the CSV and JSONL traces share
+                # the same action/observation match.
+                pending = self.tool_collector.record_action(
+                    event,
                     start_dt=event_dt,
-                    detail=getattr(event, "summary", "") or tool_name,
+                    conversation_id=self._conversation_id,
                 )
 
                 # Human-readable event log (separate from the CSV).
-                self._log_action(event, raw_args, event_dt)
+                self._log_action(event, pending.tool_args, event_dt)
                 return
 
             # ── observation event: tool call completed ──
             if isinstance(event, (ObservationEvent, UserRejectObservation)):
-                pending = self._match_pending(event)
                 outcome = "rejected" if isinstance(event, UserRejectObservation) else "ok"
+                tool_record = self.tool_collector.record_observation(
+                    event,
+                    end_dt=event_dt,
+                    outcome=outcome,
+                    conversation_id=self._conversation_id,
+                )
 
-                if pending is not None:
-                    dur = (event_dt - pending.start_dt).total_seconds()
-                    # Close the tool_call phase we opened above, but override
-                    # with the enriched record that carries tool metadata.
-                    # First discard the generic _close_phase record:
+                if tool_record is not None:
                     self._current_phase = None
                     self._phase_start_dt = None
-
-                    self.records.append(PhaseRecord(
-                        agent_id=self.agent_id,
-                        task_id=self.task_id,
-                        phase_seq=self._seq,
-                        phase="tool_call",
-                        start_ts=iso_utc(pending.start_dt),
-                        end_ts=iso_utc(event_dt),
-                        duration_s=round(max(dur, 0.0), 6),
-                        tool_name=pending.tool_name,
-                        tool_command=pending.tool_command,
-                        tool_args_json=pending.tool_args_json,
-                        tool_payload_bytes=pending.tool_payload_bytes,
-                        outcome=outcome,
-                        detail=pending.detail,
-                        conversation_id=self._conversation_id,
-                    ))
-                    self._seq += 1
+                    self._phase_durations["tool_call"] += tool_record.duration_s
+                    self._phase_counts["tool_call"] += 1
                     self._log_observation(event, outcome,
-                                          max(dur, 0.0), event_dt)
+                                          tool_record.duration_s, event_dt)
                 else:
                     # No matching pending action – close generically.
                     self._close_phase(event_dt, outcome=outcome,
@@ -422,26 +352,12 @@ class AgentPhaseTracker:
         Pull whatever argument dict the SDK exposes.  Attribute names vary
         across SDK versions, so we try several.
         """
-        for attr in ("arguments", "args", "tool_input", "input", "kwargs"):
-            val = getattr(event, attr, None)
-            if val is not None:
-                if isinstance(val, dict):
-                    return val
-                try:
-                    return json.loads(str(val))
-                except (json.JSONDecodeError, TypeError):
-                    return {"raw": str(val)}
-        return {}
+        return ToolCallTraceCollector.extract_tool_args(event)
 
     @staticmethod
     def _extract_observation_content(event: Any) -> str:
         """Best-effort string content from an ObservationEvent."""
-        for attr in ("content", "output", "result", "text", "observation",
-                     "data", "stdout", "message"):
-            val = getattr(event, attr, None)
-            if val is not None and val != "":
-                return str(val)
-        return ""
+        return ToolCallTraceCollector.extract_observation_content(event)
 
     def _log_action(self, event: ActionEvent, raw_args: dict, event_dt: datetime) -> None:
         tool   = getattr(event, "tool_name", "unknown") or "unknown"
@@ -502,38 +418,18 @@ class AgentPhaseTracker:
         If the tool is ``terminal``, try to extract the shell command string.
         This is the single most predictive feature for duration estimation.
         """
-        tool_name = getattr(event, "tool_name", "") or ""
-        if tool_name.lower() in ("terminal", "bash", "shell"):
-            for key in ("command", "cmd", "shell_command", "input"):
-                if key in args and isinstance(args[key], str):
-                    return args[key]
-        return ""
-
-    def _match_pending(self, event) -> Optional[_PendingToolCall]:
-        """Match an observation back to its pending action."""
-        action_id = getattr(event, "action_id", None)
-        if action_id and action_id in self._pending_tools:
-            return self._pending_tools.pop(action_id)
-        # Fallback: match by tool_call_id.
-        tcid = getattr(event, "tool_call_id", None)
-        if tcid:
-            for k, cand in list(self._pending_tools.items()):
-                if cand.tool_call_id == tcid:
-                    return self._pending_tools.pop(k)
-        return None
+        return ToolCallTraceCollector.extract_terminal_command(event, args)
 
     # ── persistence ──
 
     def write_csv(self, out_dir: Path):
-        """Write the trace to ``<out_dir>/<agent_id>_trace.csv``."""
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{self.agent_id}_trace.csv"
-        with path.open("w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=TRACE_CSV_FIELDS)
-            writer.writeheader()
-            for rec in self.records:
-                writer.writerow(dataclasses.asdict(rec))
-        log.info("Wrote %d phase records → %s", len(self.records), path)
+        """Write the primary rich tool-call trace to ``*_trace.csv``."""
+        path = self.tool_collector.write_csv(out_dir, f"{self.agent_id}_trace.csv")
+        log.info(
+            "Wrote %d detailed tool-call records → %s",
+            len(self.tool_collector.records),
+            path,
+        )
         return path
 
     def write_event_log(self, out_dir: Path):
@@ -552,20 +448,25 @@ class AgentPhaseTracker:
         log.info("Wrote event log → %s", path)
         return path
 
+    def write_trace_jsonl(self, out_dir: Path):
+        """Write the rich tool-call trace JSONL companion."""
+        path = self.tool_collector.write_jsonl(out_dir, f"{self.agent_id}_trace.jsonl")
+        log.info(
+            "Wrote %d detailed tool-call JSONL records → %s",
+            len(self.tool_collector.records),
+            path,
+        )
+        return path
+
     def summary(self) -> dict[str, Any]:
-        by_phase: dict[str, float] = defaultdict(float)
-        tool_durs: list[float] = []
-        for r in self.records:
-            by_phase[r.phase] += r.duration_s
-            if r.phase == "tool_call":
-                tool_durs.append(r.duration_s)
+        tool_durs = [r.duration_s for r in self.tool_collector.records]
         return {
             "agent_id": self.agent_id,
             "task_id": self.task_id,
-            "n_phases": len(self.records),
-            "reasoning_s": round(by_phase.get("reasoning", 0), 3),
-            "tool_call_s": round(by_phase.get("tool_call", 0), 3),
-            "waiting_s": round(by_phase.get("waiting", 0), 3),
+            "n_phase_transitions": int(sum(self._phase_counts.values())),
+            "reasoning_s": round(self._phase_durations.get("reasoning", 0), 3),
+            "tool_call_s": round(self._phase_durations.get("tool_call", 0), 3),
+            "waiting_s": round(self._phase_durations.get("waiting", 0), 3),
             "n_tool_calls": len(tool_durs),
             "avg_tool_call_s": round(sum(tool_durs) / len(tool_durs), 3) if tool_durs else 0,
             "max_tool_call_s": round(max(tool_durs), 3) if tool_durs else 0,
@@ -754,50 +655,72 @@ def run_single_agent(
             _litellm.success_callback = []
         _litellm.success_callback.append(_kv_cb)
 
-    tracker.run_start()
     wall_start = time.monotonic()
-    conversation.send_message(prompt)
-    conversation.run()
-    wall_end = time.monotonic()
-    tracker.run_end()
+    wall_end = wall_start
+    tracker_started = False
+    run_exc_info = None
+    summary: dict[str, Any] = {}
 
-    with _litellm_cb_lock:
-        try:
-            _litellm.success_callback.remove(_kv_cb)
-        except (ValueError, AttributeError):
-            pass
+    try:
+        tracker.run_start()
+        tracker_started = True
+        conversation.send_message(prompt)
+        conversation.run()
+    except Exception:
+        run_exc_info = sys.exc_info()
+    finally:
+        wall_end = time.monotonic()
+        if tracker_started:
+            if run_exc_info is None:
+                tracker.run_end()
+            else:
+                tracker.run_end(outcome="error", detail=repr(run_exc_info[1]))
 
-    # Persist trace CSV + human-readable event log.
-    results_dir.mkdir(parents=True, exist_ok=True)
-    tracker.write_csv(results_dir)
-    tracker.write_event_log(results_dir)
+        with _litellm_cb_lock:
+            try:
+                _litellm.success_callback.remove(_kv_cb)
+            except (ValueError, AttributeError):
+                pass
 
-    # Persist prompt for reproducibility.
-    (results_dir / f"{agent_id}_prompt.txt").write_text(prompt, encoding="utf-8")
+        # Persist trace CSV + human-readable event log.  This lives in the
+        # finally block so failed runs still leave useful partial traces.
+        results_dir.mkdir(parents=True, exist_ok=True)
+        tracker.write_csv(results_dir)
+        tracker.write_event_log(results_dir)
+        tracker.write_trace_jsonl(results_dir)
 
-    # Persist LLM-level metrics if available.
-    llm_metrics: dict[str, Any] = {}
-    if getattr(llm, "metrics", None) is not None:
-        try:
-            llm_metrics = llm.metrics.model_dump()
-        except Exception:
-            llm_metrics = {"repr": repr(llm.metrics)}
+        # Persist prompt for reproducibility.
+        (results_dir / f"{agent_id}_prompt.txt").write_text(prompt, encoding="utf-8")
 
-    # Append per-agent KV-block stats captured via the litellm callback.
-    # These are populated by the patched vLLM when agent_id is in extra_body.
-    llm_metrics["kv_blocks_used"]       = _kv_acc["total_kv_blocks"]
-    llm_metrics["kv_blocks_size_gb"]    = round(_kv_acc["total_kv_size_gb"], 6)
-    llm_metrics["kv_blocks_call_count"] = _kv_acc["call_count"]
+        # Persist LLM-level metrics if available.
+        llm_metrics: dict[str, Any] = {}
+        if getattr(llm, "metrics", None) is not None:
+            try:
+                llm_metrics = llm.metrics.model_dump()
+            except Exception:
+                llm_metrics = {"repr": repr(llm.metrics)}
 
-    with (results_dir / f"{agent_id}_llm_metrics.json").open("w") as f:
-        json_dump_safe(llm_metrics, f, indent=2)
+        # Append per-agent KV-block stats captured via the litellm callback.
+        # These are populated by the patched vLLM when agent_id is in extra_body.
+        llm_metrics["kv_blocks_used"]       = _kv_acc["total_kv_blocks"]
+        llm_metrics["kv_blocks_size_gb"]    = round(_kv_acc["total_kv_size_gb"], 6)
+        llm_metrics["kv_blocks_call_count"] = _kv_acc["call_count"]
 
-    summary = tracker.summary()
-    summary["elapsed_wall_s"] = round(wall_end - wall_start, 3)
-    summary["results_dir"] = str(results_dir)
+        with (results_dir / f"{agent_id}_llm_metrics.json").open("w") as f:
+            json_dump_safe(llm_metrics, f, indent=2)
 
-    with (results_dir / f"{agent_id}_summary.json").open("w") as f:
-        json_dump_safe(summary, f, indent=2)
+        summary = tracker.summary()
+        summary["elapsed_wall_s"] = round(wall_end - wall_start, 3)
+        summary["results_dir"] = str(results_dir)
+        if run_exc_info is not None:
+            summary["error"] = repr(run_exc_info[1])
+
+        with (results_dir / f"{agent_id}_summary.json").open("w") as f:
+            json_dump_safe(summary, f, indent=2)
+
+    if run_exc_info is not None:
+        _exc_type, exc, tb = run_exc_info
+        raise exc.with_traceback(tb)
 
     log.info("[%s] Finished in %.1fs  (%d tool calls)",
              agent_id, summary["elapsed_wall_s"], summary["n_tool_calls"])
@@ -965,7 +888,7 @@ def _agent_thread(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run ABC-Bench with per-agent phase tracing and optional "
+        description="Run ABC-Bench with per-agent tool-call tracing and optional "
                     "randomised multi-agent launch.")
     p.add_argument("--dataset-root", required=True, type=Path)
     p.add_argument("--workspace-root", type=Path, default=Path("./abc_runs"))
