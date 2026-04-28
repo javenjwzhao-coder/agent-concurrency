@@ -3,9 +3,9 @@
 ## File Structure
 
 ```
-run_abc_bench_instrumented.py    # Step 1: multi-agent runner with tool-call tracing
-collect_tool_trace.py            # Detailed ActionEvent -> ObservationEvent collector
-build_tool_predictor.py          # Step 2: regression model for tool-call duration
+src/run_abc_bench_instrumented.py    # Step 1: multi-agent runner with tool-call tracing
+src/collect_tool_trace.py            # Detailed ActionEvent -> ObservationEvent collector
+src/build_tool_predictor.py          # Step 2: regression model for tool-call duration
 ```
 
 ## CSV Trace Schema
@@ -114,7 +114,7 @@ The model uses these features extracted from each `tool_call` row:
   `command_has_install`, `command_has_git`
 
 **Sequential context:**
-- `tool_seq` — position in the agent's tool-call sequence
+- `phase_seq` — normalized tool-call sequence index (`tool_seq` in trace CSVs)
 - `cumulative_reasoning_s` — total reasoning time before this call
 - `prior_tool_calls` — count of preceding tool calls
 - `prior_avg_tool_s` — running mean of prior tool-call durations

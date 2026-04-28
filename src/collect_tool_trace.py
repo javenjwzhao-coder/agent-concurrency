@@ -329,7 +329,7 @@ class ToolCallTraceCollector:
         }
 
     def write_trace_artifacts(self, out_dir: Path) -> dict[str, Path]:
-        """Write the primary trace artifacts using the historical trace names."""
+        """Write the runner-facing trace artifacts using ``*_trace`` filenames."""
         return {
             "jsonl": self.write_jsonl(out_dir, f"{self.agent_id}_trace.jsonl"),
             "csv": self.write_csv(out_dir, f"{self.agent_id}_trace.csv"),

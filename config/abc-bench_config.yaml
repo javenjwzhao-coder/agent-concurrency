@@ -36,8 +36,8 @@ llm:
 # ║  Dataset & Task Selection                                                ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 dataset:
-  # Path to the ABC-Benfch root (containing a `tasks/` subdirectory) or
-  # directly to the `tfasks/` directory itself.
+  # Path to the ABC-Bench root (containing a `tasks/` subdirectory) or
+  # directly to the `tasks/` directory itself.
   root: "/root/jwzhao/tasks/"
 
   # Glob pattern applied under `tasks/` to select which tasks to run.

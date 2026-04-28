@@ -3,7 +3,7 @@
 build_tool_predictor.py  (v2)
 ──────────────────────────────
 Train and evaluate a regression model that predicts tool-call
-duration **or remaining time** from per-agent trace CSVs produced by
+duration **or remaining time** from the rich per-agent trace CSVs produced by
 ``run_abc_bench_instrumented.py``.
 
 Improvements over v1
@@ -517,7 +517,7 @@ def _normalise_tool_call_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_detailed_tool_calls(trace_dir: Path) -> pd.DataFrame:
-    """Load rich collector artifacts, preferring CSV over JSONL."""
+    """Load transitional ``*_tool_calls`` artifacts, preferring CSV over JSONL."""
     csv_files = sorted(trace_dir.rglob("*_tool_calls.csv"))
     frames = []
     for p in csv_files:
@@ -560,9 +560,9 @@ def load_tool_calls(trace_dir: Path, full_df: pd.DataFrame) -> pd.DataFrame:
     """
     Return training rows for tool calls.
 
-    New ``*_trace.csv`` files already contain detailed tool-call rows.  Older
-    ``*_tool_calls.csv/jsonl`` files are merged when present, preserving
-    compatibility with trace directories produced during the transition.
+    New ``*_trace.csv`` files already contain detailed tool-call rows. Older
+    transitional ``*_tool_calls.csv/jsonl`` files are merged when present so
+    trace directories created during the filename migration still load cleanly.
     """
     legacy = _normalise_tool_call_frame(
         full_df.loc[full_df["phase"] == "tool_call"].copy()

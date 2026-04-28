@@ -22,7 +22,7 @@ pip install openhands-sdk openhands-tools pyyaml pydantic scikit-learn numpy pan
 
 **Run agents (direct CLI):**
 ```bash
-python run_abc_bench_instrumented.py \
+python src/run_abc_bench_instrumented.py \
     --dataset-root /data/ABC-Bench \
     --task-glob 'task_*' \
     --max-tasks 6 \
@@ -40,9 +40,9 @@ python run_abc_bench_instrumented.py \
 
 **Run agents (via YAML config wrapper — preferred):**
 ```bash
-bash run_abc-bench.sh --config abc-bench_config.yaml
-bash run_abc-bench.sh --config abc-bench_config.yaml --dry-run
-bash run_abc-bench.sh --config abc-bench_config.yaml --override dataset.max_tasks=2
+bash run_abc-bench.sh --config config/abc-bench_config.yaml
+bash run_abc-bench.sh --config config/abc-bench_config.yaml --dry-run
+bash run_abc-bench.sh --config config/abc-bench_config.yaml --override dataset.max_tasks=2
 ```
 
 **Train tool-duration predictor:**
@@ -115,8 +115,8 @@ weighted regression model, and saves model + per-call predictions.
 
 ## Key Configuration Files
 
-- **`abc-bench_config.yaml`** — LLM endpoint, dataset path/glob, launch strategy (wave sizing, delays, seed), and prediction settings. LLM API key read from `$LLM_API_KEY`.
-- **`vllm_config.yaml`** — Ascend NPU-specific vLLM bare-metal config (model, memory, tensor parallelism, NUMA topology).
+- **`config/abc-bench_config.yaml`** — LLM endpoint, dataset path/glob, launch strategy (wave sizing, delays, seed), and prediction settings. LLM API key read from `$LLM_API_KEY`.
+- **`config/vllm_config.yaml`** — Ascend NPU-specific vLLM bare-metal config (model, memory, tensor parallelism, NUMA topology).
 
 ## Output Artifacts
 
