@@ -1,124 +1,91 @@
 #!/usr/bin/env python3
 """
-tests/test_tool_duration_predictor.py
+Real ABC-Bench integration test for tool-time prediction.
 
-End-to-end validation of the tool-call duration predictor in deployed mode.
+This test exercises the intended production workflow:
 
-Pipeline
-────────
-  Phase 1 – data collection  (trace_dir fixture)
-      Run *all* tasks found under ABC_BENCH_ROOT, either sequentially or
-      concurrently (PREDICTOR_CONCURRENT=1), and collect their *_trace.csv
-      files.  Skip this phase by pointing PREDICTOR_TRACE_DIR at an existing
-      trace directory.
+  1. Run one real ABC-Bench task with ``run_single_agent``.
+     The runner automatically writes detailed per-tool-call traces:
+       <results>/<task_id>/<agent_id>_trace.csv
+       <results>/<task_id>/<agent_id>_trace.jsonl
 
-  Phase 2 – training + save  (saved_model fixture)
-      Split collected tool-call rows 70 / 30.  Train a remaining-time HGB
-      predictor on the 70 % portion and SAVE it to disk (joblib) so it can
-      be loaded and deployed independently of this test run.
-      The save path is PREDICTOR_MODEL_FILE if set, otherwise
-      <trace_dir>/duration_predictor.joblib.
+  2. Build and save a predictor exactly as a user would:
+       python src/build_tool_predictor.py --trace-dir <results> --remaining --save-model ...
 
-  Phase 3 – tests
-      Both test functions load the saved model from disk (mimicking real
-      deployment) and evaluate it against the held-out 30 %.
+  3. Load the saved predictor and replay prediction calls over the real tool
+     calls collected from that single-agent run.
 
-      test_predictor_trains_and_scores
-          Point-estimate (total-duration at elapsed=0) evaluation.
-          Prints per-row actual / predicted / error table and aggregate
-          MAE / MAPE / R².  Hard-asserts non-negative, finite outputs.
-
-      test_realtime_replay
-          Queries the predictor at elapsed = 0 % (dispatch), 25 %, and 50 %
-          of each actual tool-call duration, exactly as it would be called in
-          production.  Compares predicted remaining time to actual remaining
-          time.  Hard assertions:
-            1. All predictions non-negative and finite.
-            2. predict_remaining(elapsed=0) == predict_duration() numerically.
-            3. Predicted remaining decreases as elapsed increases for ≥ 75 %
-               of calls (≤ 25 % monotonicity violation tolerated).
-          Prints a per-elapsed-fraction error table and a per-call detail table.
-
-Environment variables
-─────────────────────
-  ABC_BENCH_ROOT           Path to the ABC-Bench root (tasks/ inside). Required.
-  ABC_BENCH_TASK           Task name glob (default: task_*).
-  ABC_BENCH_VENV           Benchmark venv path (default: .bench-venv).
-  PREDICTOR_TRACE_DIR      Pre-built trace directory; skips agent runs.
-  PREDICTOR_MODEL_FILE     Where to save the trained model (joblib).
-                           Default: <trace_dir>/duration_predictor.joblib.
-  PREDICTOR_CONCURRENT     Set to "1" to run all tasks concurrently.
-  PREDICTOR_MAX_CONCURRENT Max concurrent agents when PREDICTOR_CONCURRENT=1
-                           (default: 4).
-  PREDICTOR_MAX_ITERATIONS Max agent iterations per task (default: 15).
-  LLM_API_KEY              API key for the vLLM endpoint (default: sk-local-ascend).
+Environment
+───────────
+  ABC_BENCH_ROOT             Path to ABC-Bench root or tasks dir. Required.
+  ABC_BENCH_TASK             Task glob/name to run (default: task_*; first match).
+  ABC_BENCH_VENV             Benchmark venv path (default: .bench-venv).
+  PREDICTOR_MAX_ITERATIONS   Max agent iterations (default: 15).
+  PREDICTOR_MODEL            Model used by build_tool_predictor.py (default: ridge).
+  PREDICTOR_MODEL_FILE       Optional model output path.
+  LLM_API_KEY                vLLM API key (default: sk-local-ascend).
 
 Run
 ───
-  # Sequential (safe default) — assumes vLLM is already running:
-  pytest tests/test_tool_duration_predictor.py -vs
-
-  # Concurrent collection across all tasks:
-  PREDICTOR_CONCURRENT=1 pytest tests/test_tool_duration_predictor.py -vs
-
-  # Skip data collection, use existing traces, save model to a known path:
-  PREDICTOR_TRACE_DIR=./abc_results \\
-  PREDICTOR_MODEL_FILE=./duration_predictor.joblib \\
-  pytest tests/test_tool_duration_predictor.py -vs
-
-  # Load a pre-saved model (no training):
-  PREDICTOR_TRACE_DIR=./abc_results \\
-  PREDICTOR_MODEL_FILE=./duration_predictor.joblib \\
   pytest tests/test_tool_duration_predictor.py -vs
 """
+
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
-
-import numpy as np
-import pandas as pd
 
 REPO_ROOT = Path(__file__).parent.parent
 
 # ── venv bootstrap (mirrors test_single_agent_track.py) ──────────────────────
 
-_BENCH_VENV    = Path(os.getenv("ABC_BENCH_VENV", str(REPO_ROOT / ".bench-venv")))
-_BENCH_PYTHON  = _BENCH_VENV / "bin" / "python"
-_REEXEC_MARKER = "PREDICTOR_TEST_REEXECED"
-_REQUIREMENTS  = (
-    "openhands-sdk", "openhands-tools",
-    "scikit-learn", "pandas", "numpy", "joblib",
-    "pytest", "PyYAML",
+_BENCH_VENV = Path(os.getenv("ABC_BENCH_VENV", str(REPO_ROOT / ".bench-venv")))
+_BENCH_PYTHON = _BENCH_VENV / "bin" / "python"
+_REEXEC_MARKER = "PREDICTOR_SINGLE_AGENT_REEXECED"
+_REQUIREMENTS = (
+    "openhands-sdk",
+    "openhands-tools",
+    "scikit-learn",
+    "pandas",
+    "numpy",
+    "joblib",
+    "pytest",
+    "PyYAML",
+    "requests",
 )
 _PROBE_IMPORTS = (
-    "openhands.sdk", "sklearn", "pandas", "numpy", "joblib", "pytest", "yaml",
+    "openhands.sdk",
+    "sklearn",
+    "pandas",
+    "numpy",
+    "joblib",
+    "pytest",
+    "yaml",
+    "requests",
 )
 _BENCH_ROOT_DEFAULTS = (REPO_ROOT.parent / "tasks", REPO_ROOT / "tasks")
 
 
 def _set_defaults() -> None:
     os.environ.setdefault("LLM_API_KEY", "sk-local-ascend")
-    _tests_dir = Path(__file__).parent
-    if not os.getenv("PREDICTOR_TRACE_DIR") and list(_tests_dir.rglob("*_trace.csv")):
-        os.environ["PREDICTOR_TRACE_DIR"] = str(_tests_dir)
-    if not os.getenv("ABC_BENCH_ROOT"):
-        for c in _BENCH_ROOT_DEFAULTS:
-            if c.is_dir():
-                os.environ["ABC_BENCH_ROOT"] = str(c)
-                return
+    if os.getenv("ABC_BENCH_ROOT"):
+        return
+    for candidate in _BENCH_ROOT_DEFAULTS:
+        if candidate.is_dir():
+            os.environ["ABC_BENCH_ROOT"] = str(candidate)
+            return
 
 
 def _deps_ok() -> bool:
     if not _BENCH_PYTHON.exists():
         return False
-    probe = "\n".join(f"import {n}" for n in _PROBE_IMPORTS)
+    probe = "\n".join(f"import {name}" for name in _PROBE_IMPORTS)
     return subprocess.run(
         [str(_BENCH_PYTHON), "-c", probe],
+        cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
@@ -175,28 +142,20 @@ _set_defaults()
 _reexec()
 
 # ── imports that require the bench venv ───────────────────────────────────────
+import numpy as np
+import pandas as pd
 import pytest
+import requests
 import yaml
-
-try:
-    import joblib
-except ImportError:
-    from sklearn.externals import joblib  # type: ignore[attr-defined]
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from build_tool_predictor import (
-    _REMAINING_FRACS,
     RealtimePredictor,
-    augment_remaining,
     build_features,
-    build_model,
-    build_sample_weights,
     enrich_sequential_features,
-    fit_pipeline,
     load_tool_calls,
     load_traces,
-    log_transform,
 )
 from run_abc_bench_instrumented import (
     copy_task_to_workspace,
@@ -205,194 +164,28 @@ from run_abc_bench_instrumented import (
     run_single_agent,
 )
 
-# ── endpoint config from vllm_config.yaml ────────────────────────────────────
-_VLLM_CFG    = yaml.safe_load((REPO_ROOT / "config" / "vllm_config.yaml").read_text())
-HOST_PORT    = _VLLM_CFG["native"]["port"]
-LLM_MODEL    = f"openai/{_VLLM_CFG['native']['served_model_name'].split('/')[-1]}"
+
+_VLLM_CFG = yaml.safe_load((REPO_ROOT / "config" / "vllm_config.yaml").read_text())
+HOST_PORT = _VLLM_CFG["native"]["port"]
+LLM_MODEL = f"openai/{_VLLM_CFG['native']['served_model_name'].split('/')[-1]}"
 LLM_BASE_URL = f"http://localhost:{HOST_PORT}/v1"
-LLM_API_KEY  = os.getenv("LLM_API_KEY", "sk-local-ascend")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-local-ascend")
+MAX_ITERATIONS = int(os.getenv("PREDICTOR_MAX_ITERATIONS", "15"))
 
-MAX_ITERATIONS  = int(os.getenv("PREDICTOR_MAX_ITERATIONS", "15"))
-MAX_CONCURRENT  = int(os.getenv("PREDICTOR_MAX_CONCURRENT", "4"))
-RUN_CONCURRENT  = os.getenv("PREDICTOR_CONCURRENT", "0") == "1"
-
-# Elapsed fractions at which the predictor is queried during real-time replay.
-_REPLAY_FRACS: list[float] = [0.0, 0.25, 0.50]
+_REPLAY_ELAPSED_FRACS = [0.0, 0.25, 0.50]
 
 
-# ─────────────────────────── task runner helpers ─────────────────────────────
+class _RunBundle(NamedTuple):
+    trace_dir: Path
+    model_path: Path
+    tool_df: pd.DataFrame
+    feat: pd.DataFrame
 
-def _run_one_task(
-    task_dir: Path,
-    workspace: Path,
-    out_dir: Path,
-    agent_idx: int,
-) -> None:
-    """Run a single agent on one task; write trace CSV to out_dir."""
-    agent_id = f"agent_{task_dir.name}_{agent_idx}"
-    work_dir = copy_task_to_workspace(task_dir, workspace, suffix=f"_{agent_idx}")
-    run_single_agent(
-        agent_id       = agent_id,
-        task_dir       = work_dir,
-        llm_model      = LLM_MODEL,
-        llm_base_url   = LLM_BASE_URL,
-        llm_api_key    = LLM_API_KEY,
-        max_iterations = MAX_ITERATIONS,
-        results_dir    = out_dir / task_dir.name,
-        scheduled_dt   = now_utc(),
-    )
-
-
-def _collect_traces_sequential(
-    tasks: list[Path],
-    workspace: Path,
-    out_dir: Path,
-) -> None:
-    for idx, task in enumerate(tasks):
-        print(f"\n[data collection] [{idx + 1}/{len(tasks)}] {task.name} …")
-        try:
-            _run_one_task(task, workspace, out_dir, idx)
-        except Exception as exc:
-            print(f"  WARNING: {task.name} failed: {exc}", file=sys.stderr)
-
-
-def _collect_traces_concurrent(
-    tasks: list[Path],
-    workspace: Path,
-    out_dir: Path,
-    max_workers: int,
-) -> None:
-    print(
-        f"\n[data collection] Launching {len(tasks)} tasks "
-        f"(≤{max_workers} concurrent) …"
-    )
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_run_one_task, task, workspace, out_dir, idx): task
-            for idx, task in enumerate(tasks)
-        }
-        for fut in as_completed(futures):
-            task = futures[fut]
-            try:
-                fut.result()
-                print(f"  ✓ {task.name}")
-            except Exception as exc:
-                print(f"  WARNING: {task.name} failed: {exc}", file=sys.stderr)
-
-
-# ────────────────────────── shared data helpers ───────────────────────────────
-
-class _Split(NamedTuple):
-    feat_tr: pd.DataFrame   # pre-encoded features, training rows
-    feat_te: pd.DataFrame   # pre-encoded features, test rows
-    tool_tr: pd.DataFrame   # tool_call rows, training
-    tool_te: pd.DataFrame   # tool_call rows, test
-    full_df: pd.DataFrame   # entire trace (for sequential context)
-
-
-def _build_split(
-    trace_dir: Path,
-    seed: int = 42,
-    out_csv: Path | None = None,
-) -> _Split:
-    """
-    Load all *_trace.csv files from trace_dir, build raw (pre-encoded)
-    features for every tool_call row, split 70 / 30 by row index.
-
-    'Pre-encoded' means tool_name is still a string column and elapsed_s is
-    0 for every row.  Both are handled at inference time by RealtimePredictor.
-    The split is deterministic via the fixed seed so both test functions see
-    the same partition.
-
-    If out_csv is given, the full feature DataFrame (all rows, before the
-    split) is written there alongside key trace columns for inspection.
-    """
-    full_df = load_traces(trace_dir)
-    tool_df = (
-        load_tool_calls(trace_dir, full_df)
-        .dropna(subset=["duration_s"])
-        .copy()
-        .reset_index(drop=True)
-    )
-
-    if tool_df.empty:
-        empty = pd.DataFrame()
-        return _Split(empty, empty, empty, empty, full_df)
-
-    feat = build_features(tool_df, remaining_mode=True)
-    feat = enrich_sequential_features(full_df, feat, tool_df).reset_index(drop=True)
-
-    if out_csv is not None:
-        _TRACE_META = ["agent_id", "task_id", "phase_seq", "tool_name",
-                       "tool_command", "duration_s", "outcome"]
-        meta_cols   = [c for c in _TRACE_META if c in tool_df.columns]
-        out_df = pd.concat(
-            [tool_df[meta_cols].reset_index(drop=True), feat],
-            axis=1,
-        )
-        out_csv.parent.mkdir(parents=True, exist_ok=True)
-        out_df.to_csv(out_csv, index=False)
-        print(f"\n[features] Full feature table ({len(out_df)} rows) → {out_csv}")
-
-    n      = len(tool_df)
-    idx    = np.random.default_rng(seed).permutation(n)
-    n_tr   = max(1, int(n * 0.70))
-    tr_idx = idx[:n_tr]
-    te_idx = idx[n_tr:]
-
-    return _Split(
-        feat_tr = feat.iloc[tr_idx].reset_index(drop=True),
-        feat_te = feat.iloc[te_idx].reset_index(drop=True),
-        tool_tr = tool_df.iloc[tr_idx].reset_index(drop=True),
-        tool_te = tool_df.iloc[te_idx].reset_index(drop=True),
-        full_df = full_df,
-    )
-
-
-def _fit_and_save(
-    feat_tr: pd.DataFrame,
-    tool_tr: pd.DataFrame,
-    save_path: Path,
-    model_name: str = "hgb",
-) -> None:
-    """
-    Augment training rows with elapsed-fraction snapshots, one-hot encode,
-    fit the pipeline, tag it with training column names, and save to disk.
-
-    Augmentation order mirrors prepare_dataset():
-        augment_remaining() → pd.get_dummies() → pipeline.fit() → joblib.dump()
-    """
-    X_aug, y_raw, _ = augment_remaining(tool_tr, feat_tr, _REMAINING_FRACS)
-    X_enc = pd.get_dummies(
-        X_aug, columns=["tool_name"], prefix="tool", dtype=float
-    ).astype(float)
-
-    pipeline = build_model(model_name)
-    sample_weights = build_sample_weights(tool_tr, remaining_mode=True)
-    fit_pipeline(pipeline, X_enc, log_transform(y_raw), sample_weights)
-    pipeline._trained_feature_names = list(X_enc.columns)
-    pipeline._log_target = True
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipeline, save_path)
-    print(f"\n[predictor] Model saved → {save_path}")
-    print(
-        f"[predictor] Load later with:\n"
-        f"  predictor = RealtimePredictor.load({str(save_path)!r})"
-    )
-
-
-# ─────────────────────────────── fixtures ────────────────────────────────────
 
 @pytest.fixture(scope="module")
 def vllm_running():
-    """Assert vLLM is reachable before data collection starts."""
-    import requests
-
     if not os.getenv("ABC_BENCH_ROOT"):
-        pytest.skip(
-            "ABC_BENCH_ROOT not set — skipping predictor integration test"
-        )
+        pytest.skip("ABC_BENCH_ROOT not set; skipping real ABC-Bench predictor test")
     try:
         requests.get(
             f"http://localhost:{HOST_PORT}/v1/models",
@@ -400,250 +193,149 @@ def vllm_running():
             timeout=10,
         ).raise_for_status()
     except Exception as exc:
-        pytest.fail(f"vLLM unreachable at port {HOST_PORT}: {exc}")
+        pytest.fail(f"vLLM unreachable at {LLM_BASE_URL}: {exc}")
     yield
 
 
 @pytest.fixture(scope="module")
-def trace_dir(tmp_path_factory, vllm_running):
-    """
-    Return a Path containing *_trace.csv files.
-
-    If PREDICTOR_TRACE_DIR is set, return that directory directly (fast path
-    for re-running the tests after traces are already collected).
-
-    Otherwise, discover all tasks under ABC_BENCH_ROOT and run each one via
-    run_single_agent, either sequentially (default) or concurrently
-    (PREDICTOR_CONCURRENT=1).  Each task writes its trace to a per-task
-    subdirectory of out_dir so results do not collide.
-    """
-    env_dir = os.getenv("PREDICTOR_TRACE_DIR")
-    if env_dir:
-        d = Path(env_dir)
-        if not d.exists():
-            pytest.fail(f"PREDICTOR_TRACE_DIR={env_dir!r} does not exist")
-        return d
-
-    root  = Path(os.environ["ABC_BENCH_ROOT"])
+def real_single_agent_predictor(tmp_path_factory, vllm_running) -> _RunBundle:
+    root = Path(os.environ["ABC_BENCH_ROOT"])
     tasks = find_task_dirs(root, os.getenv("ABC_BENCH_TASK", "task_*"))
     if not tasks:
-        pytest.skip(f"No tasks matched under {root}")
+        pytest.skip(f"No ABC-Bench tasks matched under {root}")
 
+    task_src = tasks[0]
     workspace = tmp_path_factory.mktemp("workspace")
-    out_dir   = tmp_path_factory.mktemp("traces")
+    results = tmp_path_factory.mktemp("abc_results")
+    work_dir = copy_task_to_workspace(task_src, workspace, suffix="_predictor")
+    agent_id = f"agent_{task_src.name}_predictor"
+    result_dir = results / task_src.name
 
-    if RUN_CONCURRENT:
-        _collect_traces_concurrent(tasks, workspace, out_dir, MAX_CONCURRENT)
-    else:
-        _collect_traces_sequential(tasks, workspace, out_dir)
+    print(f"\n[data collection] running real ABC-Bench task: {task_src.name}")
+    run_single_agent(
+        agent_id=agent_id,
+        task_dir=work_dir,
+        llm_model=LLM_MODEL,
+        llm_base_url=LLM_BASE_URL,
+        llm_api_key=LLM_API_KEY,
+        max_iterations=MAX_ITERATIONS,
+        results_dir=result_dir,
+        scheduled_dt=now_utc(),
+    )
 
-    if not list(out_dir.rglob("*_trace.csv")):
-        pytest.fail(
-            "No trace CSVs were produced — all agent runs failed.  "
-            "Check vLLM logs and ABC_BENCH_ROOT."
-        )
-    return out_dir
+    trace_csv = result_dir / f"{agent_id}_trace.csv"
+    trace_jsonl = result_dir / f"{agent_id}_trace.jsonl"
+    assert trace_csv.exists(), f"runner did not write detailed trace CSV: {trace_csv}"
+    assert trace_jsonl.exists(), f"runner did not write detailed trace JSONL: {trace_jsonl}"
+
+    env_model = os.getenv("PREDICTOR_MODEL_FILE")
+    model_path = Path(env_model) if env_model else results / "single_agent_tool_predictor.joblib"
+    full_df = load_traces(results)
+    tool_df = (
+        load_tool_calls(results, full_df)
+        .dropna(subset=["duration_s"])
+        .copy()
+        .reset_index(drop=True)
+    )
+    if tool_df.empty:
+        pytest.skip("The real single-agent run produced no completed tool calls")
+    if len(tool_df) < 2:
+        pytest.skip("At least two real tool calls are needed to train and evaluate a predictor")
+
+    required_cols = {
+        "agent_id",
+        "task_id",
+        "tool_seq",
+        "tool_name",
+        "tool_args_json",
+        "start_ts",
+        "end_ts",
+        "duration_s",
+        "outcome",
+        "observation_bytes",
+        "start_active_agents",
+    }
+    missing = sorted(required_cols.difference(tool_df.columns))
+    assert not missing, f"detailed trace is missing expected columns: {missing}"
+
+    model_name = os.getenv("PREDICTOR_MODEL", "ridge")
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "src" / "build_tool_predictor.py"),
+        "--trace-dir",
+        str(results),
+        "--model",
+        model_name,
+        "--remaining",
+        "--save-model",
+        str(model_path),
+    ]
+    print("\n[predictor build] " + " ".join(cmd))
+    subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
+    assert model_path.exists(), f"predictor was not saved: {model_path}"
+
+    feat = build_features(tool_df, remaining_mode=True)
+    feat = enrich_sequential_features(full_df, feat, tool_df).reset_index(drop=True)
+    return _RunBundle(results, model_path, tool_df, feat)
 
 
-@pytest.fixture(scope="module")
-def saved_model(trace_dir):
-    """
-    Build the 70 / 30 split, train a remaining-time predictor on the 70 %
-    portion, save it to disk, and return (model_path, split).
+def test_single_agent_builds_predictor_from_real_abc_bench(real_single_agent_predictor):
+    bundle = real_single_agent_predictor
+    predictor = RealtimePredictor.load(bundle.model_path)
 
-    Both test functions load the model from model_path — this mirrors
-    real deployment where the model is loaded once at process start.
-
-    The save path is:
-      • PREDICTOR_MODEL_FILE   if the env var is set
-      • <trace_dir>/duration_predictor.joblib  otherwise
-    """
-    features_csv = Path(__file__).parent / "tool_call_features.csv"
-    split = _build_split(trace_dir, out_csv=features_csv)
-
-    if split.feat_tr.empty:
-        pytest.skip("No tool-call rows found in traces")
-    if len(split.tool_te) < 2:
-        pytest.skip(
-            f"Only {len(split.tool_te)} held-out tool-call row(s) — "
-            "need ≥ 2 for evaluation.  Run more tasks or increase "
-            "PREDICTOR_MAX_ITERATIONS."
-        )
-
-    env_path = os.getenv("PREDICTOR_MODEL_FILE")
-    model_path = Path(env_path) if env_path else trace_dir / "duration_predictor.joblib"
-
-    _fit_and_save(split.feat_tr, split.tool_tr, model_path)
-
-    return model_path, split
-
-
-# ──────────────────────────────── tests ──────────────────────────────────────
-
-def test_predictor_trains_and_scores(saved_model):
-    """
-    Load the saved predictor from disk and evaluate point-estimate (total
-    duration at elapsed=0) predictions against the held-out 30 %.
-
-    This validates the training pipeline end-to-end and measures how well
-    the model generalises to unseen tool calls.
-
-    Hard assertions
-    ───────────────
-    • All predictions are non-negative.
-    • All predictions are finite.
-
-    Reported for inspection
-    ───────────────────────
-    • Per-row table: tool name | actual duration | predicted | signed error.
-    • Aggregate MAE, MAPE, R².
-    """
-    from sklearn.metrics import mean_absolute_error, r2_score
-
-    model_path, split = saved_model
-    predictor = RealtimePredictor.load(model_path)
-
-    actuals = split.tool_te["duration_s"].astype(float).values
-    preds   = np.array([
-        predictor.predict_duration(split.feat_te.iloc[[i]])
-        for i in range(len(split.feat_te))
+    actuals = bundle.tool_df["duration_s"].astype(float).values
+    preds = np.array([
+        predictor.predict_duration(bundle.feat.iloc[[i]])
+        for i in range(len(bundle.feat))
     ])
 
-    # ── hard assertions ───────────────────────────────────────────────────────
-    assert np.all(preds >= 0),         "Negative duration prediction(s) detected"
-    assert np.all(np.isfinite(preds)), "Non-finite duration prediction(s) detected"
+    assert np.all(np.isfinite(preds)), "duration predictions must be finite"
+    assert np.all(preds >= 0), "duration predictions must be non-negative"
 
-    # ── per-row comparison table ──────────────────────────────────────────────
-    tn = split.tool_te["tool_name"].fillna("unknown").values
     print(
-        f"\n── test_predictor_trains_and_scores "
-        f"(n_train={len(split.feat_tr)}, n_test={len(split.feat_te)}) ──"
+        f"\n[single-agent predictor] model={bundle.model_path} "
+        f"trace_dir={bundle.trace_dir} n_tool_calls={len(actuals)}"
     )
     print(f"  {'#':>3}  {'tool':<22}  {'actual_s':>9}  {'pred_s':>9}  {'err_s':>9}")
-    for i in range(len(actuals)):
+    tools = bundle.tool_df["tool_name"].fillna("unknown").values
+    for i in range(min(len(actuals), 30)):
         err = preds[i] - actuals[i]
         print(
-            f"  {i:>3}  {tn[i]:<22}  "
+            f"  {i:>3}  {tools[i]:<22}  "
             f"{actuals[i]:>9.3f}  {preds[i]:>9.3f}  {err:>+9.3f}"
         )
 
-    # ── aggregate metrics ─────────────────────────────────────────────────────
-    mae  = mean_absolute_error(actuals, preds)
-    r2   = r2_score(actuals, preds)
-    nz   = actuals > 0
-    mape = (
-        float(np.mean(np.abs((actuals[nz] - preds[nz]) / actuals[nz])) * 100)
-        if nz.any() else float("nan")
-    )
-    print(f"\n  MAE={mae:.4f}s   MAPE={mape:.1f}%   R²={r2:.4f}")
-    print(f"\n[deploy] predictor ready at: {model_path}")
 
+def test_single_agent_realtime_tool_prediction_replay(real_single_agent_predictor):
+    bundle = real_single_agent_predictor
+    predictor = RealtimePredictor.load(bundle.model_path)
 
-def test_realtime_replay(saved_model):
-    """
-    Load the saved predictor from disk and simulate real-time deployment:
-    for each held-out tool call, query the predictor at elapsed = 0 %
-    (dispatch), 25 %, and 50 % of the actual duration, then compare
-    predicted remaining time to actual remaining time.
+    actuals = bundle.tool_df["duration_s"].astype(float).values
+    pred_rem = np.zeros((len(actuals), len(_REPLAY_ELAPSED_FRACS)))
 
-    This mirrors the production loop:
-        # ActionEvent fires — we know features but not duration yet
-        pred_total = predictor.predict_duration(feat_row)
-
-        # poll mid-execution (e.g. every N seconds)
-        pred_remaining = predictor.predict_remaining(feat_row, elapsed_s=t)
-
-        # ObservationEvent fires — record actual, compute error
-        actual = end_ts - start_ts
-
-    Hard assertions
-    ───────────────
-    1. All predictions non-negative and finite.
-    2. predict_remaining(feat, elapsed=0) == predict_duration(feat) exactly
-       (structural: same pipeline call with elapsed_s=0).
-    3. Predicted remaining is weakly decreasing as elapsed grows for ≥ 75 %
-       of calls (≤ 25 % monotonicity violation tolerated for small datasets).
-
-    Reported for inspection
-    ───────────────────────
-    • Per-elapsed-fraction error table: mean actual remaining | mean predicted
-      remaining | MAE | MAPE.
-    • Per-call detail table (up to 30 rows): actual duration and predicted
-      remaining at each snapshot.
-    """
-    model_path, split = saved_model
-    predictor = RealtimePredictor.load(model_path)
-
-    actuals = split.tool_te["duration_s"].astype(float).values
-    n_te    = len(actuals)
-
-    # ── collect predictions: pred_rem[i, j] for call i at fraction j ─────────
-    pred_rem = np.zeros((n_te, len(_REPLAY_FRACS)))
     for i, actual in enumerate(actuals):
-        row = split.feat_te.iloc[[i]]
-        for j, frac in enumerate(_REPLAY_FRACS):
+        row = bundle.feat.iloc[[i]]
+        for j, frac in enumerate(_REPLAY_ELAPSED_FRACS):
             pred_rem[i, j] = predictor.predict_remaining(row, elapsed_s=actual * frac)
 
-    # ── 1: non-negative + finite ──────────────────────────────────────────────
-    assert np.all(pred_rem >= 0),         "Negative remaining-time prediction"
-    assert np.all(np.isfinite(pred_rem)), "Non-finite remaining-time prediction"
+    assert np.all(np.isfinite(pred_rem)), "remaining-time predictions must be finite"
+    assert np.all(pred_rem >= 0), "remaining-time predictions must be non-negative"
 
-    # ── 2: predict_remaining(elapsed=0) == predict_duration ──────────────────
-    dur_preds = np.array([
-        predictor.predict_duration(split.feat_te.iloc[[i]])
-        for i in range(n_te)
+    dispatch_preds = np.array([
+        predictor.predict_duration(bundle.feat.iloc[[i]])
+        for i in range(len(actuals))
     ])
-    np.testing.assert_array_equal(
-        pred_rem[:, 0],
-        dur_preds,
-        err_msg=(
-            "predict_remaining(feat, elapsed=0) must be numerically identical "
-            "to predict_duration(feat) — both call the pipeline with elapsed_s=0"
-        ),
-    )
+    np.testing.assert_array_equal(pred_rem[:, 0], dispatch_preds)
 
-    # ── 3: monotonicity (remaining should decrease as elapsed grows) ──────────
-    # Compare remaining@first_frac vs remaining@last_frac.
-    violations = int(np.sum(pred_rem[:, -1] > pred_rem[:, 0]))
-    viol_rate  = violations / n_te
-    print(
-        f"\n  Monotonicity: {violations}/{n_te} calls have "
-        f"remaining@{_REPLAY_FRACS[-1]:.0%} > remaining@{_REPLAY_FRACS[0]:.0%}  "
-        f"[violation rate {viol_rate:.1%}]"
-    )
-    assert viol_rate <= 0.25, (
-        f"{viol_rate:.1%} > 25 % of predictions are non-monotone "
-        f"(predicted remaining grows as elapsed grows) — model quality too low"
-    )
-
-    # ── per-fraction error table ──────────────────────────────────────────────
-    print(f"\n── test_realtime_replay: {n_te} held-out tool calls ──")
+    print("\n[realtime replay] real single-agent tool calls")
     print(
         f"  {'elapsed':>8}  {'act_rem_mean':>13}  {'pred_rem_mean':>14}  "
-        f"{'MAE':>8}  {'MAPE':>8}"
+        f"{'MAE':>8}"
     )
-    for j, frac in enumerate(_REPLAY_FRACS):
-        act_rem = np.maximum(0.0, actuals * (1.0 - frac))
-        p_rem   = pred_rem[:, j]
-        mae     = float(np.mean(np.abs(act_rem - p_rem)))
-        nz      = act_rem > 0
-        mape    = (
-            float(np.mean(np.abs((act_rem[nz] - p_rem[nz]) / act_rem[nz])) * 100)
-            if nz.any() else float("nan")
-        )
+    for j, frac in enumerate(_REPLAY_ELAPSED_FRACS):
+        actual_remaining = np.maximum(0.0, actuals * (1.0 - frac))
+        mae = float(np.mean(np.abs(actual_remaining - pred_rem[:, j])))
         print(
-            f"  {frac:>7.0%}  {act_rem.mean():>12.3f}s  "
-            f"{p_rem.mean():>13.3f}s  {mae:>7.3f}s  {mape:>7.1f}%"
+            f"  {frac:>7.0%}  {actual_remaining.mean():>12.3f}s  "
+            f"{pred_rem[:, j].mean():>13.3f}s  {mae:>7.3f}s"
         )
-
-    # ── per-call detail table (first 30 rows) ─────────────────────────────────
-    tn = split.tool_te["tool_name"].fillna("unknown").values
-    frac_header = "  ".join(f"{'rem@' + f'{f:.0%}':>11}" for f in _REPLAY_FRACS)
-    print(f"\n  {'#':>3}  {'tool':<22}  {'actual_s':>9}  {frac_header}")
-    for i in range(min(n_te, 30)):
-        frac_vals = "  ".join(
-            f"{pred_rem[i, j]:>11.3f}" for j in range(len(_REPLAY_FRACS))
-        )
-        print(f"  {i:>3}  {tn[i]:<22}  {actuals[i]:>9.3f}s  {frac_vals}")
-
-    print(f"\n[deploy] predictor ready at: {model_path}")
