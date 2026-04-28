@@ -849,25 +849,104 @@ def print_feature_importance(pipeline: Pipeline, feature_names: list[str]) -> No
 
 # ─────────────────────────── group-based split ───────────────────────────────
 
+def _stratified_row_split(
+    is_long: np.ndarray,
+    test_fraction: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Random row split that proportionally samples long and short calls."""
+    long_idx  = np.where(is_long)[0]
+    short_idx = np.where(~is_long)[0]
+    rng.shuffle(long_idx)
+    rng.shuffle(short_idx)
+
+    n_test_long = (
+        min(max(1, int(round(len(long_idx) * test_fraction))), len(long_idx))
+        if len(long_idx) > 0 else 0
+    )
+    n_test_short = (
+        min(max(1, int(round(len(short_idx) * test_fraction))), len(short_idx))
+        if len(short_idx) > 0 else 0
+    )
+
+    te = np.concatenate([long_idx[:n_test_long], short_idx[:n_test_short]]).astype(int)
+    tr = np.concatenate([long_idx[n_test_long:], short_idx[n_test_short:]]).astype(int)
+    rng.shuffle(te)
+    rng.shuffle(tr)
+    return tr, te
+
+
 def group_train_test_indices(
     groups: pd.Series,
     test_fraction: float,
     seed: int,
+    is_long: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    unique = groups.unique()
+    """
+    Pick train/test indices.
+
+    When ``is_long`` is provided (per-row mask of long-call samples), the
+    split is stratified so that the test set contains at least some long
+    calls whenever any exist:
+
+    * Single-agent (or fewer than two unique groups): rows are split per
+      stratum (long vs short) using ``test_fraction`` proportionally.
+    * Multi-agent: agents are partitioned into "has any long call" vs
+      "all short", and at least one long-call agent is sampled into test
+      whenever such agents exist.  Agent purity is preserved (no agent
+      straddles train and test).
+    """
+    rng = np.random.default_rng(seed)
+    unique = list(groups.unique())
+    is_long_arr = (
+        np.asarray(is_long, dtype=bool) if is_long is not None else None
+    )
 
     if len(unique) < 2:
-        print("WARNING: only one agent group — using random row split", file=sys.stderr)
         n = len(groups)
-        split = int(n * (1 - test_fraction))
+        if is_long_arr is not None and is_long_arr.any() and not is_long_arr.all():
+            print(
+                "  Single-agent split: stratifying rows by long/short calls",
+                file=sys.stderr,
+            )
+            return _stratified_row_split(is_long_arr, test_fraction, rng)
+
+        print("WARNING: only one agent group — using random row split", file=sys.stderr)
         idx = np.arange(n)
-        rng = np.random.default_rng(seed)
         rng.shuffle(idx)
+        split = int(n * (1 - test_fraction))
         return idx[:split], idx[split:]
 
-    rng = np.random.default_rng(seed)
     n_test = max(1, int(len(unique) * test_fraction))
-    test_agents = set(rng.choice(unique, size=n_test, replace=False))
+
+    if is_long_arr is not None and is_long_arr.any():
+        groups_arr = groups.values
+        long_agents  = [a for a in unique if is_long_arr[groups_arr == a].any()]
+        short_agents = [a for a in unique if a not in long_agents]
+
+        n_test_long  = min(
+            max(1, int(round(len(long_agents) * test_fraction))),
+            len(long_agents),
+        )
+        n_test_short = min(max(0, n_test - n_test_long), len(short_agents))
+
+        chosen_long = (
+            rng.choice(long_agents, size=n_test_long, replace=False)
+            if n_test_long > 0 else np.array([], dtype=object)
+        )
+        chosen_short = (
+            rng.choice(short_agents, size=n_test_short, replace=False)
+            if n_test_short > 0 else np.array([], dtype=object)
+        )
+        test_agents = set(list(chosen_long) + list(chosen_short))
+        print(
+            f"  Stratified agent split: {len(chosen_long)} long-call agent(s), "
+            f"{len(chosen_short)} short-only agent(s) in test",
+            file=sys.stderr,
+        )
+    else:
+        test_agents = set(rng.choice(unique, size=n_test, replace=False))
+
     te_mask = groups.isin(test_agents).values
     return np.where(~te_mask)[0], np.where(te_mask)[0]
 
@@ -879,12 +958,16 @@ def group_train_test_split(
     tool_names: pd.Series,
     test_fraction: float,
     seed: int,
+    is_long: Optional[np.ndarray] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
     """
     Split by unique agent_id values so no agent's rows appear in both
-    train and test.  Falls back to random split if there is only one agent.
+    train and test.  Falls back to a stratified row split when there is
+    only one agent (and ``is_long`` is provided).
     """
-    tr_idx, te_idx = group_train_test_indices(groups, test_fraction, seed)
+    tr_idx, te_idx = group_train_test_indices(
+        groups, test_fraction, seed, is_long=is_long
+    )
 
     return (
         X.iloc[tr_idx].reset_index(drop=True),
@@ -1052,7 +1135,20 @@ def main() -> int:
         return 0
 
     # ── group-based train / test split ───────────────────────────────────────
-    tr_idx, te_idx = group_train_test_indices(groups, args.test_fraction, args.seed)
+    # Per-row mask of "originally a long call". In remaining mode every
+    # snapshot of a long call inherits the flag, so test always gets some
+    # rows whose true target is non-zero.
+    durs_per_call = tool_df["duration_s"].astype(float).values
+    is_long_per_call = durs_per_call >= long_threshold
+    if args.remaining:
+        is_long_x = np.tile(is_long_per_call, len(_REMAINING_FRACS))
+    else:
+        is_long_x = is_long_per_call
+    n_long_total = int(is_long_x.sum())
+
+    tr_idx, te_idx = group_train_test_indices(
+        groups, args.test_fraction, args.seed, is_long=is_long_x,
+    )
     X_tr = X.iloc[tr_idx].reset_index(drop=True)
     X_te = X.iloc[te_idx].reset_index(drop=True)
     y_tr = y.iloc[tr_idx].reset_index(drop=True)
@@ -1060,7 +1156,19 @@ def main() -> int:
     tn_te = tool_names.iloc[te_idx].reset_index(drop=True)
     w_tr = sample_weights.iloc[tr_idx].reset_index(drop=True)
 
-    print(f"\nSplit (by agent): {len(X_tr)} train / {len(X_te)} test")
+    n_long_test = int(is_long_x[te_idx].sum())
+    if n_long_total > 0 and n_long_test == 0:
+        print(
+            "  WARNING: split produced no long calls in test; metrics will "
+            "be degenerate. Try a larger --test-fraction or different --seed.",
+            file=sys.stderr,
+        )
+
+    n_long_train = int(is_long_x[tr_idx].sum())
+    print(
+        f"\nSplit (by agent): {len(X_tr)} train ({n_long_train} long) / "
+        f"{len(X_te)} test ({n_long_test} long)"
+    )
     print(
         f"Model: {args.model}  |  log-target: {log_target}  |  remaining: {args.remaining}  "
         f"| long-call weight: >= {long_threshold:.1f}s x{LONG_CALL_WEIGHT:.1f}  "

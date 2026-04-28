@@ -25,6 +25,7 @@ from build_tool_predictor import (
     clamp_short,
     enrich_sequential_features,
     fit_pipeline,
+    group_train_test_indices,
     inv_transform,
     load_tool_calls,
     load_traces,
@@ -211,3 +212,39 @@ def test_log_target_round_trip_zero_for_short_call():
     assert recovered[0] == 0.0
     assert recovered[1] == pytest_approx(3.0)
     assert recovered[2] == 0.0
+
+
+def test_split_stratifies_long_calls_into_test_single_agent():
+    """Single-agent split must put at least one long call into test even
+    when long calls are rare."""
+    n = 60
+    is_long = np.zeros(n, dtype=bool)
+    is_long[:3] = True  # 3 long calls out of 60
+    groups = pd.Series(["only_agent"] * n)
+
+    tr_idx, te_idx = group_train_test_indices(
+        groups, test_fraction=0.2, seed=42, is_long=is_long,
+    )
+    assert is_long[te_idx].sum() >= 1, "test set must contain a long call"
+    assert is_long[tr_idx].sum() >= 1, "train set must keep most long calls"
+    assert set(tr_idx).isdisjoint(set(te_idx))
+
+
+def test_split_picks_long_call_agent_for_test_multi_agent():
+    """Multi-agent split must put at least one long-call agent into test
+    even when most agents are short-only."""
+    # 5 agents × 6 rows each. Only agent_0 has long calls.
+    rows_per_agent = 6
+    agents = sum(([f"agent_{i}"] * rows_per_agent for i in range(5)), [])
+    is_long = np.zeros(len(agents), dtype=bool)
+    is_long[0:2] = True  # both long calls live with agent_0
+    groups = pd.Series(agents)
+
+    tr_idx, te_idx = group_train_test_indices(
+        groups, test_fraction=0.2, seed=42, is_long=is_long,
+    )
+    assert is_long[te_idx].sum() >= 1, "test must contain at least one long call"
+    test_agents = set(groups.iloc[te_idx].unique())
+    train_agents = set(groups.iloc[tr_idx].unique())
+    assert test_agents.isdisjoint(train_agents), "agent purity must be preserved"
+    assert "agent_0" in test_agents, "the only long-call agent must be in test"
