@@ -199,6 +199,7 @@ flat_keys = [
     ("PREDICTION_TEST_FRAC",   "prediction.test_fraction"),
     ("PREDICTION_SAVE_MODEL",  "prediction.save_model"),
     ("PREDICTION_SEED",        "prediction.seed"),
+    ("PREDICTION_LONG_THRESHOLD_S", "prediction.long_call_threshold_s"),
     ("LOG_LEVEL",              "logging.level"),
     ("LOG_FILE",               "logging.file"),
     ("SIDECAR_ENABLED",        "sidecar.enabled"),
@@ -341,6 +342,9 @@ build_predictor_cmd() {
     if [[ -n "${PREDICTION_SAVE_MODEL:-}" ]]; then
         cmd+=(--save-model "$PREDICTION_SAVE_MODEL")
     fi
+    if [[ -n "${PREDICTION_LONG_THRESHOLD_S:-}" ]]; then
+        cmd+=(--long-threshold "$PREDICTION_LONG_THRESHOLD_S")
+    fi
     echo "${cmd[@]}"
 }
 
@@ -391,6 +395,7 @@ echo "    enabled:            ${PREDICTION_ENABLED:-false}"
 echo "    model:              ${PREDICTION_MODEL:-ridge}"
 echo "    test_fraction:      ${PREDICTION_TEST_FRAC:-0.2}"
 echo "    save_model:         ${PREDICTION_SAVE_MODEL:-}"
+echo "    long_threshold_s:   ${PREDICTION_LONG_THRESHOLD_S:-2.0}"
 echo ""
 echo -e "  ${CYAN}Sidecar (KV cache monitor)${RESET}"
 echo "    enabled:            ${SIDECAR_ENABLED:-false}"

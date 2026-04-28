@@ -127,6 +127,12 @@ prediction:
   # RNG seed for the train/test split.
   seed: 42
 
+  # Tool calls with duration < this threshold (in seconds) are treated as
+  # short: their training target is set to 0 and predictions below this
+  # value are clamped to 0 at inference. Calls >= threshold get a real
+  # predicted duration.
+  long_call_threshold_s: 2.0
+
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Embedded Sidecar (KV Cache Monitor)                                     ║

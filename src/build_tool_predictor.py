@@ -192,12 +192,6 @@ def build_features(df: pd.DataFrame, remaining_mode: bool = False) -> pd.DataFra
     # training because they are captured when the ActionEvent fires.
     feat["start_active_agents"] = _num_col(df, "start_active_agents", 0)
     feat["start_active_tool_calls"] = _num_col(df, "start_active_tool_calls", 0)
-    feat["start_kv_blocks"] = _num_col(df, "start_kv_blocks", 0)
-    raw_start_kv = df.get("start_kv_blocks", pd.Series("", index=df.index))
-    feat["start_kv_blocks_missing"] = (
-        raw_start_kv.isna() | raw_start_kv.astype(str).eq("")
-    ).astype(int)
-    feat["start_kv_gb"] = _num_col(df, "start_kv_gb", 0)
 
     # Filled from detailed traces when available, then refined/fallback-filled
     # by enrich_sequential_features for legacy trace directories.
@@ -381,6 +375,7 @@ def augment_remaining(
     tool_df: pd.DataFrame,
     feat: pd.DataFrame,
     fracs: list[float],
+    long_threshold: float = LONG_CALL_THRESHOLD_S,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """
     Expand each tool_call row into multiple training samples at different
@@ -388,19 +383,23 @@ def augment_remaining(
 
     For a call with total duration D and snapshot fraction f:
         elapsed_s   = D * f
-        remaining_s = max(0, D - elapsed_s)
+        remaining_s = max(0, D - elapsed_s) if D >= long_threshold else 0
+
+    Short calls (D < long_threshold) get target 0 across all snapshots so
+    the predictor learns to output 0 for them.
 
     Returns X_aug, y_aug (remaining_s), tool_names_aug — all reset-indexed.
     """
     X_parts, y_parts, tn_parts = [], [], []
     durs = tool_df["duration_s"].astype(float).values
     tn   = tool_df["tool_name"].fillna("unknown").values
+    is_short = durs < long_threshold
 
     for frac in fracs:
         snap = feat.copy()
         elapsed = durs * frac
         snap["elapsed_s"] = elapsed
-        remaining = np.maximum(0.0, durs - elapsed)
+        remaining = np.where(is_short, 0.0, np.maximum(0.0, durs - elapsed))
         X_parts.append(snap)
         y_parts.append(remaining)
         tn_parts.append(tn)
@@ -420,6 +419,13 @@ def log_transform(y: pd.Series) -> pd.Series:
 def inv_transform(arr: np.ndarray) -> np.ndarray:
     """Inverse of log1p, clamped to ≥ 0."""
     return np.maximum(0.0, np.expm1(arr))
+
+
+def clamp_short(y: np.ndarray, threshold: float) -> np.ndarray:
+    """Force predictions below ``threshold`` to exactly 0 (short-call mask)."""
+    out = np.maximum(0.0, np.asarray(y, dtype=float))
+    out[out < threshold] = 0.0
+    return out
 
 
 def build_sample_weights(
@@ -465,8 +471,6 @@ def load_traces(trace_dir: Path) -> pd.DataFrame:
         "start_active_agents",
         "start_active_tool_calls",
         "start_cumulative_reasoning_s",
-        "start_kv_blocks",
-        "start_kv_gb",
     ):
         if col in combined.columns:
             combined[col] = pd.to_numeric(combined[col], errors="coerce")
@@ -502,8 +506,6 @@ def _normalise_tool_call_frame(df: pd.DataFrame) -> pd.DataFrame:
         "start_active_agents",
         "start_active_tool_calls",
         "start_cumulative_reasoning_s",
-        "start_kv_blocks",
-        "start_kv_gb",
         "observation_bytes",
         "observation_line_count",
         "returncode",
@@ -582,12 +584,15 @@ def prepare_dataset(
     trace_dir: Path,
     remaining_mode: bool = False,
     log_target: bool = True,
+    long_threshold: float = LONG_CALL_THRESHOLD_S,
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     """
     Returns
     -------
     X          – feature matrix (float, one-hot encoded), RangeIndex
-    y          – target (log1p if log_target, else raw), RangeIndex
+    y          – target (log1p if log_target, else raw), RangeIndex.
+                 Calls whose original ``duration_s < long_threshold`` get
+                 target 0 (long-call-only training).
     tool_df    – raw tool_call rows (for output CSV alignment)
     full_df    – entire trace
     groups     – agent_id per X row (for GroupKFold / group split)
@@ -604,7 +609,9 @@ def prepare_dataset(
     feat = enrich_sequential_features(full_df, feat, tool_df)
 
     if remaining_mode:
-        X, y_raw, tool_names = augment_remaining(tool_df, feat, _REMAINING_FRACS)
+        X, y_raw, tool_names = augment_remaining(
+            tool_df, feat, _REMAINING_FRACS, long_threshold=long_threshold
+        )
         # tile agent_ids to match the augmented order (frac0_rows, frac1_rows, ...)
         groups = pd.Series(
             np.tile(tool_df["agent_id"].fillna("unknown").values, len(_REMAINING_FRACS)),
@@ -612,7 +619,8 @@ def prepare_dataset(
         )
     else:
         X          = feat.copy().reset_index(drop=True)
-        y_raw      = tool_df["duration_s"].astype(float).reset_index(drop=True)
+        durs       = tool_df["duration_s"].astype(float).reset_index(drop=True)
+        y_raw      = durs.where(durs >= long_threshold, 0.0)
         tool_names = tool_df["tool_name"].fillna("unknown").reset_index(drop=True)
         groups     = tool_df["agent_id"].fillna("unknown").reset_index(drop=True)
 
@@ -623,8 +631,12 @@ def prepare_dataset(
     y = log_transform(y_raw) if log_target else y_raw.reset_index(drop=True)
 
     mode_lbl = "remaining_s" if remaining_mode else "duration_s"
-    print(f"Dataset: {len(X)} samples, {X.shape[1]} features  "
-          f"[target={mode_lbl}, log={log_target}]")
+    n_long = int((y_raw > 0).sum())
+    print(
+        f"Dataset: {len(X)} samples, {X.shape[1]} features  "
+        f"[target={mode_lbl}, log={log_target}, long_threshold={long_threshold:.2f}s, "
+        f"long_targets={n_long}/{len(y_raw)}]"
+    )
     return X, y, tool_df, full_df, groups, tool_names
 
 
@@ -704,6 +716,7 @@ def evaluate(
     y_pred: np.ndarray,
     tool_names: Optional[pd.Series] = None,
     label: str = "test",
+    long_threshold: float = LONG_CALL_THRESHOLD_S,
 ) -> dict:
     """Compute and print regression metrics; optionally per-tool breakdown."""
     mae   = mean_absolute_error(y_true, y_pred)
@@ -731,19 +744,32 @@ def evaluate(
     print(f"  R²       = {r2:.4f}")
     print(f"  n        = {len(y_true)}")
 
-    long_mask = y_true >= LONG_CALL_THRESHOLD_S
+    long_mask = y_true >= long_threshold
     if long_mask.any():
         long_mae = mean_absolute_error(y_true[long_mask], y_pred[long_mask])
         long_rmse = np.sqrt(mean_squared_error(y_true[long_mask], y_pred[long_mask]))
         metrics["long_calls"] = {
-            "threshold_s": LONG_CALL_THRESHOLD_S,
+            "threshold_s": long_threshold,
             "mae": round(float(long_mae), 4),
             "rmse": round(float(long_rmse), 4),
             "n": int(long_mask.sum()),
         }
         print(
-            f"  Long-call MAE/RMSE (>= {LONG_CALL_THRESHOLD_S:.1f}s) "
+            f"  Long-call MAE/RMSE (>= {long_threshold:.1f}s) "
             f"= {long_mae:.4f}s / {long_rmse:.4f}s  n={int(long_mask.sum())}"
+        )
+
+    short_mask = ~long_mask
+    if short_mask.any():
+        short_zero = float(np.mean(y_pred[short_mask] == 0.0))
+        metrics["short_calls"] = {
+            "threshold_s": long_threshold,
+            "n": int(short_mask.sum()),
+            "frac_predicted_zero": round(short_zero, 4),
+        }
+        print(
+            f"  Short-call zero-rate (< {long_threshold:.1f}s) "
+            f"= {short_zero * 100:.1f}%  n={int(short_mask.sum())}"
         )
 
     if tool_names is not None and len(tool_names) == len(y_true):
@@ -771,6 +797,7 @@ def cross_validate(
     n_splits: int,
     log_target: bool,
     sample_weights: Optional[pd.Series] = None,
+    long_threshold: float = LONG_CALL_THRESHOLD_S,
 ) -> dict:
     """GroupKFold CV; agents never straddle train/test folds."""
     n_unique = groups.nunique()
@@ -787,7 +814,8 @@ def cross_validate(
         fit_pipeline(p, X.iloc[tr_idx], y.iloc[tr_idx], w_tr)
         pred = p.predict(X.iloc[te_idx])
         y_te = inv_transform(y.iloc[te_idx].values) if log_target else y.iloc[te_idx].values
-        y_pr = inv_transform(pred) if log_target else np.maximum(0.0, pred)
+        y_pr_raw = inv_transform(pred) if log_target else pred
+        y_pr = clamp_short(y_pr_raw, long_threshold)
         maes.append(mean_absolute_error(y_te, y_pr))
         r2s.append(r2_score(y_te, y_pr))
         print(f"  Fold {fold+1}/{n_splits}: MAE={maes[-1]:.4f}s  R²={r2s[-1]:.4f}")
@@ -883,10 +911,12 @@ class RealtimePredictor:
         pipeline: Pipeline,
         feature_names: list[str],
         log_target: bool = True,
+        long_threshold: float = LONG_CALL_THRESHOLD_S,
     ) -> None:
         self._pipeline = pipeline
         self._feat_cols = feature_names
         self._log = log_target
+        self._long_threshold = float(long_threshold)
 
     @classmethod
     def load(cls, path: Path, log_target: Optional[bool] = None) -> "RealtimePredictor":
@@ -898,10 +928,14 @@ class RealtimePredictor:
                 "save it with build_tool_predictor.py first."
             )
         saved_log = getattr(pipeline, "_log_target", True)
+        saved_threshold = getattr(
+            pipeline, "_long_call_threshold_s", LONG_CALL_THRESHOLD_S
+        )
         return cls(
             pipeline,
             list(feature_names),
             log_target=saved_log if log_target is None else log_target,
+            long_threshold=saved_threshold,
         )
 
     def _prepare(self, feat: pd.DataFrame, elapsed_s: float = 0.0) -> pd.DataFrame:
@@ -920,7 +954,10 @@ class RealtimePredictor:
         x = self._prepare(feat, elapsed_s=elapsed_s)
         raw = self._pipeline.predict(x)
         val = inv_transform(raw)[0] if self._log else float(raw[0])
-        return float(max(0.0, val))
+        val = float(max(0.0, val))
+        if val < self._long_threshold:
+            return 0.0
+        return val
 
     def predict_duration(self, feat: pd.DataFrame) -> float:
         return self.predict_remaining(feat, elapsed_s=0.0)
@@ -957,20 +994,29 @@ def parse_args() -> argparse.Namespace:
                    help="Skip training; requires --load-model.")
     p.add_argument("--output-predictions", type=Path, default=None,
                    help="Write predictions CSV to this path.")
+    p.add_argument("--long-threshold", type=float, default=LONG_CALL_THRESHOLD_S,
+                   help=f"Tool calls with duration < this many seconds are "
+                        f"treated as short: their training target is set to 0 "
+                        f"and predictions below this value are clamped to 0 at "
+                        f"inference. Default: {LONG_CALL_THRESHOLD_S}.")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     log_target = not args.no_log_target
+    long_threshold = float(args.long_threshold)
 
     X, y, tool_df, full_df, groups, tool_names = prepare_dataset(
         args.trace_dir,
         remaining_mode=args.remaining,
         log_target=log_target,
+        long_threshold=long_threshold,
     )
     feature_names = list(X.columns)
-    sample_weights = build_sample_weights(tool_df, remaining_mode=args.remaining)
+    sample_weights = build_sample_weights(
+        tool_df, remaining_mode=args.remaining, long_threshold_s=long_threshold
+    )
 
     # ── inference-only mode ──────────────────────────────────────────────────
     if args.predict_only:
@@ -980,6 +1026,9 @@ def main() -> int:
         pipeline = joblib.load(args.load_model)
         print(f"Loaded model from {args.load_model}")
         log_target = getattr(pipeline, "_log_target", log_target)
+        long_threshold = float(
+            getattr(pipeline, "_long_call_threshold_s", long_threshold)
+        )
 
         train_cols = getattr(pipeline, "_trained_feature_names", None)
         if train_cols is not None:
@@ -989,9 +1038,10 @@ def main() -> int:
             X = X[train_cols]
 
         pred_log = pipeline.predict(X)
-        y_pred = inv_transform(pred_log) if log_target else np.maximum(0.0, pred_log)
+        y_pred_raw = inv_transform(pred_log) if log_target else pred_log
+        y_pred = clamp_short(y_pred_raw, long_threshold)
         y_true = inv_transform(y.values) if log_target else y.values
-        evaluate(y_true, y_pred, tool_names)
+        evaluate(y_true, y_pred, tool_names, long_threshold=long_threshold)
 
         if args.output_predictions:
             out = X.copy()
@@ -1013,7 +1063,8 @@ def main() -> int:
     print(f"\nSplit (by agent): {len(X_tr)} train / {len(X_te)} test")
     print(
         f"Model: {args.model}  |  log-target: {log_target}  |  remaining: {args.remaining}  "
-        f"| long-call weight: >= {LONG_CALL_THRESHOLD_S:.1f}s x{LONG_CALL_WEIGHT:.1f}"
+        f"| long-call weight: >= {long_threshold:.1f}s x{LONG_CALL_WEIGHT:.1f}  "
+        f"| short calls (< {long_threshold:.1f}s) → 0"
     )
 
     # ── optional cross-validation ─────────────────────────────────────────────
@@ -1021,7 +1072,9 @@ def main() -> int:
     if args.cv > 0:
         print(f"\n── {args.cv}-fold GroupKFold CV ──")
         all_metrics["cv"] = cross_validate(
-            args.model, X, y, groups, args.cv, log_target, sample_weights)
+            args.model, X, y, groups, args.cv, log_target, sample_weights,
+            long_threshold=long_threshold,
+        )
 
     # ── train point-estimate model ────────────────────────────────────────────
     pipeline = build_model(args.model)
@@ -1029,14 +1082,17 @@ def main() -> int:
     pipeline._trained_feature_names = feature_names  # for inference alignment
     pipeline._log_target = log_target
     pipeline._remaining_mode = args.remaining
-    pipeline._long_call_threshold_s = LONG_CALL_THRESHOLD_S
+    pipeline._long_call_threshold_s = long_threshold
 
     # ── evaluate point estimates ──────────────────────────────────────────────
     pred_log  = pipeline.predict(X_te)
-    y_pred_te = inv_transform(pred_log) if log_target else np.maximum(0.0, pred_log)
+    y_pred_te_raw = inv_transform(pred_log) if log_target else pred_log
+    y_pred_te = clamp_short(y_pred_te_raw, long_threshold)
     y_true_te = inv_transform(y_te.values) if log_target else y_te.values
 
-    all_metrics["test"] = evaluate(y_true_te, y_pred_te, tn_te)
+    all_metrics["test"] = evaluate(
+        y_true_te, y_pred_te, tn_te, long_threshold=long_threshold
+    )
     print_feature_importance(pipeline, feature_names)
 
     # ── optional quantile models (P10 / P50 / P90) ───────────────────────────
@@ -1046,7 +1102,8 @@ def main() -> int:
         for label, qp in build_quantile_pipelines().items():
             fit_pipeline(qp, X_tr, y_tr, w_tr)
             q_raw = qp.predict(X_te)
-            q_preds_te[label] = inv_transform(q_raw) if log_target else np.maximum(0.0, q_raw)
+            q_inv = inv_transform(q_raw) if log_target else q_raw
+            q_preds_te[label] = clamp_short(q_inv, long_threshold)
             print(f"  {label}: median={np.median(q_preds_te[label]):.3f}s  "
                   f"p90={np.percentile(q_preds_te[label], 90):.3f}s")
 

@@ -259,6 +259,7 @@ def real_single_agent_predictor(tmp_path_factory, vllm_running) -> _RunBundle:
     assert not missing, f"detailed trace is missing expected columns: {missing}"
 
     model_name = os.getenv("PREDICTOR_MODEL", "ridge")
+    long_threshold = float(os.getenv("PREDICTOR_LONG_THRESHOLD_S", "2.0"))
     cmd = [
         sys.executable,
         str(REPO_ROOT / "src" / "build_tool_predictor.py"),
@@ -269,6 +270,8 @@ def real_single_agent_predictor(tmp_path_factory, vllm_running) -> _RunBundle:
         "--remaining",
         "--save-model",
         str(model_path),
+        "--long-threshold",
+        str(long_threshold),
     ]
     print("\n[predictor build] " + " ".join(cmd))
     subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
@@ -309,6 +312,7 @@ def test_single_agent_builds_predictor_from_real_abc_bench(real_single_agent_pre
 def test_single_agent_realtime_tool_prediction_replay(real_single_agent_predictor):
     bundle = real_single_agent_predictor
     predictor = RealtimePredictor.load(bundle.model_path)
+    long_threshold = float(predictor._long_threshold)
 
     actuals = bundle.tool_df["duration_s"].astype(float).values
     pred_rem = np.zeros((len(actuals), len(_REPLAY_ELAPSED_FRACS)))
@@ -326,6 +330,14 @@ def test_single_agent_realtime_tool_prediction_replay(real_single_agent_predicto
         for i in range(len(actuals))
     ])
     np.testing.assert_array_equal(pred_rem[:, 0], dispatch_preds)
+
+    # Short-call gate: every prediction is either 0.0 or >= long_threshold.
+    # The clamp guarantees no value falls in the (0, threshold) gap.
+    nonzero = dispatch_preds[dispatch_preds > 0]
+    assert (nonzero >= long_threshold).all(), (
+        f"clamp leak: predictions in (0, {long_threshold}s) gap → "
+        f"{nonzero[nonzero < long_threshold].tolist()}"
+    )
 
     print("\n[realtime replay] real single-agent tool calls")
     print(
