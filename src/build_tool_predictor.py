@@ -87,6 +87,8 @@ _REMAINING_FRACS: list[float] = [0.0, 0.10, 0.25, 0.50, 0.75]
 # predicts all calls, but this nudges fitting toward the high-impact tail.
 LONG_CALL_THRESHOLD_S: float = 2.0
 LONG_CALL_WEIGHT: float = 3.0
+HGB_MIN_SAMPLES_LEAF_FLOOR: int = 2
+HGB_MIN_SAMPLES_LEAF_CAP: int = 20
 
 
 # ─────────────────────────── feature engineering ─────────────────────────────
@@ -428,17 +430,70 @@ def clamp_short(y: np.ndarray, threshold: float) -> np.ndarray:
     return out
 
 
+def count_long_short_calls(
+    tool_df: pd.DataFrame,
+    long_threshold_s: float = LONG_CALL_THRESHOLD_S,
+) -> tuple[int, int]:
+    """Return ``(n_short, n_long)`` from source tool-call durations."""
+    durs = pd.to_numeric(tool_df["duration_s"], errors="coerce").fillna(0).values
+    n_long = int(np.sum(durs >= long_threshold_s))
+    n_short = int(len(durs) - n_long)
+    return n_short, n_long
+
+
+def auto_long_call_weight(
+    tool_df: pd.DataFrame,
+    long_threshold_s: float = LONG_CALL_THRESHOLD_S,
+    long_weight_floor: float = LONG_CALL_WEIGHT,
+) -> float:
+    """
+    Balance long calls against short calls while preserving a floor bias.
+
+    The effective long-call weight is:
+        max(long_weight_floor, n_short / n_long)
+
+    When no long calls are present, returns 1.0 because there is no long-call
+    stratum to up-weight.
+    """
+    n_short, n_long = count_long_short_calls(tool_df, long_threshold_s=long_threshold_s)
+    if n_long <= 0:
+        return 1.0
+    return float(max(long_weight_floor, n_short / n_long))
+
+
+def auto_hgb_min_samples_leaf(
+    n_long_calls: Optional[int],
+    floor: int = HGB_MIN_SAMPLES_LEAF_FLOOR,
+    cap: int = HGB_MIN_SAMPLES_LEAF_CAP,
+) -> int:
+    """
+    Scale HGB ``min_samples_leaf`` from long-call support.
+
+    With enough long calls the value grows back to the historical default of
+    20, while smaller datasets get a looser leaf-size constraint:
+        max(floor, min(cap, n_long_calls // 2))
+    """
+    if n_long_calls is None:
+        return cap
+    return int(max(floor, min(cap, int(n_long_calls) // 2)))
+
+
 def build_sample_weights(
     tool_df: pd.DataFrame,
     remaining_mode: bool = False,
     long_threshold_s: float = LONG_CALL_THRESHOLD_S,
-    long_weight: float = LONG_CALL_WEIGHT,
+    long_weight_floor: float = LONG_CALL_WEIGHT,
 ) -> pd.Series:
     """Weight long source calls more heavily while keeping all samples."""
     durs = pd.to_numeric(tool_df["duration_s"], errors="coerce").fillna(0).values
-    if remaining_mode:
-        durs = np.tile(durs, len(_REMAINING_FRACS))
+    long_weight = auto_long_call_weight(
+        tool_df,
+        long_threshold_s=long_threshold_s,
+        long_weight_floor=long_weight_floor,
+    )
     weights = np.where(durs >= long_threshold_s, long_weight, 1.0)
+    if remaining_mode:
+        weights = np.tile(weights, len(_REMAINING_FRACS))
     return pd.Series(weights, name="sample_weight")
 
 
@@ -642,7 +697,7 @@ def prepare_dataset(
 
 # ─────────────────────────── model building ──────────────────────────────────
 
-def build_model(name: str) -> Pipeline:
+def build_model(name: str, n_long_calls: Optional[int] = None) -> Pipeline:
     """Return an unfitted scikit-learn Pipeline for the requested model."""
     if name == "ridge":
         return Pipeline([
@@ -663,12 +718,13 @@ def build_model(name: str) -> Pipeline:
         ])
     if name == "hgb":
         # No StandardScaler needed; HGB handles mixed scales and NaN natively.
+        min_samples_leaf = auto_hgb_min_samples_leaf(n_long_calls)
         return Pipeline([
             ("model", HistGradientBoostingRegressor(
                 max_iter=500,
                 max_depth=6,
                 learning_rate=0.05,
-                min_samples_leaf=20,
+                min_samples_leaf=min_samples_leaf,
                 l2_regularization=1.0,
                 random_state=42,
             )),
@@ -798,6 +854,7 @@ def cross_validate(
     log_target: bool,
     sample_weights: Optional[pd.Series] = None,
     long_threshold: float = LONG_CALL_THRESHOLD_S,
+    n_long_calls: Optional[int] = None,
 ) -> dict:
     """GroupKFold CV; agents never straddle train/test folds."""
     n_unique = groups.nunique()
@@ -809,7 +866,7 @@ def cross_validate(
     maes, r2s = [], []
 
     for fold, (tr_idx, te_idx) in enumerate(gkf.split(X, y, groups)):
-        p = build_model(model_name)
+        p = build_model(model_name, n_long_calls=n_long_calls)
         w_tr = sample_weights.iloc[tr_idx].reset_index(drop=True) if sample_weights is not None else None
         fit_pipeline(p, X.iloc[tr_idx], y.iloc[tr_idx], w_tr)
         pred = p.predict(X.iloc[te_idx])
@@ -1100,6 +1157,13 @@ def main() -> int:
     sample_weights = build_sample_weights(
         tool_df, remaining_mode=args.remaining, long_threshold_s=long_threshold
     )
+    n_short_calls, n_long_calls = count_long_short_calls(
+        tool_df, long_threshold_s=long_threshold
+    )
+    effective_long_weight = auto_long_call_weight(
+        tool_df, long_threshold_s=long_threshold
+    )
+    effective_hgb_leaf = auto_hgb_min_samples_leaf(n_long_calls)
 
     # ── inference-only mode ──────────────────────────────────────────────────
     if args.predict_only:
@@ -1169,11 +1233,15 @@ def main() -> int:
         f"\nSplit (by agent): {len(X_tr)} train ({n_long_train} long) / "
         f"{len(X_te)} test ({n_long_test} long)"
     )
-    print(
+    msg = (
         f"Model: {args.model}  |  log-target: {log_target}  |  remaining: {args.remaining}  "
-        f"| long-call weight: >= {long_threshold:.1f}s x{LONG_CALL_WEIGHT:.1f}  "
+        f"| long-call weight: >= {long_threshold:.1f}s x{effective_long_weight:.2f} "
+        f"[short={n_short_calls}, long={n_long_calls}]  "
         f"| short calls (< {long_threshold:.1f}s) → 0"
     )
+    if args.model == "hgb":
+        msg += f"  |  hgb min_samples_leaf: {effective_hgb_leaf}"
+    print(msg)
 
     # ── optional cross-validation ─────────────────────────────────────────────
     all_metrics: dict = {}
@@ -1181,16 +1249,20 @@ def main() -> int:
         print(f"\n── {args.cv}-fold GroupKFold CV ──")
         all_metrics["cv"] = cross_validate(
             args.model, X, y, groups, args.cv, log_target, sample_weights,
-            long_threshold=long_threshold,
+            long_threshold=long_threshold, n_long_calls=n_long_calls,
         )
 
     # ── train point-estimate model ────────────────────────────────────────────
-    pipeline = build_model(args.model)
+    pipeline = build_model(args.model, n_long_calls=n_long_calls)
     fit_pipeline(pipeline, X_tr, y_tr, w_tr)
     pipeline._trained_feature_names = feature_names  # for inference alignment
     pipeline._log_target = log_target
     pipeline._remaining_mode = args.remaining
     pipeline._long_call_threshold_s = long_threshold
+    pipeline._effective_long_call_weight = effective_long_weight
+    pipeline._effective_hgb_min_samples_leaf = (
+        effective_hgb_leaf if args.model == "hgb" else None
+    )
 
     # ── evaluate point estimates ──────────────────────────────────────────────
     pred_log  = pipeline.predict(X_te)

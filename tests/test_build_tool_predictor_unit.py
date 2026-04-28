@@ -19,10 +19,13 @@ from build_tool_predictor import (
     LONG_CALL_THRESHOLD_S,
     LONG_CALL_WEIGHT,
     RealtimePredictor,
+    auto_hgb_min_samples_leaf,
+    auto_long_call_weight,
     build_features,
     build_model,
     build_sample_weights,
     clamp_short,
+    count_long_short_calls,
     enrich_sequential_features,
     fit_pipeline,
     group_train_test_indices,
@@ -146,6 +149,50 @@ def test_detailed_tool_calls_merge_and_exclude_post_call_features(tmp_path):
     remaining_weights = build_sample_weights(prepared_tool_df, remaining_mode=True)
     assert len(remaining_weights) == 10
     assert int((remaining_weights == LONG_CALL_WEIGHT).sum()) == 5
+
+
+def test_auto_long_call_weight_balances_when_longs_are_scarce():
+    tool_df = pd.DataFrame(
+        {
+            "duration_s": [0.2] * 12 + [3.5, 4.2],
+            "tool_name": ["terminal"] * 14,
+        }
+    )
+
+    n_short, n_long = count_long_short_calls(tool_df)
+    assert (n_short, n_long) == (12, 2)
+    assert auto_long_call_weight(tool_df) == pytest_approx(6.0)
+
+    weights = build_sample_weights(tool_df)
+    assert set(np.unique(weights.values)) == {1.0, 6.0}
+    assert int((weights == 6.0).sum()) == 2
+
+
+def test_auto_long_call_weight_keeps_current_floor_with_many_longs():
+    tool_df = pd.DataFrame(
+        {
+            "duration_s": [0.2] * 200 + [3.5] * 100,
+            "tool_name": ["terminal"] * 300,
+        }
+    )
+
+    assert auto_long_call_weight(tool_df) == pytest_approx(LONG_CALL_WEIGHT)
+    weights = build_sample_weights(tool_df)
+    assert int((weights == LONG_CALL_WEIGHT).sum()) == 100
+
+
+def test_auto_hgb_min_samples_leaf_scales_and_caps():
+    assert auto_hgb_min_samples_leaf(0) == 2
+    assert auto_hgb_min_samples_leaf(1) == 2
+    assert auto_hgb_min_samples_leaf(10) == 5
+    assert auto_hgb_min_samples_leaf(39) == 19
+    assert auto_hgb_min_samples_leaf(40) == 20
+    assert auto_hgb_min_samples_leaf(100) == 20
+
+    hgb_small = build_model("hgb", n_long_calls=10).named_steps["model"]
+    hgb_large = build_model("hgb", n_long_calls=100).named_steps["model"]
+    assert hgb_small.min_samples_leaf == 5
+    assert hgb_large.min_samples_leaf == 20
 
 
 def test_realtime_predictor_lives_in_source_and_aligns_columns(tmp_path):
