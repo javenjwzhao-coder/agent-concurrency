@@ -162,6 +162,7 @@ PY
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
+          --kv-transfer-config '{"kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}' \
           $EXTRA
     ) > /dev/null 2>&1 &
     echo $! > "$PID_FILE"

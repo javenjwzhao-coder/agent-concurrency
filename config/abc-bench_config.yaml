@@ -45,7 +45,7 @@ dataset:
 
   # Maximum number of tasks to run (tasks are sorted alphabetically and
   # truncated to this count).
-  max_tasks: 6
+  max_tasks: 50
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -76,7 +76,7 @@ agent:
 launch:
   # When true, tasks are partitioned into random-sized waves launched at
   # staggered intervals.  When false, tasks run sequentially one at a time.
-  randomise: true
+  randomise: false
 
   # Maximum number of agents started in a single wave.
   max_agents_per_wave: 2
@@ -91,7 +91,7 @@ launch:
 
   # Thread-pool size for concurrent agent execution.
   # Set this ≤ the number of NPU cards to avoid over-subscribing vLLM.
-  max_concurrent: 2
+  max_concurrent: 50
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
