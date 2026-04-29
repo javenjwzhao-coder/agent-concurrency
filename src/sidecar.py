@@ -336,6 +336,7 @@ class DynamicAdmissionController:
         *,
         enabled: bool = False,
         threshold_gb: float = 0.1,
+        initial_admit_interval_s: float = 2.0,
         short_tool_call_threshold_s: float = 2.0,
         pin_endpoint: Optional[str] = None,
         offload_endpoint: Optional[str] = None,
@@ -353,6 +354,7 @@ class DynamicAdmissionController:
     ) -> None:
         self.enabled = bool(enabled)
         self.threshold_gb = max(0.0, float(threshold_gb))
+        self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
         self.short_tool_call_threshold_s = max(0.0, float(short_tool_call_threshold_s))
         self.pin_endpoint = str(pin_endpoint) if pin_endpoint else ""
         self.offload_endpoint = str(offload_endpoint or eviction_endpoint or "")
@@ -373,6 +375,8 @@ class DynamicAdmissionController:
         self._pinned_short: set[str] = set()
         self._kv_policy_events: deque[dict[str, Any]] = deque(maxlen=1024)
         self._prev_avg_gb: Optional[float] = None
+        self._first_saturation_seen = False
+        self._last_fresh_admit_monotonic: Optional[float] = None
         self._lock = threading.RLock()
 
         self._predictor = predictor
@@ -571,6 +575,9 @@ class DynamicAdmissionController:
                 "active_agent_samples": avg_count,
                 "w": self._round(w),
                 "threshold_gb": self.threshold_gb,
+                "first_saturation_seen": self._first_saturation_seen,
+                "initial_admit_interval_s": self.initial_admit_interval_s,
+                "next_initial_admit_in_s": None,
                 "queue": self.pending_counts(),
                 "heap_candidates": [],
                 "skipped_candidates": [],
@@ -611,6 +618,8 @@ class DynamicAdmissionController:
                 report["reasons"].append("headroom_low")
                 if runnable_queue > 0:
                     report["reasons"].append("saturation_guard")
+                    self._first_saturation_seen = True
+                    report["first_saturation_seen"] = True
 
             current_free_gb = free_gb
             while current_free_gb <= self.threshold_gb and heap:
@@ -633,17 +642,11 @@ class DynamicAdmissionController:
             elif admit_limit <= 0 and current_free_gb <= self.threshold_gb and runnable_queue > 0:
                 report["reasons"].append("admission_blocked_by_pressure")
 
-            if admit_limit > 0 and self._admit_callback is None:
-                report["reasons"].append("no_admit_callback")
-                admit_limit = 0
-
-            for _ in range(admit_limit):
-                item = self._pop_next_waiting_locked()
-                if item is None:
-                    break
-                report["admissions"].append(self._admit_locked(item))
+            if admit_limit > 0:
+                self._admit_with_limit_locked(admit_limit, report)
 
             report["queue"] = self.pending_counts()
+            report["first_saturation_seen"] = self._first_saturation_seen
             self._prev_avg_gb = avg_gb
             return report
 
@@ -923,12 +926,60 @@ class DynamicAdmissionController:
             return 0
         return max(0, int(math.floor(w)))
 
-    def _pop_next_waiting_locked(self) -> Optional[AgentLaunchSpec | str]:
+    def _admit_with_limit_locked(self, admit_limit: int, report: dict[str, Any]) -> None:
+        admitted = 0
+
+        while admitted < admit_limit:
+            agent_id = self._pop_next_evicted_ready_locked()
+            if agent_id is None:
+                break
+            report["admissions"].append(self._admit_locked(agent_id))
+            admitted += 1
+
+        remaining = admit_limit - admitted
+        if remaining <= 0 or not self._fresh:
+            return
+
+        if self._admit_callback is None:
+            report["reasons"].append("no_admit_callback")
+            return
+
+        fresh_limit = remaining
+        if not self._first_saturation_seen and self.initial_admit_interval_s > 0:
+            now_mono = time.monotonic()
+            next_in = self._next_initial_admit_in_s_locked(now_mono)
+            report["next_initial_admit_in_s"] = self._round(next_in)
+            if next_in > 0:
+                report["reasons"].append("initial_admit_ramp_wait")
+                return
+            report["reasons"].append("initial_admit_ramp_active")
+            fresh_limit = min(fresh_limit, 1)
+
+        for _ in range(fresh_limit):
+            item = self._pop_next_fresh_locked()
+            if item is None:
+                break
+            report["admissions"].append(self._admit_locked(item))
+            self._last_fresh_admit_monotonic = time.monotonic()
+
+        if not self._first_saturation_seen and self._fresh and self.initial_admit_interval_s > 0:
+            report["next_initial_admit_in_s"] = self._round(self.initial_admit_interval_s)
+
+    def _next_initial_admit_in_s_locked(self, now_mono: float) -> float:
+        if self._last_fresh_admit_monotonic is None:
+            return 0.0
+        elapsed = max(0.0, now_mono - self._last_fresh_admit_monotonic)
+        return max(0.0, self.initial_admit_interval_s - elapsed)
+
+    def _pop_next_evicted_ready_locked(self) -> Optional[str]:
         while self._evicted_ready:
             agent_id = self._evicted_ready.popleft()
             self._evicted_ready_set.discard(agent_id)
             if agent_id in self._evicted_events:
                 return agent_id
+        return None
+
+    def _pop_next_fresh_locked(self) -> Optional[AgentLaunchSpec]:
         if self._fresh:
             return self._fresh.popleft()
         return None
@@ -1144,6 +1195,8 @@ def parse_args() -> argparse.Namespace:
                     help="Enable admission/eviction policy decisions in the sidecar.")
     ac.add_argument("--admission-threshold-gb", type=float, default=0.1,
                     help="Free KV-cache GB threshold that triggers pressure eviction.")
+    ac.add_argument("--initial-admit-interval-s", type=float, default=2.0,
+                    help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration are pinned.")
     ac.add_argument("--admission-predictor-model", default=None,
@@ -1185,6 +1238,7 @@ def main() -> int:
         admission_controller = DynamicAdmissionController(
             enabled=True,
             threshold_gb=args.admission_threshold_gb,
+            initial_admit_interval_s=args.initial_admit_interval_s,
             short_tool_call_threshold_s=args.short_tool_call_threshold_s,
             pin_endpoint=args.pin_endpoint or default_pin_endpoint(args.vllm_url),
             offload_endpoint=(

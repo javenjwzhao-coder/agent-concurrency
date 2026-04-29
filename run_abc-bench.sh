@@ -216,6 +216,7 @@ flat_keys = [
     ("SIDECAR_HTTP_HOST",        "sidecar.http_host"),
     ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
+    ("SIDECAR_INITIAL_ADMIT_INTERVAL_S", "sidecar.admission_control.initial_admit_interval_s"),
     ("SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S", "sidecar.admission_control.short_tool_call_threshold_s"),
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
     ("SIDECAR_PIN_ENDPOINT", "sidecar.admission_control.pin_endpoint"),
@@ -353,6 +354,7 @@ build_runner_cmd() {
             cmd+=(
                 --sidecar-admission-control
                 --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+                --sidecar-initial-admit-interval-s "${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
                 --sidecar-short-tool-call-threshold-s "${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
                 --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
             )
@@ -454,6 +456,7 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
     echo "    admission_control:  ${SIDECAR_ADMISSION_ENABLED:-false}"
     if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
         echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+        echo "    initial_admit_s:    ${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
         echo "    short_tool_call_s:  ${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"
         echo "    pin_endpoint:       ${SIDECAR_PIN_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/pin}"

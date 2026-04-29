@@ -182,12 +182,15 @@ cannot be admitted.
 Policy order:
 
 1. If `w < 1`, admit no new fresh agents.
-2. At tool-call start, predict remaining duration. Predicted-short calls
+2. Before the first real SAT, admit at most one fresh queued task per
+   `initial_admit_interval_s`. After first SAT, fresh admissions use normal
+   sidecar capacity math. READMITs bypass this launch ramp.
+3. At tool-call start, predict remaining duration. Predicted-short calls
    (`< short_tool_call_threshold_s`) are pinned in accelerator KV cache.
    Predicted-long calls are immediately offloaded through the KV connector.
-3. If `C <= threshold_gb`, offload highest-scoring eligible long idle
+4. If `C <= threshold_gb`, offload highest-scoring eligible long idle
    `tool_call` agents. Pinned short calls are never offloaded by sidecar.
-4. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
+5. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
 
 The waiting queue has two lanes: previously evicted agents first, then fresh
 agents FIFO.
@@ -234,6 +237,7 @@ sidecar:
   admission_control:
     enabled: true
     threshold_gb: 0.1
+    initial_admit_interval_s: 2.0
     short_tool_call_threshold_s: 2.0
     predictor_model: null
     pin_endpoint: null

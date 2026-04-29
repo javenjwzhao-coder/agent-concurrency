@@ -916,7 +916,6 @@ def launch_agents_with_admission_control(
     executor = ThreadPoolExecutor(max_workers=args.max_concurrent or 8)
     futures = []
     futures_lock = threading.Lock()
-    wave_start = time.monotonic()
     global_idx = 0
     total_agents = sum(len(batch) for _, batch in waves)
 
@@ -940,14 +939,8 @@ def launch_agents_with_admission_control(
     admission_controller.set_admit_callback(_submit_admitted)
     try:
         for wave_idx, (delay_s, task_batch) in enumerate(waves):
-            elapsed = time.monotonic() - wave_start
-            sleep_needed = delay_s - elapsed
-            if sleep_needed > 0:
-                log.info("Sleeping %.1fs before wave %d …", sleep_needed, wave_idx)
-                time.sleep(sleep_needed)
-
-            scheduled_dt = now_utc()
             for task_dir in task_batch:
+                scheduled_dt = now_utc()
                 agent_id = f"agent_{task_dir.name}_w{wave_idx}_{global_idx}"
                 work_dir = copy_task_to_workspace(
                     task_dir, args.workspace_root,
@@ -968,13 +961,15 @@ def launch_agents_with_admission_control(
                     metadata={
                         "task_id": task_dir.name,
                         "wave_idx": wave_idx,
+                        "planned_delay_s": delay_s,
                         "scheduled_ts": iso_utc(scheduled_dt),
                     },
                 )
                 admission_controller.enqueue_fresh(spec)
 
-            log.info("Wave %d: queued %d agent(s) for admission  [%s]",
-                     wave_idx, len(task_batch),
+            log.info("Wave %d: queued %d agent(s) for admission  "
+                     "(planned_delay_s=%.3f, ignored by admission control) [%s]",
+                     wave_idx, len(task_batch), delay_s,
                      ", ".join(t.name for t in task_batch))
 
         seen = set()
@@ -1090,6 +1085,8 @@ def parse_args() -> argparse.Namespace:
                     help="Let the embedded sidecar admit queued agents dynamically.")
     sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=0.1,
                     help="Free KV-cache GB threshold that triggers pressure eviction.")
+    sc.add_argument("--sidecar-initial-admit-interval-s", type=float, default=2.0,
+                    help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration are pinned.")
     sc.add_argument("--sidecar-admission-predictor-model", default=None,
@@ -1163,6 +1160,7 @@ def main() -> int:
             _sc_admission_controller = _sidecar.DynamicAdmissionController(
                 enabled=True,
                 threshold_gb=args.sidecar_admission_threshold_gb,
+                initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
                 short_tool_call_threshold_s=args.sidecar_short_tool_call_threshold_s,
                 pin_endpoint=(
                     args.sidecar_pin_endpoint

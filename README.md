@@ -50,11 +50,15 @@ At each sidecar tick, the controller gathers:
 Policy:
 
 1. **Saturation guard**: if `w < 1`, admit no fresh agents this tick.
-2. **Tool-call KV policy**: when a tool call starts, predict its remaining
+2. **Initial launch ramp**: before the first real SAT, admit at most one fresh
+   queued task per `initial_admit_interval_s`. Once SAT has happened, normal
+   capacity math drains the fresh queue on each sidecar tick. READMITs are not
+   delayed by the ramp.
+3. **Tool-call KV policy**: when a tool call starts, predict its remaining
    duration. Calls below `short_tool_call_threshold_s` are pinned in accelerator
    KV cache. Longer calls are immediately offloaded through the configured KV
    connector and then re-admitted before their next LLM call.
-3. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
+4. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
    `tool_call` agents by descending score:
 
    ```
@@ -64,7 +68,7 @@ Policy:
    Pinned short calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
-4. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.
+5. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.
    Previously evicted agents use a priority lane ahead of fresh agents.
 
 Admission control is opt-in. Without it, the sidecar remains monitor-only and
@@ -166,6 +170,7 @@ sidecar:
   admission_control:
     enabled: true
     threshold_gb: 0.1
+    initial_admit_interval_s: 2.0
     short_tool_call_threshold_s: 2.0
     predictor_model: null        # defaults to prediction.save_model
     pin_endpoint: null           # defaults to <sidecar.vllm_url>/agent_kv_cache/pin

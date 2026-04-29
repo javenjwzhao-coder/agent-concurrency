@@ -60,6 +60,9 @@ ticks it already rendered.
     "s_prev":  0.29,                           // float|null — previous tick's avg
     "w":       18.03,                          // float|null — headroom = C / min(s_t, s_prev)
     "threshold_gb": 0.1,                       // float — pressure threshold
+    "first_saturation_seen": false,            // bool — initial launch ramp is disabled after first SAT
+    "initial_admit_interval_s": 2.0,           // float — fresh-admit interval before first SAT
+    "next_initial_admit_in_s": null,           // float|null — seconds until next ramped fresh admit
     "active_agent_samples": 4,                 // int
 
     "queue": {                                 // pending admissions
@@ -92,7 +95,8 @@ ticks it already rendered.
 
     "reasons": [                               // gating notes for this tick
       "headroom_low",                          // emitted whenever w < 1.0
-      "saturation_guard"                       // emitted when w < 1.0 and runnable queue > 0
+      "saturation_guard",                      // emitted when w < 1.0 and runnable queue > 0
+      "initial_admit_ramp_wait"                // emitted when pre-SAT fresh launch ramp delays admission
     ]
   }
 }

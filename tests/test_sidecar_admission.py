@@ -41,6 +41,7 @@ def test_headroom_bootstrap_and_memoized_average():
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
+        initial_admit_interval_s=0.0,
         admit_callback=lambda spec: admitted.append(spec.agent_id),
     )
     controller.enqueue_fresh(AgentLaunchSpec("fresh-a"))
@@ -129,6 +130,7 @@ def test_saturation_guard_blocks_admission_when_headroom_below_one():
     assert "admission_blocked_by_headroom" in report["reasons"]
     assert report["admissions"] == []
     assert admitted == []
+    assert report["first_saturation_seen"] is True
 
 
 def test_low_headroom_without_runnable_queue_does_not_emit_saturation_guard():
@@ -200,6 +202,158 @@ def test_pressure_eviction_pops_highest_score_idle_agent():
     assert evicted == ["agent-a"]
     assert report["evictions"][0]["agent_id"] == "agent-a"
     assert report["evictions"][0]["e_s"] == 10.0
+
+
+def test_initial_admit_ramp_limits_fresh_admissions_before_first_sat():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=2.0,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    for idx in range(3):
+        controller.enqueue_fresh(AgentLaunchSpec(f"fresh-{idx}"))
+    agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
+
+    first = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    second = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    controller._last_fresh_admit_monotonic = time.monotonic() - 3.0
+    third = controller.on_tick(
+        tick=2,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert [a["agent_id"] for a in first["admissions"]] == ["fresh-0"]
+    assert "initial_admit_ramp_active" in first["reasons"]
+    assert first["next_initial_admit_in_s"] == 2.0
+    assert second["admissions"] == []
+    assert "initial_admit_ramp_wait" in second["reasons"]
+    assert second["next_initial_admit_in_s"] > 0
+    assert [a["agent_id"] for a in third["admissions"]] == ["fresh-1"]
+    assert admitted == ["fresh-0", "fresh-1"]
+    assert controller.pending_counts()["fresh"] == 1
+
+
+def test_first_sat_disables_initial_fresh_admit_ramp():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=60.0,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    agents = {"running": {"state": "reasoning", "kv_blocks": 2}}
+
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.5},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    for idx in range(3):
+        controller.enqueue_fresh(AgentLaunchSpec(f"fresh-{idx}"))
+
+    sat = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 0.5},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    after_sat = controller.on_tick(
+        tick=2,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert "saturation_guard" in sat["reasons"]
+    assert sat["first_saturation_seen"] is True
+    assert after_sat["first_saturation_seen"] is True
+    assert "initial_admit_ramp_wait" not in after_sat["reasons"]
+    assert [a["agent_id"] for a in after_sat["admissions"]] == [
+        "fresh-0",
+        "fresh-1",
+        "fresh-2",
+    ]
+    assert admitted == ["fresh-0", "fresh-1", "fresh-2"]
+
+
+def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
+    state_updates: dict[str, dict] = {}
+    offloaded: list[str] = []
+    admitted: list[str] = []
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+
+    def update(agent_id, patch):
+        state_updates.setdefault(agent_id, {}).update(patch)
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=60.0,
+        short_tool_call_threshold_s=2.0,
+        predictor=FakePredictor({"evicted-agent": 5.0}),
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+        offload_callback=offload,
+        state_update_callback=update,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    controller.on_tool_call_start(
+        "evicted-agent",
+        {"agent_id": "evicted-agent", "state": "tool_call", "kv_blocks": 1},
+    )
+
+    resumed: list[bool] = []
+    waiter = threading.Thread(
+        target=lambda: resumed.append(controller.wait_if_evicted("evicted-agent"))
+    )
+    waiter.start()
+    deadline = time.time() + 2
+    while controller.pending_counts()["evicted_ready"] == 0 and time.time() < deadline:
+        time.sleep(0.01)
+
+    controller.enqueue_fresh(AgentLaunchSpec("fresh-agent"))
+    controller._last_fresh_admit_monotonic = time.monotonic()
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    waiter.join(timeout=2)
+    assert offloaded == ["evicted-agent"]
+    assert resumed == [True]
+    assert report["admissions"] == [
+        {"agent_id": "evicted-agent", "previously_evicted": True, "admitted": True}
+    ]
+    assert "initial_admit_ramp_wait" in report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
+    assert state_updates["evicted-agent"]["admission_state"] == "admitted"
 
 
 def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
