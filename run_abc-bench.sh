@@ -212,6 +212,8 @@ flat_keys = [
     ("SIDECAR_BLOCK_SIZE",       "sidecar.block_size"),
     ("SIDECAR_DTYPE",            "sidecar.dtype"),
     ("SIDECAR_TOTAL_GPU_BLOCKS", "sidecar.total_gpu_blocks"),
+    ("SIDECAR_HTTP_PORT",        "sidecar.http_port"),
+    ("SIDECAR_HTTP_HOST",        "sidecar.http_host"),
     ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
@@ -338,6 +340,12 @@ build_runner_cmd() {
             --sidecar-dtype             "${SIDECAR_DTYPE:-bfloat16}"
             --sidecar-total-gpu-blocks  "${SIDECAR_TOTAL_GPU_BLOCKS:-0}"
         )
+        if [[ -n "${SIDECAR_HTTP_PORT:-}" && "${SIDECAR_HTTP_PORT}" != "0" && "${SIDECAR_HTTP_PORT}" != "" ]]; then
+            cmd+=(
+                --sidecar-http-port "$SIDECAR_HTTP_PORT"
+                --sidecar-http-host "${SIDECAR_HTTP_HOST:-127.0.0.1}"
+            )
+        fi
         if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
             cmd+=(
                 --sidecar-admission-control
@@ -430,6 +438,9 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
     echo "    vllm_url:           ${SIDECAR_VLLM_URL:-http://localhost:8000}"
     echo "    interval:           ${SIDECAR_INTERVAL:-5.0}s"
     echo "    geometry:           layers=${SIDECAR_NUM_LAYERS}  kv_heads=${SIDECAR_NUM_KV_HEADS}  head_dim=${SIDECAR_HEAD_DIM}  block=${SIDECAR_BLOCK_SIZE}  dtype=${SIDECAR_DTYPE:-bfloat16}"
+    if [[ -n "${SIDECAR_HTTP_PORT:-}" && "${SIDECAR_HTTP_PORT}" != "0" && "${SIDECAR_HTTP_PORT}" != "" ]]; then
+        echo "    dashboard:          http://${SIDECAR_HTTP_HOST:-127.0.0.1}:${SIDECAR_HTTP_PORT}/"
+    fi
     echo "    admission_control:  ${SIDECAR_ADMISSION_ENABLED:-false}"
     if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
         echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"

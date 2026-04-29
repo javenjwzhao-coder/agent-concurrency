@@ -256,6 +256,31 @@ Sidecar records include an `admission` object when dynamic admission is enabled,
 with KV capacity, averages, headroom, heap candidates, evictions, admissions,
 and error/disabled reasons.
 
+## Live Dashboard
+
+When `sidecar.http_port` (or `--sidecar-http-port`) is set, the sidecar starts
+an HTTP/SSE server alongside the tick loop and serves the dashboard at
+`http://<host>:<port>/`. It renders, on a shared time axis:
+
+- One Gantt row per agent showing phase boxes (reasoning, tool_call, waiting,
+  evicted, done) extending in real time.
+- A KV-cache-used-% line chart from `vllm.kv_cache_used_pct`.
+- Vertical event markers for admission decisions: EVICT (red), ADMIT (green),
+  READMIT (purple), and SAT (dashed yellow, when `w < 1`).
+
+Two ways to view a finished run:
+
+1. `python -m sidecar_http --replay path/to/sidecar.log [--speed 1.0]` — same
+   server, but the publisher reads ticks from the log file at the chosen speed.
+2. In-browser: open the dashboard, click *Open sidecar.log…* and pick a
+   JSONL file. The browser parses it client-side; SSE is disconnected while in
+   replay mode.
+
+The JSON contract for `/state` and `/stream` is documented in
+[dashboard/SCHEMA.md](dashboard/SCHEMA.md). Both endpoints emit the existing
+sidecar tick record without transformation, so log replays and live runs use
+the same render path.
+
 ## Test and Verification Commands
 
 Syntax check:

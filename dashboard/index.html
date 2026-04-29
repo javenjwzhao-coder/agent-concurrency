@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Agent Concurrency · Live</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <!--
+    vis-timeline (includes both Timeline and Graph2D) is loaded from a CDN.
+    If the dashboard host has no internet, download these two files into
+    ./static/ and change the two URLs below to /static/<filename>:
+      https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css
+      https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js
+  -->
+  <link rel="stylesheet"
+        href="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css">
+</head>
+<body>
+  <header>
+    <h1>Agent Concurrency · Live</h1>
+    <div class="controls">
+      <button id="pauseBtn" type="button">Pause auto-scroll</button>
+      <button id="replayBtn" type="button">Open sidecar.log…</button>
+      <button id="liveBtn" type="button" hidden>Back to live</button>
+      <input id="logFile" type="file" accept=".log,.jsonl,.json,text/plain"
+             style="display:none">
+      <span id="connStatus" class="status status-pending">connecting…</span>
+      <span id="tickInfo"></span>
+    </div>
+    <div class="legend">
+      <span class="legend-title">Phase</span>
+      <span class="chip phase-reasoning">reasoning</span>
+      <span class="chip phase-tool_call">tool_call</span>
+      <span class="chip phase-waiting">waiting</span>
+      <span class="chip phase-evicted_waiting">evicted</span>
+      <span class="chip phase-done">done</span>
+      <span class="legend-title">Event</span>
+      <span class="chip event-evict">EVICT</span>
+      <span class="chip event-admit">ADMIT</span>
+      <span class="chip event-readmit">READMIT</span>
+      <span class="chip event-sat">SAT</span>
+      <span class="legend-title">KV %</span>
+      <span class="chip kv-line">vllm kv used</span>
+    </div>
+  </header>
+
+  <main>
+    <div id="kvChart"></div>
+    <div id="timeline"></div>
+  </main>
+
+  <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

@@ -162,10 +162,17 @@ sidecar:
   # may reflect the physical NPU allocation rather than the scheduler-level limit.
   total_gpu_blocks: 1000
 
+  # Optional live dashboard. When http_port > 0 the sidecar starts an
+  # HTTP/SSE server on (http_host, http_port) and the dashboard at
+  # http://<host>:<port>/ renders agent phases, KV usage %, and admission
+  # events in real time. See dashboard/SCHEMA.md for the JSON contract.
+  http_port: 8765
+  http_host: "127.0.0.1"
+
   # Optional dynamic admission/eviction policy. Disabled preserves the current
   # monitor-only sidecar behavior.
   admission_control:
-    enabled: false
+    enabled: true
     threshold_gb: 0.1
     # null → defaults to prediction.save_model in run_abc-bench.sh.
     predictor_model: null

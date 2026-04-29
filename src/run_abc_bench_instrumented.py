@@ -1087,6 +1087,11 @@ def parse_args() -> argparse.Namespace:
                     help="Saved remaining-time predictor model for tool-call scoring.")
     sc.add_argument("--sidecar-eviction-endpoint", default=None,
                     help="vLLM admin endpoint for per-agent KV eviction.")
+    sc.add_argument("--sidecar-http-port", type=int, default=0,
+                    help="Bind a live HTTP/SSE feed for the dashboard on this "
+                         "port (0 disables).")
+    sc.add_argument("--sidecar-http-host", default="127.0.0.1",
+                    help="Bind address for the live dashboard feed.")
     sc.add_argument("--sidecar-eviction-timeout-s", type=float, default=2.0,
                     help="HTTP timeout for one eviction request.")
     return p.parse_args()
@@ -1153,10 +1158,18 @@ def main() -> int:
                 predictor_model=args.sidecar_admission_predictor_model,
                 state_update_callback=_update_live_agent,
             )
+        _sc_http_feed = None
+        if args.sidecar_http_port:
+            from sidecar_http import HTTPFeed, start_server
+            _sc_http_feed = HTTPFeed()
+            start_server(args.sidecar_http_host, args.sidecar_http_port, _sc_http_feed)
+            log.info("[sidecar] dashboard feed → http://%s:%d/",
+                     args.sidecar_http_host, args.sidecar_http_port)
         _sc_stop = threading.Event()
         _sc_thread = threading.Thread(
             target=_sidecar.run_loop,
             args=(_sc_args, _sc_bpb, _get_agents, _sc_stop, _sc_admission_controller),
+            kwargs={"http_feed": _sc_http_feed},
             daemon=True, name="sidecar",
         )
         _sc_thread.start()

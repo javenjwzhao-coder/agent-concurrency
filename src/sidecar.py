@@ -799,7 +799,8 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
 def run_loop(args: argparse.Namespace, bytes_per_blk: int,
              get_agents: Callable[[], dict],
              stop_event: Optional[threading.Event] = None,
-             admission_controller: Optional[DynamicAdmissionController] = None) -> None:
+             admission_controller: Optional[DynamicAdmissionController] = None,
+             http_feed: Optional[Any] = None) -> None:
     """Main poll loop.
 
     Parameters
@@ -811,6 +812,8 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
                   directly; in standalone mode it reads the live-state file.
     stop_event    Optional threading.Event; when set, the loop exits cleanly
                   after finishing its current tick.
+    http_feed     Optional sidecar_http.HTTPFeed; when set, every record is
+                  also published to the live dashboard feed.
     """
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -845,6 +848,12 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
 
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
+
+        if http_feed is not None:
+            try:
+                http_feed.publish(record)
+            except Exception as exc:
+                print(f"[sidecar] http_feed.publish failed: {exc}", flush=True)
 
         # Brief stdout summary.
         vllm_info = record["vllm"]
@@ -907,6 +916,13 @@ def parse_args() -> argparse.Namespace:
     ac.add_argument("--eviction-timeout-s", type=float, default=2.0,
                     help="HTTP timeout for one eviction request.")
 
+    dash = p.add_argument_group("live dashboard (optional)")
+    dash.add_argument("--http-port", type=int, default=0,
+                      help="Bind a live HTTP/SSE feed for the dashboard on this "
+                           "port. 0 disables.")
+    dash.add_argument("--http-host", default="127.0.0.1",
+                      help="Bind address for the live dashboard feed.")
+
     return p.parse_args()
 
 
@@ -931,6 +947,14 @@ def main() -> int:
             predictor_model=args.admission_predictor_model,
         )
 
+    http_feed = None
+    if getattr(args, "http_port", 0):
+        from sidecar_http import HTTPFeed, start_server  # local import: optional dep
+        http_feed = HTTPFeed()
+        start_server(args.http_host, args.http_port, http_feed)
+        print(f"[sidecar] dashboard feed → http://{args.http_host}:{args.http_port}/",
+              flush=True)
+
     def _stop(sig, frame):
         print("\n[sidecar] shutting down.", flush=True)
         sys.exit(0)
@@ -938,7 +962,8 @@ def main() -> int:
     signal.signal(signal.SIGINT,  _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    run_loop(args, bpb, get_agents, admission_controller=admission_controller)
+    run_loop(args, bpb, get_agents, admission_controller=admission_controller,
+             http_feed=http_feed)
     return 0
 
 
