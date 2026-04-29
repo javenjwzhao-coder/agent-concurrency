@@ -125,6 +125,25 @@ button:hover {
   border: 1px solid #9a4c14;
 }
 
+/* Current-time line chip — matches .vis-current-time blue */
+.chip.now-line {
+  background: #1e3a5f;
+  color: #60a5fa;
+  border: 1px solid #2563eb;
+}
+
+/* Active-agent count badge */
+.active-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: #0f2a1a;
+  color: #4ade80;
+  border: 1px solid #166534;
+  white-space: nowrap;
+}
+
 /* ── main layout ─────────────────────────────────────────────────────────── */
 
 main {
@@ -171,9 +190,9 @@ main {
  */
 .phase-reasoning       { background: #1d4ed8; }
 .phase-tool_call       { background: #0e7490; }
-.phase-waiting         { background: #475569; }
+.phase-waiting         { background: #64748b; }
 .phase-evicted_waiting { background: #d97706; }
-.phase-done            { background: #1e293b; border: 1px solid #334155; }
+.phase-done            { background: #111827; border: 1px dashed #4b5563; color: #6b7280; }
 
 /* ── vis-timeline phase range items ─────────────────────────────────────── */
 
@@ -190,9 +209,9 @@ main {
 
 .vis-item.phase-reasoning      { background-color: #1d4ed8; border-color: #1d4ed8; }
 .vis-item.phase-tool_call      { background-color: #0e7490; border-color: #0e7490; }
-.vis-item.phase-waiting        { background-color: #475569; border-color: #475569; }
+.vis-item.phase-waiting        { background-color: #64748b; border-color: #64748b; }
 .vis-item.phase-evicted_waiting{ background-color: #d97706; border-color: #d97706; }
-.vis-item.phase-done           { background-color: #1e293b; border-color: #334155; }
+.vis-item.phase-done           { background-color: #111827; border: 1px dashed #4b5563 !important; color: #6b7280; }
 
 .vis-item.vis-selected {
   box-shadow: 0 0 0 2px #93c5fd inset;

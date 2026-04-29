@@ -24,6 +24,7 @@
       <input id="logFile" type="file" accept=".log,.jsonl,.json,text/plain"
              style="display:none">
       <span id="connStatus" class="status status-pending">connecting…</span>
+      <span id="activeCount" class="active-count" style="display:none">0 active</span>
       <span id="tickInfo"></span>
     </div>
     <div class="legend">
@@ -40,6 +41,8 @@
       <span class="chip event-sat">SAT</span>
       <span class="legend-title">KV %</span>
       <span class="chip kv-line">vllm kv used</span>
+      <span class="legend-title">Now</span>
+      <span class="chip now-line">current time</span>
     </div>
   </header>
 

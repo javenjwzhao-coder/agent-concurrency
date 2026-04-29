@@ -37,6 +37,7 @@
     eventCounter: 0,
     itemCounter: 0,
     customTimeIds: [],   // IDs added via addCustomTime on both charts
+    tickHistory: [],     // [{ts: epoch_ms, count: active_agent_count}]
     latestTick: -1,
     latestTs: null,
     paused: false,
@@ -143,13 +144,31 @@
     // Keep the two charts' time axes in sync when the user pans/zooms.
     state.timeline.on("rangechange", (props) => {
       state.kvChart.setWindow(props.start, props.end, { animation: false });
-      // User panning implies they want to look around → pause auto-scroll.
       if (props.byUser) setPaused(true);
+      updateActiveCount(props.end.getTime());
     });
     state.kvChart.on("rangechange", (props) => {
       state.timeline.setWindow(props.start, props.end, { animation: false });
       if (props.byUser) setPaused(true);
+      updateActiveCount(props.end.getTime());
     });
+  }
+
+  // ── active-agent count badge ───────────────────────────────────────────
+
+  function updateActiveCount(timeMs) {
+    const h = state.tickHistory;
+    const el = $("#activeCount");
+    if (!el || !h.length) return;
+    // Binary search: last tick whose ts <= timeMs
+    let lo = 0, hi = h.length - 1;
+    if (h[0].ts > timeMs) { el.textContent = "0 active"; return; }
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (h[mid].ts <= timeMs) lo = mid; else hi = mid - 1;
+    }
+    el.textContent = `${h[lo].count} active`;
+    el.style.display = "";
   }
 
   function autoScroll(nowDate) {
@@ -291,25 +310,34 @@
     ].join("\n");
   }
 
-  function addCustomTimeStyled(chart, container, time, id, type, tooltipText) {
-    chart.addCustomTime(time, id);
+  function addCustomTimeStyled(chart, container, chartSuffix, time, id, type, tooltipText) {
+    const fullId = id + "::" + chartSuffix;
+    try {
+      chart.addCustomTime(time, fullId);
+    } catch (err) {
+      console.error("addCustomTime failed", fullId, err);
+      return fullId;
+    }
     const els = container.querySelectorAll(".vis-custom-time");
     const el = els[els.length - 1];
     if (el) {
       el.classList.add("ct-" + type);
+      // Block vis.js drag behaviour while still allowing hover events.
+      el.addEventListener("mousedown", (e) => e.stopPropagation(), true);
       el.addEventListener("mouseenter", (e) => showTooltip(tooltipText, e.clientX, e.clientY));
       el.addEventListener("mousemove",  (e) => moveTooltip(e.clientX, e.clientY));
       el.addEventListener("mouseleave", hideTooltip);
     }
+    return fullId;
   }
 
   function addEvent(ts, type, label, tooltipText) {
     const id = `evt::${++state.eventCounter}`;
     const start = new Date(ts);
     const fullText = label + "\n\n" + tooltipText;
-    addCustomTimeStyled(state.timeline, $("#timeline"), start, id, type, fullText);
-    addCustomTimeStyled(state.kvChart,  $("#kvChart"),  start, id, type, fullText);
-    state.customTimeIds.push(id);
+    const tlId = addCustomTimeStyled(state.timeline, $("#timeline"), "tl", start, id, type, fullText);
+    const kvId = addCustomTimeStyled(state.kvChart,  $("#kvChart"),  "kv", start, id, type, fullText);
+    state.customTimeIds.push(tlId, kvId);
   }
 
   // ── KV % line ──────────────────────────────────────────────────────────
@@ -337,6 +365,12 @@
     }
     applyEventsTick(record);
     applyKvTick(record);
+
+    // Track active-agent count for the badge.
+    const activeCount = [...state.agents.values()]
+      .filter(e => e.activePhase !== null && e.activePhase !== "done").length;
+    state.tickHistory.push({ ts: new Date(recordTs).getTime(), count: activeCount });
+    updateActiveCount(new Date(recordTs).getTime());
     if (state.mode === "live") {
       autoScroll(new Date(recordTs));
     } else if (state.mode === "replay") {
@@ -417,6 +451,9 @@
     state.latestTick = -1;
     state.latestTs = null;
     state.replayBounds = null;
+    state.tickHistory = [];
+    const ac = $("#activeCount");
+    if (ac) ac.style.display = "none";
   }
 
   async function loadReplayFile(file) {
