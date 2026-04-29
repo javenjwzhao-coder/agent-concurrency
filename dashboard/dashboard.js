@@ -25,7 +25,6 @@
 
   const VIEWPORT_PAST_MS  = 60_000;
   const VIEWPORT_AHEAD_MS = 5_000;
-  const EVENTS_GROUP_ID = "__events__";
 
   const state = {
     timeline: null,
@@ -46,6 +45,38 @@
     replayBounds: null, // {start, end} when in replay mode
   };
 
+  // ── hover tooltip (used for event lines) ───────────────────────────────
+
+  let tooltipEl = null;
+  function getTooltipEl() {
+    if (!tooltipEl) {
+      tooltipEl = document.createElement("div");
+      tooltipEl.id = "tooltip";
+      document.body.appendChild(tooltipEl);
+    }
+    return tooltipEl;
+  }
+  function showTooltip(text, x, y) {
+    const el = getTooltipEl();
+    el.textContent = text;
+    el.style.display = "block";
+    moveTooltip(x, y);
+  }
+  function moveTooltip(x, y) {
+    const el = getTooltipEl();
+    const w = el.offsetWidth || 220;
+    const h = el.offsetHeight || 80;
+    let left = x + 16;
+    let top  = y - 12;
+    if (left + w > window.innerWidth  - 8) left = x - w - 16;
+    if (top  + h > window.innerHeight - 8) top  = window.innerHeight - h - 8;
+    el.style.left = left + "px";
+    el.style.top  = top  + "px";
+  }
+  function hideTooltip() {
+    if (tooltipEl) tooltipEl.style.display = "none";
+  }
+
   // ── DOM helpers ────────────────────────────────────────────────────────
 
   const $ = (sel) => document.querySelector(sel);
@@ -65,12 +96,6 @@
   function buildCharts() {
     state.items = new vis.DataSet();
     state.groups = new vis.DataSet();
-    state.groups.add({
-      id: EVENTS_GROUP_ID,
-      content: "events",
-      order: -1,
-      className: "events-group",
-    });
     const initialStart = new Date(Date.now() - VIEWPORT_PAST_MS);
     const initialEnd   = new Date(Date.now() + VIEWPORT_AHEAD_MS);
     const timelineOpts = {
@@ -266,32 +291,25 @@
     ].join("\n");
   }
 
-  function addCustomTimeStyled(chart, container, time, id, type) {
+  function addCustomTimeStyled(chart, container, time, id, type, tooltipText) {
     chart.addCustomTime(time, id);
-    // Grab the element vis just appended and tag it with the event type class.
     const els = container.querySelectorAll(".vis-custom-time");
     const el = els[els.length - 1];
-    if (el) el.classList.add("ct-" + type);
+    if (el) {
+      el.classList.add("ct-" + type);
+      el.addEventListener("mouseenter", (e) => showTooltip(tooltipText, e.clientX, e.clientY));
+      el.addEventListener("mousemove",  (e) => moveTooltip(e.clientX, e.clientY));
+      el.addEventListener("mouseleave", hideTooltip);
+    }
   }
 
   function addEvent(ts, type, label, tooltipText) {
     const id = `evt::${++state.eventCounter}`;
     const start = new Date(ts);
-    // Draw a continuous vertical line through both charts using addCustomTime.
-    // Because both charts share the same forced left-panel width (see CSS), the
-    // lines land at the same horizontal pixel in each chart.
-    addCustomTimeStyled(state.timeline, $("#timeline"), start, id, type);
-    addCustomTimeStyled(state.kvChart,  $("#kvChart"),  start, id, type);
+    const fullText = label + "\n\n" + tooltipText;
+    addCustomTimeStyled(state.timeline, $("#timeline"), start, id, type, fullText);
+    addCustomTimeStyled(state.kvChart,  $("#kvChart"),  start, id, type, fullText);
     state.customTimeIds.push(id);
-    state.items.add({
-      id: id + "::label",
-      group: EVENTS_GROUP_ID,
-      start: start,
-      type: "box",
-      content: label,
-      className: `event-marker event-${type}`,
-      title: escapeHtml(tooltipText),
-    });
   }
 
   // ── KV % line ──────────────────────────────────────────────────────────
@@ -391,12 +409,6 @@
     state.customTimeIds = [];
     state.items.clear();
     state.groups.clear();
-    state.groups.add({
-      id: EVENTS_GROUP_ID,
-      content: "events",
-      order: -1,
-      className: "events-group",
-    });
     state.kvPoints.clear();
     state.agents.clear();
     state.agentOrder = [];

@@ -161,11 +161,18 @@ main {
 }
 
 /* ── phase legend chips ──────────────────────────────────────────────────── */
-
+/*
+ * Color palette chosen to avoid clashes with event-line colors:
+ *   reasoning      → blue      (distinct from teal tool_call)
+ *   tool_call      → teal/cyan (distinct from green ADMIT lines)
+ *   waiting        → slate     (neutral)
+ *   evicted_waiting→ amber     (distinct from red EVICT lines)
+ *   done           → near-black
+ */
 .phase-reasoning       { background: #1d4ed8; }
-.phase-tool_call       { background: #15803d; }
+.phase-tool_call       { background: #0e7490; }
 .phase-waiting         { background: #475569; }
-.phase-evicted_waiting { background: #c2410c; }
+.phase-evicted_waiting { background: #d97706; }
 .phase-done            { background: #1e293b; border: 1px solid #334155; }
 
 /* ── vis-timeline phase range items ─────────────────────────────────────── */
@@ -182,9 +189,9 @@ main {
 }
 
 .vis-item.phase-reasoning      { background-color: #1d4ed8; border-color: #1d4ed8; }
-.vis-item.phase-tool_call      { background-color: #15803d; border-color: #15803d; }
+.vis-item.phase-tool_call      { background-color: #0e7490; border-color: #0e7490; }
 .vis-item.phase-waiting        { background-color: #475569; border-color: #475569; }
-.vis-item.phase-evicted_waiting{ background-color: #c2410c; border-color: #c2410c; }
+.vis-item.phase-evicted_waiting{ background-color: #d97706; border-color: #d97706; }
 .vis-item.phase-done           { background-color: #1e293b; border-color: #334155; }
 
 .vis-item.vis-selected {
@@ -192,11 +199,12 @@ main {
 }
 
 /* ── event marker chips in legend ────────────────────────────────────────── */
+/* Colors match the vertical event lines exactly */
 
-.event-evict   { background: #b91c1c; }
-.event-admit   { background: #166534; color: #d1fae5; }
-.event-readmit { background: #6d28d9; }
-.event-sat     { background: #a16207; color: #fef9c3; }
+.event-evict   { background: #f87171; color: #1a0000; }
+.event-admit   { background: #4ade80; color: #001a0a; }
+.event-readmit { background: #c084fc; color: #1a0033; }
+.event-sat     { background: #fde047; color: #3a2e00; }
 
 /* ── custom-time event lines (continuous across kvChart + timeline) ──────── */
 /*
@@ -206,22 +214,22 @@ main {
  */
 
 .vis-custom-time {
-  pointer-events: none !important;
-  cursor: default !important;
-  width: 2px !important;
-  opacity: 0.85;
+  cursor: crosshair !important;
+  width: 3px !important;
+  opacity: 0.9;
+  z-index: 10;
 }
 
-/* Hide the triangle handle — labels come from the events-group box items */
+/* Hide the triangle drag handle */
 .vis-custom-time .vis-custom-time-marker { display: none !important; }
 
-.vis-custom-time.ct-evict   { background-color: #ef4444 !important; }
-.vis-custom-time.ct-admit   { background-color: #22c55e !important; }
-.vis-custom-time.ct-readmit { background-color: #a855f7 !important; }
+.vis-custom-time.ct-evict   { background-color: #f87171 !important; }   /* bright red    */
+.vis-custom-time.ct-admit   { background-color: #4ade80 !important; }   /* bright green  */
+.vis-custom-time.ct-readmit { background-color: #c084fc !important; }   /* bright purple */
 .vis-custom-time.ct-sat {
   background: repeating-linear-gradient(
-    to bottom, #facc15 0 6px, transparent 6px 12px
-  ) !important;
+    to bottom, #fde047 0 6px, transparent 6px 12px
+  ) !important;                                                          /* dashed yellow */
 }
 
 /* ── Left-panel alignment ────────────────────────────────────────────────── */
@@ -236,29 +244,6 @@ main {
   width: 220px !important;
   min-width: 220px !important;
   max-width: 220px !important;
-}
-
-/* ── event label box items (events row) ──────────────────────────────────── */
-
-.vis-item.event-marker {
-  border: none;
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 700;
-  color: #f0f6ff;
-  padding: 2px 7px;
-  border-radius: 3px;
-}
-
-.vis-item.event-marker.event-evict   { background-color: #b91c1c; border-color: #b91c1c; }
-.vis-item.event-marker.event-admit   { background-color: #15803d; border-color: #15803d; }
-.vis-item.event-marker.event-readmit { background-color: #6d28d9; border-color: #6d28d9; }
-.vis-item.event-marker.event-sat     { background-color: #a16207; border-color: #a16207; color: #fef9c3; }
-
-.vis-label.events-group .vis-inner {
-  color: #4a6080;
-  font-style: italic;
-  font-size: 12px;
 }
 
 /* ── tooltip ─────────────────────────────────────────────────────────────── */
