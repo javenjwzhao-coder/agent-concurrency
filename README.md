@@ -44,6 +44,8 @@ At each sidecar tick, the controller gathers:
 - `s_t`: current average per-active-agent KV usage.
 - `s_{t-1}`: previous tick's average, memoized from the last poll.
 - `w = C / min(s_t, s_{t-1})`: conservative concurrency headroom.
+  `headroom_low` means `w < 1`; `saturation_guard` is emitted only when
+  low headroom actually blocks a runnable queued agent.
 
 Policy:
 

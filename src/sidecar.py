@@ -579,6 +579,10 @@ class DynamicAdmissionController:
                 "kv_policy_events": self._drain_kv_policy_events_locked(),
                 "reasons": [],
             }
+            runnable_queue = (
+                report["queue"].get("fresh", 0)
+                + report["queue"].get("evicted_ready", 0)
+            )
 
             if self._predictor_error:
                 report["reasons"].append(f"predictor_error: {self._predictor_error}")
@@ -604,7 +608,9 @@ class DynamicAdmissionController:
             ]
 
             if w is not None and w < 1.0:
-                report["reasons"].append("saturation_guard")
+                report["reasons"].append("headroom_low")
+                if runnable_queue > 0:
+                    report["reasons"].append("saturation_guard")
 
             current_free_gb = free_gb
             while current_free_gb <= self.threshold_gb and heap:
@@ -622,9 +628,9 @@ class DynamicAdmissionController:
                 report["reasons"].append("pressure_threshold")
 
             admit_limit = self._admission_limit(current_free_gb, w)
-            if admit_limit <= 0 and w is not None and w < 1.0:
+            if admit_limit <= 0 and w is not None and w < 1.0 and runnable_queue > 0:
                 report["reasons"].append("admission_blocked_by_headroom")
-            elif admit_limit <= 0 and current_free_gb <= self.threshold_gb:
+            elif admit_limit <= 0 and current_free_gb <= self.threshold_gb and runnable_queue > 0:
                 report["reasons"].append("admission_blocked_by_pressure")
 
             if admit_limit > 0 and self._admit_callback is None:

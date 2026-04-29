@@ -124,9 +124,39 @@ def test_saturation_guard_blocks_admission_when_headroom_below_one():
     )
 
     assert report["w"] == 0.25
+    assert "headroom_low" in report["reasons"]
     assert "saturation_guard" in report["reasons"]
+    assert "admission_blocked_by_headroom" in report["reasons"]
     assert report["admissions"] == []
     assert admitted == []
+
+
+def test_low_headroom_without_runnable_queue_does_not_emit_saturation_guard():
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+    )
+    agents = {"running": {"state": "reasoning", "kv_blocks": 2}}
+
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.5},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 0.5},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["w"] == 0.25
+    assert "headroom_low" in report["reasons"]
+    assert "saturation_guard" not in report["reasons"]
+    assert "admission_blocked_by_headroom" not in report["reasons"]
+    assert report["queue"]["fresh"] == 0
+    assert report["queue"]["evicted_ready"] == 0
 
 
 def test_pressure_eviction_pops_highest_score_idle_agent():

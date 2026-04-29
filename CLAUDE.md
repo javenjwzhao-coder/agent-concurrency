@@ -175,6 +175,10 @@ s_prev = previous tick's average
 w = C / min(s_t, s_prev)
 ```
 
+`headroom_low` means `w < 1`. `saturation_guard` is emitted only when
+`w < 1` and there is runnable queued work (`fresh` or `evicted_ready`) that
+cannot be admitted.
+
 Policy order:
 
 1. If `w < 1`, admit no new fresh agents.

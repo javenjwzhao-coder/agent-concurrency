@@ -91,7 +91,8 @@ ticks it already rendered.
     ],
 
     "reasons": [                               // gating notes for this tick
-      "saturation_guard"                       // emitted whenever w < 1.0
+      "headroom_low",                          // emitted whenever w < 1.0
+      "saturation_guard"                       // emitted when w < 1.0 and runnable queue > 0
     ]
   }
 }
@@ -119,7 +120,7 @@ ticks it already rendered.
 | EVICT marker (red)                   | `admission.evictions[*]` where `evicted == true`                    |
 | ADMIT marker (green)                 | `admission.admissions[*]` where `admitted && !previously_evicted`   |
 | READMIT marker (purple)              | `admission.admissions[*]` where `admitted && previously_evicted`    |
-| SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons`                          |
+| SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low headroom with runnable queued agents) |
 | Event tooltip                        | `{ts, tick, C, w, s_t, s_prev}` plus event-specific fields          |
 | Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick           |
 

@@ -321,6 +321,9 @@
       `s_t:    ${fmt(adm.s_t)}`,
       `s_prev: ${fmt(adm.s_prev)}`,
       `w:      ${fmt(adm.w)}`,
+      `queue:  fresh=${fmt(adm.queue && adm.queue.fresh)} ` +
+        `ready=${fmt(adm.queue && adm.queue.evicted_ready)} ` +
+        `pending_tool=${fmt(adm.queue && adm.queue.evicted_pending_tool)}`,
     ].join("\n");
   }
 
