@@ -25,7 +25,6 @@
 
   const VIEWPORT_PAST_MS  = 60_000;
   const VIEWPORT_AHEAD_MS = 5_000;
-  const EVENT_LINE_WIDTH_MS = 1;
   const EVENTS_GROUP_ID = "__events__";
 
   const state = {
@@ -38,6 +37,7 @@
     agentOrder: [],
     eventCounter: 0,
     itemCounter: 0,
+    customTimeIds: [],   // IDs added via addCustomTime on both charts
     latestTick: -1,
     latestTs: null,
     paused: false,
@@ -266,18 +266,23 @@
     ].join("\n");
   }
 
+  function addCustomTimeStyled(chart, container, time, id, type) {
+    chart.addCustomTime(time, id);
+    // Grab the element vis just appended and tag it with the event type class.
+    const els = container.querySelectorAll(".vis-custom-time");
+    const el = els[els.length - 1];
+    if (el) el.classList.add("ct-" + type);
+  }
+
   function addEvent(ts, type, label, tooltipText) {
     const id = `evt::${++state.eventCounter}`;
     const start = new Date(ts);
-    const end = new Date(start.getTime() + EVENT_LINE_WIDTH_MS);
-    state.items.add({
-      id: id + "::bg",
-      start: start,
-      end: end,
-      type: "background",
-      className: `event-line event-${type}`,
-      title: escapeHtml(tooltipText),
-    });
+    // Draw a continuous vertical line through both charts using addCustomTime.
+    // Because both charts share the same forced left-panel width (see CSS), the
+    // lines land at the same horizontal pixel in each chart.
+    addCustomTimeStyled(state.timeline, $("#timeline"), start, id, type);
+    addCustomTimeStyled(state.kvChart,  $("#kvChart"),  start, id, type);
+    state.customTimeIds.push(id);
     state.items.add({
       id: id + "::label",
       group: EVENTS_GROUP_ID,
@@ -379,6 +384,11 @@
       state.eventSource.close();
       state.eventSource = null;
     }
+    for (const id of state.customTimeIds) {
+      try { state.timeline.removeCustomTime(id); } catch (e) { /* already gone */ }
+      try { state.kvChart.removeCustomTime(id); }  catch (e) { /* already gone */ }
+    }
+    state.customTimeIds = [];
     state.items.clear();
     state.groups.clear();
     state.groups.add({

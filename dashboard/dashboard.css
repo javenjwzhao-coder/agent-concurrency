@@ -198,22 +198,45 @@ main {
 .event-readmit { background: #6d28d9; }
 .event-sat     { background: #a16207; color: #fef9c3; }
 
-/* ── event vertical lines (background items) ─────────────────────────────── */
+/* ── custom-time event lines (continuous across kvChart + timeline) ──────── */
+/*
+ * Each event calls addCustomTime() on BOTH charts with identical left-panel
+ * widths (forced below), so the line lands at the same horizontal pixel in
+ * each chart — appearing as one unbroken vertical line.
+ */
 
-.vis-item.event-line {
-  border: none;
+.vis-custom-time {
+  pointer-events: none !important;
+  cursor: default !important;
+  width: 2px !important;
   opacity: 0.85;
 }
-.vis-item.event-line.event-evict   { background-color: #ef4444; }
-.vis-item.event-line.event-admit   { background-color: #22c55e; }
-.vis-item.event-line.event-readmit { background-color: #a855f7; }
-.vis-item.event-line.event-sat {
+
+/* Hide the triangle handle — labels come from the events-group box items */
+.vis-custom-time .vis-custom-time-marker { display: none !important; }
+
+.vis-custom-time.ct-evict   { background-color: #ef4444 !important; }
+.vis-custom-time.ct-admit   { background-color: #22c55e !important; }
+.vis-custom-time.ct-readmit { background-color: #a855f7 !important; }
+.vis-custom-time.ct-sat {
   background: repeating-linear-gradient(
     to bottom, #facc15 0 6px, transparent 6px 12px
-  );
+  ) !important;
 }
 
-.vis-item.vis-background.event-line { min-width: 2px; }
+/* ── Left-panel alignment ────────────────────────────────────────────────── */
+/*
+ * The Timeline's left panel (group labels) and the Graph2d's left panel
+ * (Y-axis) have different natural widths, so their time axes start at
+ * different horizontal pixels.  Forcing them to the same fixed width makes
+ * the time axes — and therefore the custom-time event lines — pixel-perfect.
+ */
+#timeline .vis-panel.vis-left,
+#kvChart  .vis-panel.vis-left {
+  width: 220px !important;
+  min-width: 220px !important;
+  max-width: 220px !important;
+}
 
 /* ── event label box items (events row) ──────────────────────────────────── */
 
@@ -299,11 +322,16 @@ main {
   width: 2px;
 }
 
-/* Agent row labels — larger, monospace */
+/* Agent row labels — larger, monospace, truncated to the fixed panel width */
 .vis-labelset .vis-label .vis-inner {
   color: #94b4d8;
   font-size: 13px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-weight: 500;
   padding: 0 8px;
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 204px; /* 220px panel − 8px padding × 2 */
 }
