@@ -467,6 +467,17 @@ if [[ "${PREDICTION_ENABLED:-false}" == "true" && "$SKIP_PREDICTION" == "false" 
         echo -e "${YELLOW}WARNING: prediction enabled but ${PREDICTOR_SCRIPT} not found; skipping.${RESET}"
         RUN_PREDICTION=false
     fi
+    # Skip training if a saved predictor model already exists.
+    if [[ "$RUN_PREDICTION" == "true" && -n "${PREDICTION_SAVE_MODEL:-}" ]]; then
+        _model_path="${PREDICTION_SAVE_MODEL}"
+        if [[ "${_model_path}" != /* ]]; then
+            _model_path="${SCRIPT_DIR}/${_model_path#./}"
+        fi
+        if [[ -f "$_model_path" ]]; then
+            echo -e "${CYAN}  Predictor model already exists at ${_model_path}; skipping training.${RESET}"
+            RUN_PREDICTION=false
+        fi
+    fi
 fi
 
 if [[ "$RUN_PREDICTION" == "true" ]]; then
