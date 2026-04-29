@@ -290,11 +290,12 @@
     for (const ev of (adm.evictions || [])) {
       if (!ev.evicted) continue;
       addEvent(ts, "evict", `EVICT: ${ev.agent_id}`,
-        tooltipBase + `\nagent: ${ev.agent_id}\n` +
+        `agent: ${ev.agent_id}\n` +
         `freed_gb: ${fmt(ev.freed_gb)}\n` +
         `e_s:      ${fmt(ev.e_s)}\n` +
         `kv_gb:    ${fmt(ev.kv_gb)}\n` +
-        `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`);
+        `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
+        tooltipBase);
     }
     for (const ad of (adm.admissions || [])) {
       if (!ad.admitted) continue;
@@ -303,12 +304,14 @@
         ? `READMIT: ${ad.agent_id}`
         : `ADMIT: ${ad.agent_id}`;
       addEvent(ts, type, tag,
-        tooltipBase + `\nagent: ${ad.agent_id}\n` +
-        `previously_evicted: ${ad.previously_evicted}`);
+        `agent: ${ad.agent_id}\n` +
+        `previously_evicted: ${ad.previously_evicted}`,
+        tooltipBase);
     }
     if ((adm.reasons || []).indexOf("saturation_guard") !== -1) {
       addEvent(ts, "sat", "SAT",
-        tooltipBase + `\nreasons: ${(adm.reasons || []).join(", ")}`);
+        `reasons: ${(adm.reasons || []).join(", ")}`,
+        tooltipBase);
     }
   }
 
@@ -343,38 +346,61 @@
     return fullId;
   }
 
-  function addEvent(ts, type, label, tooltipText) {
+  function addEvent(ts, type, label, extraText, sharedBase) {
     const id = `evt::${++state.eventCounter}`;
     const start = new Date(ts);
-    const fullText = label + "\n\n" + tooltipText;
     const tlId = addCustomTimeStyled(state.timeline, $("#timeline"), "tl", start, id, type);
     const kvId = addCustomTimeStyled(state.kvChart,  $("#kvChart"),  "kv", start, id, type);
     state.customTimeIds.push(tlId, kvId);
-    state.eventPoints.push({ ts: start.getTime(), type, label, text: fullText });
+    // Store label, event-specific extra, and shared base separately so same-tick
+    // events can be grouped into one tooltip without repeating the base fields.
+    state.eventPoints.push({ ts: start.getTime(), type, label, extraText, sharedBase });
   }
 
   // ── proximity tooltip (fires from container mousemove) ─────────────────
 
-  function findEventAtPixel(clientX, container, chart) {
-    if (!state.eventPoints.length) return null;
+  // Returns all eventPoints within THRESHOLD_PX of clientX, sorted by distance.
+  function findEventsAtPixel(clientX, container, chart) {
+    if (!state.eventPoints.length) return [];
     const win = chart.getWindow();
     const startMs = win.start.getTime();
     const endMs   = win.end.getTime();
-    if (endMs <= startMs) return null;
+    if (endMs <= startMs) return [];
     const cRect = container.getBoundingClientRect();
     const leftEl = container.querySelector(".vis-panel.vis-left");
     const leftW  = leftEl ? leftEl.getBoundingClientRect().width : 220;
     const chartW = cRect.width - leftW;
-    if (chartW <= 0) return null;
+    if (chartW <= 0) return [];
     const THRESHOLD_PX = 7;
-    let best = null, bestDist = THRESHOLD_PX + 1;
+    const hits = [];
     for (const ep of state.eventPoints) {
       const frac = (ep.ts - startMs) / (endMs - startMs);
       const evClientX = cRect.left + leftW + frac * chartW;
       const dist = Math.abs(clientX - evClientX);
-      if (dist < bestDist) { bestDist = dist; best = ep; }
+      if (dist <= THRESHOLD_PX) hits.push({ ep, dist });
     }
-    return best;
+    hits.sort((a, b) => a.dist - b.dist);
+    return hits.map(h => h.ep);
+  }
+
+  // Build tooltip text for one or more events (same tick events share base info).
+  function buildTooltipText(evs) {
+    if (evs.length === 1) {
+      return evs[0].label + "\n\n" + evs[0].sharedBase + "\n" + evs[0].extraText;
+    }
+    // Group by timestamp so we print shared base only once per tick.
+    const byTs = new Map();
+    for (const ev of evs) {
+      if (!byTs.has(ev.ts)) byTs.set(ev.ts, []);
+      byTs.get(ev.ts).push(ev);
+    }
+    const sections = [];
+    for (const group of byTs.values()) {
+      const labels = group.map(ev => ev.label).join("\n");
+      const extras = group.map(ev => ev.extraText).filter(Boolean).join("\n");
+      sections.push(labels + "\n\n" + group[0].sharedBase + (extras ? "\n" + extras : ""));
+    }
+    return sections.join("\n\n━━━━━━━━━━━━━━━━━━━━\n\n");
   }
 
   function setupProximityTooltips() {
@@ -383,9 +409,9 @@
       [$("#kvChart"),  state.kvChart],
     ]) {
       container.addEventListener("mousemove", (e) => {
-        const ev = findEventAtPixel(e.clientX, container, chart);
-        if (ev) showTooltip(ev.text, e.clientX, e.clientY);
-        else     hideTooltip();
+        const evs = findEventsAtPixel(e.clientX, container, chart);
+        if (evs.length) showTooltip(buildTooltipText(evs), e.clientX, e.clientY);
+        else             hideTooltip();
       });
       container.addEventListener("mouseleave", hideTooltip);
     }
