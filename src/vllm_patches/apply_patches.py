@@ -6,8 +6,8 @@ Run during bare-metal venv setup to add per-agent KV
 cache block reporting to:
   • vllm/entrypoints/openai/protocol.py  — UsageInfo + ChatCompletionRequest
   • vllm/entrypoints/openai/serving_chat.py — computation + population
-  • vllm/entrypoints/openai/api_server.py — admin endpoint for proactive
-    per-agent KV eviction, backed by an engine/scheduler evict_agent_kv hook
+  • vllm/entrypoints/openai/api_server.py — admin endpoints for proactive
+    per-agent KV pin/offload, backed by engine/scheduler agent-KV hooks
 
 Pass --vllm-dir to target a specific vllm package directory (e.g. a
 project-local venv's site-packages/vllm). Defaults to the shared venv path.
@@ -482,7 +482,12 @@ def _patch_async_llm_agent_kv() -> None:
         return
 
     txt = ASYNC_LLM.read_text()
-    if "async def evict_agent_kv" in txt and "async def register_agent_request" in txt:
+    if (
+        "async def evict_agent_kv" in txt
+        and "async def offload_agent_kv" in txt
+        and "async def pin_agent_kv" in txt
+        and "async def register_agent_request" in txt
+    ):
         print("[SKIP] async_llm.py already has agent KV methods")
         return
 
@@ -493,9 +498,19 @@ def _patch_async_llm_agent_kv() -> None:
             await self.engine_core.register_agent_request_async(
                 str(agent_id), request_id)
 
+        async def pin_agent_kv(
+                self, agent_id: str, pin: bool = True) -> dict:
+            return await self.engine_core.pin_agent_kv_async(
+                str(agent_id), pin)
+
+        async def offload_agent_kv(
+                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+            return await self.engine_core.offload_agent_kv_async(
+                str(agent_id), only_ref_cnt_zero)
+
         async def evict_agent_kv(
                 self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-            return await self.engine_core.evict_agent_kv_async(
+            return await self.engine_core.offload_agent_kv_async(
                 str(agent_id), only_ref_cnt_zero)
     """, leading_newline=True)
 
@@ -527,6 +542,13 @@ def _patch_core_client_agent_kv() -> None:
             def register_agent_request(self, agent_id: str, request_id: str) -> None:
                 raise NotImplementedError
 
+            def pin_agent_kv(self, agent_id: str, pin: bool = True) -> dict:
+                raise NotImplementedError
+
+            def offload_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                raise NotImplementedError
+
             def evict_agent_kv(
                     self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
                 raise NotImplementedError
@@ -548,6 +570,14 @@ def _patch_core_client_agent_kv() -> None:
         abstract_async = _code_block(4, """\
             async def register_agent_request_async(
                     self, agent_id: str, request_id: str) -> None:
+                raise NotImplementedError
+
+            async def pin_agent_kv_async(
+                    self, agent_id: str, pin: bool = True) -> dict:
+                raise NotImplementedError
+
+            async def offload_agent_kv_async(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
                 raise NotImplementedError
 
             async def evict_agent_kv_async(
@@ -575,9 +605,17 @@ def _patch_core_client_agent_kv() -> None:
             def register_agent_request(self, agent_id: str, request_id: str) -> None:
                 self.engine_core.register_agent_request(agent_id, request_id)
 
+            def pin_agent_kv(self, agent_id: str, pin: bool = True) -> dict:
+                return self.engine_core.pin_agent_kv(agent_id, pin)
+
+            def offload_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return self.engine_core.offload_agent_kv(
+                    agent_id, only_ref_cnt_zero)
+
             def evict_agent_kv(
                     self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-                return self.engine_core.evict_agent_kv(agent_id, only_ref_cnt_zero)
+                return self.engine_core.offload_agent_kv(agent_id, only_ref_cnt_zero)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -600,10 +638,18 @@ def _patch_core_client_agent_kv() -> None:
             def register_agent_request(self, agent_id: str, request_id: str) -> None:
                 self.call_utility("register_agent_request", agent_id, request_id)
 
+            def pin_agent_kv(self, agent_id: str, pin: bool = True) -> dict:
+                return self.call_utility("pin_agent_kv", agent_id, pin)
+
+            def offload_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return self.call_utility(
+                    "offload_agent_kv", agent_id, only_ref_cnt_zero)
+
             def evict_agent_kv(
                     self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
                 return self.call_utility(
-                    "evict_agent_kv", agent_id, only_ref_cnt_zero)
+                    "offload_agent_kv", agent_id, only_ref_cnt_zero)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -628,10 +674,20 @@ def _patch_core_client_agent_kv() -> None:
                 await self.call_utility_async(
                     "register_agent_request", agent_id, request_id)
 
+            async def pin_agent_kv_async(
+                    self, agent_id: str, pin: bool = True) -> dict:
+                return await self.call_utility_async(
+                    "pin_agent_kv", agent_id, pin)
+
+            async def offload_agent_kv_async(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return await self.call_utility_async(
+                    "offload_agent_kv", agent_id, only_ref_cnt_zero)
+
             async def evict_agent_kv_async(
                     self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
                 return await self.call_utility_async(
-                    "evict_agent_kv", agent_id, only_ref_cnt_zero)
+                    "offload_agent_kv", agent_id, only_ref_cnt_zero)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -658,17 +714,28 @@ def _patch_engine_core_agent_kv() -> None:
         return
 
     txt = ENGINE_CORE.read_text()
-    if "def evict_agent_kv(" in txt:
-        print("[SKIP] core.py already has evict_agent_kv")
+    if (
+        "def evict_agent_kv(" in txt
+        and "def offload_agent_kv(" in txt
+        and "def pin_agent_kv(" in txt
+    ):
+        print("[SKIP] core.py already has agent KV methods")
         return
 
     methods = _code_block(4, """\
         def register_agent_request(self, agent_id: str, request_id: str) -> None:
             self.scheduler.register_agent_request(agent_id, request_id)
 
+        def pin_agent_kv(self, agent_id: str, pin: bool = True) -> dict:
+            return self.scheduler.pin_agent_kv(agent_id, pin)
+
+        def offload_agent_kv(
+                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+            return self.scheduler.offload_agent_kv(agent_id, only_ref_cnt_zero)
+
         def evict_agent_kv(
                 self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-            return self.scheduler.evict_agent_kv(agent_id, only_ref_cnt_zero)
+            return self.scheduler.offload_agent_kv(agent_id, only_ref_cnt_zero)
     """, leading_newline=True)
     txt, ok = _insert_after_anchor(
         txt,
@@ -694,11 +761,46 @@ def _patch_block_pool_agent_kv() -> None:
         return
 
     txt = BLOCK_POOL.read_text()
-    if "only_ref_cnt_zero" in txt and "def evict_blocks" in txt:
-        print("[SKIP] block_pool.py already has ref-count-aware evict_blocks")
+    if (
+        "only_ref_cnt_zero" in txt
+        and "def evict_blocks" in txt
+        and "def pin_blocks" in txt
+        and "_agent_kv_pinned_blocks" in txt
+    ):
+        print("[SKIP] block_pool.py already has ref-count-aware pin/evict hooks")
         return
 
     method = _code_block(4, """\
+        def _agent_kv_pinned_set(self) -> set[int]:
+            pinned = getattr(self, "_agent_kv_pinned_blocks", None)
+            if pinned is None:
+                pinned = set()
+                self._agent_kv_pinned_blocks = pinned
+            return pinned
+
+        def pin_blocks(
+                self,
+                block_ids: set[int] | list[int] | tuple[int, ...],
+                pin: bool = True) -> int:
+            pinned = self._agent_kv_pinned_set()
+            changed = 0
+            for block_id in list(block_ids):
+                if block_id is None:
+                    continue
+                try:
+                    block_id_int = int(block_id)
+                except (TypeError, ValueError):
+                    continue
+                if pin:
+                    if block_id_int not in pinned:
+                        pinned.add(block_id_int)
+                        changed += 1
+                else:
+                    if block_id_int in pinned:
+                        pinned.discard(block_id_int)
+                        changed += 1
+            return changed
+
         def evict_blocks(
                 self,
                 block_ids: set[int] | list[int] | tuple[int, ...],
@@ -711,11 +813,18 @@ def _patch_block_pool_agent_kv() -> None:
             blocks for proactive agent eviction.
             \"\"\"
             evicted = 0
+            pinned = self._agent_kv_pinned_set()
             for block_id in list(block_ids):
                 if block_id is None:
                     continue
                 try:
-                    block = self.blocks[int(block_id)]
+                    block_id_int = int(block_id)
+                except (TypeError, ValueError):
+                    continue
+                if block_id_int in pinned:
+                    continue
+                try:
+                    block = self.blocks[block_id_int]
                 except (IndexError, TypeError, ValueError):
                     continue
                 if getattr(block, "is_null", False):
@@ -748,8 +857,25 @@ def _patch_block_pool_agent_kv() -> None:
         )
     if not ok:
         return
+    guard = _code_block(8, """\
+        try:
+            _agent_kv_block_id = int(getattr(block, "block_id", -1))
+        except (TypeError, ValueError):
+            _agent_kv_block_id = -1
+        if _agent_kv_block_id in self._agent_kv_pinned_set():
+            return False
+    """)
+    if "_agent_kv_pinned_set()" in txt and "_agent_kv_pinned_blocks" in txt:
+        anchors = [
+            "    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:\n",
+            "    def _maybe_evict_cached_block(self, block) -> bool:\n",
+        ]
+        for anchor in anchors:
+            if anchor in txt and "in self._agent_kv_pinned_set()" not in txt.split(anchor, 1)[1].split("\n    def ", 1)[0]:
+                txt = txt.replace(anchor, anchor + guard, 1)
+                break
     BLOCK_POOL.write_text(txt)
-    print("[OK]  block_pool.py: ref-count-aware evict_blocks(block_ids) added")
+    print("[OK]  block_pool.py: pinned-block-aware pin/evict hooks added")
 
 
 def _patch_kv_cache_manager_agent_kv() -> None:
@@ -759,11 +885,17 @@ def _patch_kv_cache_manager_agent_kv() -> None:
         return
 
     txt = KV_CACHE_MANAGER.read_text()
-    if "only_ref_cnt_zero" in txt and "def evict_blocks" in txt:
-        print("[SKIP] kv_cache_manager.py already has ref-count-aware evict_blocks")
+    if "only_ref_cnt_zero" in txt and "def evict_blocks" in txt and "def pin_blocks" in txt:
+        print("[SKIP] kv_cache_manager.py already has pin/evict delegates")
         return
 
     method = _code_block(4, """\
+        def pin_blocks(
+                self,
+                block_ids: set[int] | list[int] | tuple[int, ...],
+                pin: bool = True) -> int:
+            return self.block_pool.pin_blocks(block_ids, pin=pin)
+
         def evict_blocks(
                 self,
                 block_ids: set[int] | list[int] | tuple[int, ...],
@@ -813,6 +945,7 @@ def _patch_scheduler_agent_kv() -> None:
             self._agent_kv_agent_to_requests: dict[str, set[str]] = {}
             self._agent_kv_request_to_agent: dict[str, str] = {}
             self._agent_kv_cached_blocks: dict[str, set[int]] = {}
+            self._agent_kv_pinned_blocks_by_agent: dict[str, set[int]] = {}
             self._agent_kv_bytes_per_block_gb = 0.0
             try:
                 _agent_kv_model_config = vllm_config.model_config
@@ -867,29 +1000,79 @@ def _patch_scheduler_agent_kv() -> None:
                         int(block_id) for block_id in block_ids
                         if block_id is not None)
 
-            def evict_agent_kv(
-                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-                if not agent_id:
-                    return {
-                        "evicted": False,
-                        "freed_blocks": 0,
-                        "freed_gb": 0.0,
-                        "reason": "missing agent_id",
-                    }
-
+            def _agent_kv_collect_blocks(self, agent_id: str) -> set[int]:
                 block_ids = set(self._agent_kv_cached_blocks.get(agent_id, set()))
                 for request_id in self._agent_kv_agent_to_requests.get(
                         agent_id, set()):
                     if request_id in self.requests:
                         self._agent_kv_record_cached_blocks(agent_id, request_id)
                 block_ids.update(self._agent_kv_cached_blocks.get(agent_id, set()))
+                return block_ids
+
+            def pin_agent_kv(self, agent_id: str, pin: bool = True) -> dict:
+                if not agent_id:
+                    return {
+                        "pinned": False,
+                        "changed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": "missing agent_id",
+                    }
+
+                block_ids = self._agent_kv_collect_blocks(agent_id)
+                if not pin:
+                    block_ids.update(
+                        self._agent_kv_pinned_blocks_by_agent.get(agent_id, set()))
+
+                if not block_ids:
+                    return {
+                        "pinned": False,
+                        "changed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": "no cached blocks for agent",
+                    }
+
+                changed_blocks = self.kv_cache_manager.pin_blocks(block_ids, pin=pin)
+                if pin:
+                    pinned = self._agent_kv_pinned_blocks_by_agent.setdefault(
+                        agent_id, set())
+                    pinned.update(block_ids)
+                else:
+                    self._agent_kv_pinned_blocks_by_agent.pop(agent_id, None)
+                pinned_gb = round(
+                    len(block_ids) * getattr(
+                        self, "_agent_kv_bytes_per_block_gb", 0.0),
+                    6)
+                return {
+                    "pinned": bool(pin),
+                    "changed_blocks": changed_blocks,
+                    "pinned_blocks": len(block_ids) if pin else 0,
+                    "pinned_gb": pinned_gb if pin else 0.0,
+                    "reason": "ok",
+                }
+
+            def offload_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                if not agent_id:
+                    return {
+                        "evicted": False,
+                        "offloaded": False,
+                        "freed_blocks": 0,
+                        "freed_gb": 0.0,
+                        "reason": "missing agent_id",
+                    }
+
+                block_ids = self._agent_kv_collect_blocks(agent_id)
+                pinned = self._agent_kv_pinned_blocks_by_agent.get(agent_id, set())
+                if pinned:
+                    block_ids.difference_update(pinned)
 
                 if not block_ids:
                     return {
                         "evicted": False,
+                        "offloaded": False,
                         "freed_blocks": 0,
                         "freed_gb": 0.0,
-                        "reason": "no cached blocks for agent",
+                        "reason": "no unpinned cached blocks for agent",
                     }
 
                 freed_blocks = self.kv_cache_manager.evict_blocks(
@@ -900,12 +1083,17 @@ def _patch_scheduler_agent_kv() -> None:
                     6)
                 return {
                     "evicted": freed_blocks > 0,
+                    "offloaded": freed_blocks > 0,
                     "freed_blocks": freed_blocks,
                     "freed_gb": freed_gb,
                     "reason": (
                         "ok" if freed_blocks else
                         "no matching cached blocks with ref_cnt == 0"),
                 }
+
+            def evict_agent_kv(
+                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
+                return self.offload_agent_kv(agent_id, only_ref_cnt_zero)
         """)
         txt, ok = _insert_before_anchor(
             txt,
@@ -954,14 +1142,13 @@ def _patch_scheduler_agent_kv() -> None:
 
 def patch_agent_kv_eviction_api() -> None:
     """
-    Add the HTTP endpoint consumed by sidecar.py's dynamic admission controller.
+    Add the HTTP endpoints consumed by sidecar.py's dynamic admission controller.
 
-    The route intentionally calls an engine-client method named
-    ``evict_agent_kv(agent_id, only_ref_cnt_zero=True)``.  In vllm-ascend this
-    should be routed down to ``vllm/v1/core/sched/scheduler.py``, where the
-    scheduler can resolve agent-owned block IDs, store/swap them through the
-    configured KV connector when available, and call
-    ``KVCacheManager.evict_blocks(block_ids)`` only for blocks whose ref_cnt is 0.
+    The routes call engine-client methods named ``pin_agent_kv`` and
+    ``offload_agent_kv``.  ``evict_agent_kv`` remains as a compatibility alias
+    for older sidecars.  In vllm-ascend these methods route to the scheduler,
+    where agent-owned block IDs are resolved and then pinned or offloaded
+    through the configured KV connector path when available.
     """
     if not API_SERVER.exists():
         print(f"[WARN] api_server.py not found ({API_SERVER}); skipping agent KV eviction API",
@@ -969,28 +1156,80 @@ def patch_agent_kv_eviction_api() -> None:
         return
 
     txt = API_SERVER.read_text()
-    if '"/agent_kv_cache/evict"' in txt:
-        print("[SKIP] api_server.py already has /agent_kv_cache/evict")
+    if (
+        '"/agent_kv_cache/evict"' in txt
+        and '"/agent_kv_cache/offload"' in txt
+        and '"/agent_kv_cache/pin"' in txt
+    ):
+        print("[SKIP] api_server.py already has agent KV pin/offload routes")
         return
 
     route = textwrap.dedent('''\
 
-        @router.post("/agent_kv_cache/evict")
-        async def evict_agent_kv_cache(raw_request: Request):
-            """Evict KV blocks owned by one agent when they are not referenced."""
-            import inspect as _agent_kv_inspect
-            from fastapi.responses import JSONResponse as _AgentKVJSONResponse
-
+        async def _agent_kv_json(raw_request: Request):
             try:
-                body = await raw_request.json()
+                return await raw_request.json()
             except Exception:
-                body = {}
+                return {}
+
+        def _agent_kv_response(payload, status_code: int = 200):
+            from fastapi.responses import JSONResponse as _AgentKVJSONResponse
+            return _AgentKVJSONResponse(payload, status_code=status_code)
+
+        async def _agent_kv_maybe_await(result):
+            import inspect as _agent_kv_inspect
+            if _agent_kv_inspect.isawaitable(result):
+                return await result
+            return result
+
+        @router.post("/agent_kv_cache/pin")
+        async def pin_agent_kv_cache(raw_request: Request):
+            """Pin or unpin cached KV blocks owned by one agent."""
+            body = await _agent_kv_json(raw_request)
+            agent_id = str(body.get("agent_id") or "")
+            pin = bool(body.get("pin", True))
+            if not agent_id:
+                return _agent_kv_response(
+                    {
+                        "pinned": False,
+                        "changed_blocks": 0,
+                        "reason": "missing agent_id",
+                    },
+                    status_code=400,
+                )
+
+            client = engine_client(raw_request)
+            if not hasattr(client, "pin_agent_kv"):
+                return _agent_kv_response(
+                    {
+                        "pinned": False,
+                        "changed_blocks": 0,
+                        "reason": "engine client missing pin_agent_kv(agent_id, pin=True)",
+                    },
+                    status_code=501,
+                )
+
+            result = client.pin_agent_kv(agent_id, pin=pin)
+            result = await _agent_kv_maybe_await(result)
+            if result is None:
+                result = {
+                    "pinned": False,
+                    "changed_blocks": 0,
+                    "reason": "engine returned no result",
+                }
+            return _agent_kv_response(result)
+
+        @router.post("/agent_kv_cache/offload")
+        async def offload_agent_kv_cache(raw_request: Request):
+            """Offload unpinned cached KV blocks owned by one agent."""
+            body = await _agent_kv_json(raw_request)
             agent_id = str(body.get("agent_id") or "")
             only_ref_cnt_zero = bool(body.get("only_ref_cnt_zero", True))
             if not agent_id:
-                return _AgentKVJSONResponse(
+                return _agent_kv_response(
                     {
                         "evicted": False,
+                        "offloaded": False,
                         "freed_blocks": 0,
                         "freed_gb": 0.0,
                         "reason": "missing agent_id",
@@ -999,34 +1238,44 @@ def patch_agent_kv_eviction_api() -> None:
                 )
 
             client = engine_client(raw_request)
-            if not hasattr(client, "evict_agent_kv"):
-                return _AgentKVJSONResponse(
+            if hasattr(client, "offload_agent_kv"):
+                result = client.offload_agent_kv(
+                    agent_id, only_ref_cnt_zero=only_ref_cnt_zero
+                )
+            elif hasattr(client, "evict_agent_kv"):
+                result = client.evict_agent_kv(
+                    agent_id, only_ref_cnt_zero=only_ref_cnt_zero
+                )
+            else:
+                return _agent_kv_response(
                     {
                         "evicted": False,
+                        "offloaded": False,
                         "freed_blocks": 0,
                         "freed_gb": 0.0,
                         "reason": (
-                            "engine client missing evict_agent_kv(agent_id, "
-                            "only_ref_cnt_zero=True); route this to the "
-                            "vLLM/vllm-ascend scheduler"
+                            "engine client missing offload_agent_kv(agent_id, "
+                            "only_ref_cnt_zero=True)"
                         ),
                     },
                     status_code=501,
                 )
 
-            result = client.evict_agent_kv(
-                agent_id, only_ref_cnt_zero=only_ref_cnt_zero
-            )
-            if _agent_kv_inspect.isawaitable(result):
-                result = await result
+            result = await _agent_kv_maybe_await(result)
             if result is None:
                 result = {
                     "evicted": False,
+                    "offloaded": False,
                     "freed_blocks": 0,
                     "freed_gb": 0.0,
                     "reason": "engine returned no result",
                 }
-            return _AgentKVJSONResponse(result)
+            return _agent_kv_response(result)
+
+        @router.post("/agent_kv_cache/evict")
+        async def evict_agent_kv_cache(raw_request: Request):
+            """Backward-compatible alias for /agent_kv_cache/offload."""
+            return await offload_agent_kv_cache(raw_request)
     ''')
 
     anchors = [
@@ -1047,9 +1296,9 @@ def patch_agent_kv_eviction_api() -> None:
             full_anchor = indent + anchor
             txt = txt.replace(full_anchor, indented_route + "\n" + full_anchor, 1)
             API_SERVER.write_text(txt)
-            print("[OK]  api_server.py: /agent_kv_cache/evict route added")
-            print("[INFO] vllm-ascend hook target: engine_client.evict_agent_kv "
-                  "→ scheduler.evict_agent_kv → KVCacheManager.evict_blocks")
+            print("[OK]  api_server.py: /agent_kv_cache pin/offload routes added")
+            print("[INFO] vllm-ascend hook target: engine_client.pin/offload_agent_kv "
+                  "→ scheduler.pin/offload_agent_kv → KVCacheManager pin/evict")
             return
 
     print("[WARN] Could not find a stable API route anchor in api_server.py; "
@@ -1089,12 +1338,24 @@ def validate() -> None:
 
     hook_checks = [
         (ASYNC_LLM, "async def evict_agent_kv", "async_llm.py missing evict_agent_kv"),
+        (ASYNC_LLM, "async def offload_agent_kv", "async_llm.py missing offload_agent_kv"),
+        (ASYNC_LLM, "async def pin_agent_kv", "async_llm.py missing pin_agent_kv"),
         (CORE_CLIENT, "evict_agent_kv", "core_client.py missing evict_agent_kv forwarding"),
+        (CORE_CLIENT, "offload_agent_kv", "core_client.py missing offload_agent_kv forwarding"),
+        (CORE_CLIENT, "pin_agent_kv", "core_client.py missing pin_agent_kv forwarding"),
         (ENGINE_CORE, "def evict_agent_kv", "core.py missing evict_agent_kv"),
+        (ENGINE_CORE, "def offload_agent_kv", "core.py missing offload_agent_kv"),
+        (ENGINE_CORE, "def pin_agent_kv", "core.py missing pin_agent_kv"),
         (SCHEDULER, "def evict_agent_kv", "scheduler.py missing evict_agent_kv"),
+        (SCHEDULER, "def offload_agent_kv", "scheduler.py missing offload_agent_kv"),
+        (SCHEDULER, "def pin_agent_kv", "scheduler.py missing pin_agent_kv"),
         (SCHEDULER, "_agent_kv_request_to_agent", "scheduler.py missing ownership state"),
+        (SCHEDULER, "_agent_kv_pinned_blocks_by_agent", "scheduler.py missing pin state"),
         (KV_CACHE_MANAGER, "def evict_blocks", "kv_cache_manager.py missing evict_blocks"),
+        (KV_CACHE_MANAGER, "def pin_blocks", "kv_cache_manager.py missing pin_blocks"),
         (BLOCK_POOL, "def evict_blocks", "block_pool.py missing evict_blocks"),
+        (BLOCK_POOL, "def pin_blocks", "block_pool.py missing pin_blocks"),
+        (BLOCK_POOL, "_agent_kv_pinned_blocks", "block_pool.py missing pinned block state"),
     ]
     for path, needle, message in hook_checks:
         if path.exists() and needle not in path.read_text():
@@ -1113,10 +1374,14 @@ def validate() -> None:
         print(f"[OK]  serving_chat.py: kv_blocks_used injected into {kv_injected} response path(s)")
     if API_SERVER.exists():
         api_txt = API_SERVER.read_text()
-        if "/agent_kv_cache/evict" in api_txt:
-            print("[OK]  api_server.py: /agent_kv_cache/evict endpoint present")
+        if (
+            "/agent_kv_cache/evict" in api_txt
+            and "/agent_kv_cache/offload" in api_txt
+            and "/agent_kv_cache/pin" in api_txt
+        ):
+            print("[OK]  api_server.py: /agent_kv_cache pin/offload endpoints present")
         else:
-            print("[WARN] api_server.py: /agent_kv_cache/evict endpoint not present",
+            print("[WARN] api_server.py: /agent_kv_cache pin/offload endpoints not present",
                   file=sys.stderr)
     print("[OK]  Validation passed: all expected fields present")
 

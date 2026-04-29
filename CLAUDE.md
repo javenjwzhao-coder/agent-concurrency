@@ -178,8 +178,12 @@ w = C / min(s_t, s_prev)
 Policy order:
 
 1. If `w < 1`, admit no new fresh agents.
-2. If `C <= threshold_gb`, evict highest-scoring idle `tool_call` agents.
-3. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
+2. At tool-call start, predict remaining duration. Predicted-short calls
+   (`< short_tool_call_threshold_s`) are pinned in accelerator KV cache.
+   Predicted-long calls are immediately offloaded through the KV connector.
+3. If `C <= threshold_gb`, offload highest-scoring eligible long idle
+   `tool_call` agents. Pinned short calls are never offloaded by sidecar.
+4. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
 
 The waiting queue has two lanes: previously evicted agents first, then fresh
 agents FIFO.
@@ -226,14 +230,19 @@ sidecar:
   admission_control:
     enabled: true
     threshold_gb: 0.1
+    short_tool_call_threshold_s: 2.0
     predictor_model: null
+    pin_endpoint: null
+    offload_endpoint: null
     eviction_endpoint: null
     eviction_timeout_s: 2.0
 ```
 
 `predictor_model: null` defaults to `prediction.save_model` in the wrapper.
-`eviction_endpoint: null` defaults to
-`<sidecar.vllm_url>/agent_kv_cache/evict`.
+`pin_endpoint: null` defaults to `<sidecar.vllm_url>/agent_kv_cache/pin`.
+`offload_endpoint: null` defaults to
+`<sidecar.vllm_url>/agent_kv_cache/offload`. `eviction_endpoint` is kept as
+a backward-compatible alias for offload.
 
 ## Output Artifacts
 

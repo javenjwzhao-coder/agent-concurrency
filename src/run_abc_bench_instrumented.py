@@ -303,6 +303,7 @@ class AgentPhaseTracker:
                     start_dt=event_dt,
                     conversation_id=self._conversation_id,
                 )
+                live_snapshot = None
                 with _live_lock:
                     live = _LIVE_AGENTS.get(self.agent_id)
                     if live is not None:
@@ -327,6 +328,12 @@ class AgentPhaseTracker:
                                 )
                             ),
                         })
+                        live_snapshot = dict(live)
+
+                if self.admission_controller is not None:
+                    self.admission_controller.on_tool_call_start(
+                        self.agent_id, live_snapshot or {}
+                    )
 
                 # Human-readable event log (separate from the CSV).
                 self._log_action(event, pending.tool_args, event_dt)
@@ -1083,10 +1090,16 @@ def parse_args() -> argparse.Namespace:
                     help="Let the embedded sidecar admit queued agents dynamically.")
     sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=0.1,
                     help="Free KV-cache GB threshold that triggers pressure eviction.")
+    sc.add_argument("--sidecar-short-tool-call-threshold-s", type=float, default=2.0,
+                    help="Predicted tool calls below this duration are pinned.")
     sc.add_argument("--sidecar-admission-predictor-model", default=None,
                     help="Saved remaining-time predictor model for tool-call scoring.")
+    sc.add_argument("--sidecar-pin-endpoint", default=None,
+                    help="vLLM admin endpoint for per-agent KV pin/unpin.")
+    sc.add_argument("--sidecar-offload-endpoint", default=None,
+                    help="vLLM admin endpoint for per-agent KV CPU offload.")
     sc.add_argument("--sidecar-eviction-endpoint", default=None,
-                    help="vLLM admin endpoint for per-agent KV eviction.")
+                    help="Backward-compatible alias for --sidecar-offload-endpoint.")
     sc.add_argument("--sidecar-http-port", type=int, default=0,
                     help="Bind a live HTTP/SSE feed for the dashboard on this "
                          "port (0 disables).")
@@ -1150,11 +1163,19 @@ def main() -> int:
             _sc_admission_controller = _sidecar.DynamicAdmissionController(
                 enabled=True,
                 threshold_gb=args.sidecar_admission_threshold_gb,
-                eviction_endpoint=(
-                    args.sidecar_eviction_endpoint
-                    or _sidecar.default_eviction_endpoint(args.sidecar_vllm_url)
+                short_tool_call_threshold_s=args.sidecar_short_tool_call_threshold_s,
+                pin_endpoint=(
+                    args.sidecar_pin_endpoint
+                    or _sidecar.default_pin_endpoint(args.sidecar_vllm_url)
                 ),
+                offload_endpoint=(
+                    args.sidecar_offload_endpoint
+                    or args.sidecar_eviction_endpoint
+                    or _sidecar.default_offload_endpoint(args.sidecar_vllm_url)
+                ),
+                eviction_endpoint=args.sidecar_eviction_endpoint,
                 eviction_timeout_s=args.sidecar_eviction_timeout_s,
+                bytes_per_blk=_sc_bpb,
                 predictor_model=args.sidecar_admission_predictor_model,
                 state_update_callback=_update_live_agent,
             )

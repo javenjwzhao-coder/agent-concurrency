@@ -172,6 +172,206 @@ def test_pressure_eviction_pops_highest_score_idle_agent():
     assert report["evictions"][0]["e_s"] == 10.0
 
 
+def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
+    pin_calls: list[tuple[str, bool]] = []
+    offloaded: list[str] = []
+
+    def pin(agent_id, pin):
+        pin_calls.append((agent_id, pin))
+        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        predictor=FakePredictor({"short-agent": 1.0}),
+        pin_callback=pin,
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    policy = controller.on_tool_call_start(
+        "short-agent",
+        {
+            "agent_id": "short-agent",
+            "state": "tool_call",
+            "kv_blocks": 2,
+        },
+    )
+
+    assert policy["policy"] == "pinned_short"
+    assert pin_calls == [("short-agent", True)]
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "short-agent": {
+                "agent_id": "short-agent",
+                "state": "tool_call",
+                "kv_blocks": 2,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert offloaded == []
+    assert report["evictions"] == []
+    assert report["skipped_candidates"] == [
+        {"agent_id": "short-agent", "reason": "pinned_short"}
+    ]
+
+
+def test_long_tool_call_offloads_immediately_then_uses_readmit_flow():
+    state_updates: dict[str, dict] = {}
+    offloaded: list[str] = []
+    admitted: list[str] = []
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+
+    def update(agent_id, patch):
+        state_updates.setdefault(agent_id, {}).update(patch)
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        predictor=FakePredictor({"long-agent": 5.0}),
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+        offload_callback=offload,
+        state_update_callback=update,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    policy = controller.on_tool_call_start(
+        "long-agent",
+        {
+            "agent_id": "long-agent",
+            "state": "tool_call",
+            "kv_blocks": 3,
+        },
+    )
+
+    assert policy["policy"] == "offloaded_long"
+    assert offloaded == ["long-agent"]
+    assert controller.pending_counts()["evicted_pending_tool"] == 1
+    assert state_updates["long-agent"]["kv_evicted"] is True
+    assert state_updates["long-agent"]["admission_state"] == "evicted_pending_tool"
+
+    resumed: list[bool] = []
+    waiter = threading.Thread(
+        target=lambda: resumed.append(controller.wait_if_evicted("long-agent"))
+    )
+    waiter.start()
+    deadline = time.time() + 2
+    while controller.pending_counts()["evicted_ready"] == 0 and time.time() < deadline:
+        time.sleep(0.01)
+
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 5.0},
+        agents={},
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    waiter.join(timeout=2)
+    assert resumed == [True]
+    assert report["admissions"] == [
+        {"agent_id": "long-agent", "previously_evicted": True, "admitted": True}
+    ]
+    assert admitted == []
+
+
+def test_next_long_tool_call_unpins_previous_short_pin_before_offload():
+    pin_calls: list[tuple[str, bool]] = []
+    offloaded: list[str] = []
+    predictor = FakePredictor({"agent": 1.0})
+
+    def pin(agent_id, pin):
+        pin_calls.append((agent_id, pin))
+        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        predictor=predictor,
+        pin_callback=pin,
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    controller.on_tool_call_start(
+        "agent",
+        {"agent_id": "agent", "state": "tool_call", "kv_blocks": 1},
+    )
+    predictor.values["agent"] = 4.0
+    policy = controller.on_tool_call_start(
+        "agent",
+        {
+            "agent_id": "agent",
+            "state": "tool_call",
+            "kv_blocks": 1,
+            "kv_pinned": True,
+        },
+    )
+
+    assert policy["policy"] == "offloaded_long"
+    assert pin_calls == [("agent", True), ("agent", False)]
+    assert offloaded == ["agent"]
+
+
+def test_predictor_unavailable_skips_pin_and_offload_policy():
+    pin_calls: list[tuple[str, bool]] = []
+    offloaded: list[str] = []
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        pin_callback=lambda agent_id, pin: pin_calls.append((agent_id, pin)) or {},
+        offload_callback=lambda cand: offloaded.append(cand.agent_id) or {},
+    )
+
+    policy = controller.on_tool_call_start(
+        "agent-no-predictor",
+        {
+            "agent_id": "agent-no-predictor",
+            "state": "tool_call",
+            "kv_blocks": 1,
+        },
+    )
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent-no-predictor": {
+                "agent_id": "agent-no-predictor",
+                "state": "tool_call",
+                "kv_blocks": 1,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert policy["policy"] == "skipped"
+    assert policy["reason"] == "predictor_unavailable"
+    assert pin_calls == []
+    assert offloaded == []
+    assert report["evictions"] == []
+    assert report["skipped_candidates"] == [
+        {"agent_id": "agent-no-predictor", "reason": "predictor_unavailable"}
+    ]
+
+
 def test_evicted_ready_lane_admits_before_fresh_agents():
     admitted: list[str] = []
 

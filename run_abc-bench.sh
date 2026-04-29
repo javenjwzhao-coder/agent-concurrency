@@ -216,7 +216,10 @@ flat_keys = [
     ("SIDECAR_HTTP_HOST",        "sidecar.http_host"),
     ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
+    ("SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S", "sidecar.admission_control.short_tool_call_threshold_s"),
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
+    ("SIDECAR_PIN_ENDPOINT", "sidecar.admission_control.pin_endpoint"),
+    ("SIDECAR_OFFLOAD_ENDPOINT", "sidecar.admission_control.offload_endpoint"),
     ("SIDECAR_EVICTION_ENDPOINT", "sidecar.admission_control.eviction_endpoint"),
     ("SIDECAR_EVICTION_TIMEOUT_S", "sidecar.admission_control.eviction_timeout_s"),
 ]
@@ -350,10 +353,17 @@ build_runner_cmd() {
             cmd+=(
                 --sidecar-admission-control
                 --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+                --sidecar-short-tool-call-threshold-s "${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
                 --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
             )
             if [[ -n "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
                 cmd+=(--sidecar-admission-predictor-model "$SIDECAR_ADMISSION_PREDICTOR_MODEL")
+            fi
+            if [[ -n "${SIDECAR_PIN_ENDPOINT:-}" ]]; then
+                cmd+=(--sidecar-pin-endpoint "$SIDECAR_PIN_ENDPOINT")
+            fi
+            if [[ -n "${SIDECAR_OFFLOAD_ENDPOINT:-}" ]]; then
+                cmd+=(--sidecar-offload-endpoint "$SIDECAR_OFFLOAD_ENDPOINT")
             fi
             if [[ -n "${SIDECAR_EVICTION_ENDPOINT:-}" ]]; then
                 cmd+=(--sidecar-eviction-endpoint "$SIDECAR_EVICTION_ENDPOINT")
@@ -444,8 +454,10 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
     echo "    admission_control:  ${SIDECAR_ADMISSION_ENABLED:-false}"
     if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
         echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+        echo "    short_tool_call_s:  ${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"
-        echo "    eviction_endpoint:  ${SIDECAR_EVICTION_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/evict}"
+        echo "    pin_endpoint:       ${SIDECAR_PIN_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/pin}"
+        echo "    offload_endpoint:   ${SIDECAR_OFFLOAD_ENDPOINT:-${SIDECAR_EVICTION_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload}}"
         echo "    eviction_timeout_s: ${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
     fi
 fi

@@ -48,17 +48,21 @@ At each sidecar tick, the controller gathers:
 Policy:
 
 1. **Saturation guard**: if `w < 1`, admit no fresh agents this tick.
-2. **Pressure eviction**: if `C <= threshold_gb`, evict idle `tool_call`
-   agents by descending score:
+2. **Tool-call KV policy**: when a tool call starts, predict its remaining
+   duration. Calls below `short_tool_call_threshold_s` are pinned in accelerator
+   KV cache. Longer calls are immediately offloaded through the configured KV
+   connector and then re-admitted before their next LLM call.
+3. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
+   `tool_call` agents by descending score:
 
    ```
    eviction_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
    ```
 
-   Evicted agents continue their current tool call. After the tool returns,
+   Pinned short calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
-3. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.
+4. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.
    Previously evicted agents use a priority lane ahead of fresh agents.
 
 Admission control is opt-in. Without it, the sidecar remains monitor-only and
@@ -70,11 +74,13 @@ The vLLM patch provides two capabilities needed for the control loop:
 
 1. Telemetry: OpenAI responses include `kv_blocks_used` and
    `kv_blocks_size_gb` when the request carries `agent_id`.
-2. Control: `POST /agent_kv_cache/evict` routes to
-   `engine_client.evict_agent_kv(...) -> scheduler.evict_agent_kv(...)`.
+2. Control: `POST /agent_kv_cache/pin` pins/unpins agent-owned cached blocks,
+   `POST /agent_kv_cache/offload` offloads unpinned cached blocks, and
+   `POST /agent_kv_cache/evict` remains a backward-compatible alias.
 
 The scheduler hook tracks `agent_id -> request_id -> block_ids`, records cached
-blocks as requests finish, and evicts only cached blocks whose `ref_cnt == 0`
+blocks as requests finish, pins short-call blocks against normal cache
+pressure, and offloads only unpinned cached blocks whose `ref_cnt == 0`
 when requested by the sidecar. This is required because the sidecar's GB
 metrics are not enough to safely mutate vLLM's internal KV block pool.
 
@@ -158,8 +164,11 @@ sidecar:
   admission_control:
     enabled: true
     threshold_gb: 0.1
+    short_tool_call_threshold_s: 2.0
     predictor_model: null        # defaults to prediction.save_model
-    eviction_endpoint: null      # defaults to <sidecar.vllm_url>/agent_kv_cache/evict
+    pin_endpoint: null           # defaults to <sidecar.vllm_url>/agent_kv_cache/pin
+    offload_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/offload
+    eviction_endpoint: null      # backward-compatible alias for offload_endpoint
     eviction_timeout_s: 2.0
 ```
 
