@@ -176,7 +176,7 @@ sidecar:
     threshold_gb: 1
     # Before the first SAT, admit at most one fresh task per interval.
     # After the first SAT, normal sidecar capacity policy drains the queue.
-    initial_admit_interval_s: 2.0
+    initial_admit_interval_s: 1.0
     short_tool_call_threshold_s: 2.0
     # null → defaults to prediction.save_model in run_abc-bench.sh.
     predictor_model: null
