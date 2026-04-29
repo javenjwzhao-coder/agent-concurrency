@@ -187,9 +187,11 @@ Policy order:
    sidecar capacity math. READMITs bypass this launch ramp.
 3. At tool-call start, predict remaining duration. Predicted-short calls
    (`< short_tool_call_threshold_s`) are pinned in accelerator KV cache.
-   Predicted-long calls are immediately offloaded through the KV connector.
+   Predicted-long calls are pinned too, but remain eligible for pressure
+   offload through the heap.
 4. If `C <= threshold_gb`, offload highest-scoring eligible long idle
-   `tool_call` agents. Pinned short calls are never offloaded by sidecar.
+   `tool_call` agents. The sidecar unpins selected long agents immediately
+   before offload. Pinned short calls are never offloaded by sidecar.
 5. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
 
 The waiting queue has two lanes: previously evicted agents first, then fresh

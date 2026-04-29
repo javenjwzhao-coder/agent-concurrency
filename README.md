@@ -56,8 +56,8 @@ Policy:
    delayed by the ramp.
 3. **Tool-call KV policy**: when a tool call starts, predict its remaining
    duration. Calls below `short_tool_call_threshold_s` are pinned in accelerator
-   KV cache. Longer calls are immediately offloaded through the configured KV
-   connector and then re-admitted before their next LLM call.
+   KV cache and excluded from pressure offload. Longer calls are also pinned,
+   but remain eligible for the pressure heap.
 4. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
    `tool_call` agents by descending score:
 
@@ -65,7 +65,8 @@ Policy:
    eviction_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
    ```
 
-   Pinned short calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
+   Pinned short calls are excluded. Pinned long calls are unpinned only when
+   selected for offload. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
 5. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.

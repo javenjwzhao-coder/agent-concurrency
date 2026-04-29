@@ -325,6 +325,20 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
         "evicted-agent",
         {"agent_id": "evicted-agent", "state": "tool_call", "kv_blocks": 1},
     )
+    controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "evicted-agent": {
+                "agent_id": "evicted-agent",
+                "state": "tool_call",
+                "kv_blocks": 1,
+                "kv_policy": "pinned_long",
+                "kv_pinned": True,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
 
     resumed: list[bool] = []
     waiter = threading.Thread(
@@ -338,7 +352,7 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
     controller.enqueue_fresh(AgentLaunchSpec("fresh-agent"))
     controller._last_fresh_admit_monotonic = time.monotonic()
     report = controller.on_tick(
-        tick=1,
+        tick=2,
         vllm_info={"kv_free_gb": 10.0},
         agents=agents,
         bytes_per_blk=BYTES_PER_GB,
@@ -409,10 +423,15 @@ def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
     ]
 
 
-def test_long_tool_call_offloads_immediately_then_uses_readmit_flow():
+def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
     state_updates: dict[str, dict] = {}
+    pin_calls: list[tuple[str, bool]] = []
     offloaded: list[str] = []
     admitted: list[str] = []
+
+    def pin(agent_id, pin):
+        pin_calls.append((agent_id, pin))
+        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
 
     def offload(cand):
         offloaded.append(cand.agent_id)
@@ -427,6 +446,7 @@ def test_long_tool_call_offloads_immediately_then_uses_readmit_flow():
         short_tool_call_threshold_s=2.0,
         predictor=FakePredictor({"long-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),
+        pin_callback=pin,
         offload_callback=offload,
         state_update_callback=update,
         bytes_per_blk=BYTES_PER_GB,
@@ -441,8 +461,51 @@ def test_long_tool_call_offloads_immediately_then_uses_readmit_flow():
         },
     )
 
-    assert policy["policy"] == "offloaded_long"
+    assert policy["policy"] == "pinned_long"
+    assert pin_calls == [("long-agent", True)]
+    assert offloaded == []
+    assert controller.pending_counts()["pinned_long"] == 1
+    assert controller.pending_counts()["evicted_pending_tool"] == 0
+    assert state_updates["long-agent"]["kv_policy"] == "pinned_long"
+    assert state_updates["long-agent"]["admission_state"] == "admitted"
+
+    no_pressure = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 5.0},
+        agents={
+            "long-agent": {
+                "agent_id": "long-agent",
+                "state": "tool_call",
+                "kv_blocks": 3,
+                "kv_policy": "pinned_long",
+                "kv_pinned": True,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert no_pressure["evictions"] == []
+    assert offloaded == []
+
+    pressure = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "long-agent": {
+                "agent_id": "long-agent",
+                "state": "tool_call",
+                "kv_blocks": 3,
+                "kv_policy": "pinned_long",
+                "kv_pinned": True,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
     assert offloaded == ["long-agent"]
+    assert pin_calls == [("long-agent", True), ("long-agent", False)]
+    assert pressure["evictions"][0]["agent_id"] == "long-agent"
+    assert pressure["evictions"][0]["unpin_result"]["pinned"] is False
     assert controller.pending_counts()["evicted_pending_tool"] == 1
     assert state_updates["long-agent"]["kv_evicted"] is True
     assert state_updates["long-agent"]["admission_state"] == "evicted_pending_tool"
@@ -457,7 +520,7 @@ def test_long_tool_call_offloads_immediately_then_uses_readmit_flow():
         time.sleep(0.01)
 
     report = controller.on_tick(
-        tick=1,
+        tick=2,
         vllm_info={"kv_free_gb": 5.0},
         agents={},
         bytes_per_blk=BYTES_PER_GB,
@@ -471,7 +534,7 @@ def test_long_tool_call_offloads_immediately_then_uses_readmit_flow():
     assert admitted == []
 
 
-def test_next_long_tool_call_unpins_previous_short_pin_before_offload():
+def test_next_long_tool_call_reclassifies_short_pin_then_pressure_offloads():
     pin_calls: list[tuple[str, bool]] = []
     offloaded: list[str] = []
     predictor = FakePredictor({"agent": 1.0})
@@ -509,9 +572,77 @@ def test_next_long_tool_call_unpins_previous_short_pin_before_offload():
         },
     )
 
-    assert policy["policy"] == "offloaded_long"
-    assert pin_calls == [("agent", True), ("agent", False)]
+    assert policy["policy"] == "pinned_long"
+    assert pin_calls == [("agent", True), ("agent", True)]
+    assert offloaded == []
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 1,
+                "kv_policy": "pinned_long",
+                "kv_pinned": True,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["evictions"][0]["agent_id"] == "agent"
+    assert pin_calls == [("agent", True), ("agent", True), ("agent", False)]
     assert offloaded == ["agent"]
+
+
+def test_failed_long_pressure_offload_restores_pin():
+    pin_calls: list[tuple[str, bool]] = []
+    offloaded: list[str] = []
+
+    def pin(agent_id, pin):
+        pin_calls.append((agent_id, pin))
+        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": False, "offloaded": False, "reason": "busy"}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        predictor=FakePredictor({"agent": 5.0}),
+        pin_callback=pin,
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    controller.on_tool_call_start(
+        "agent",
+        {"agent_id": "agent", "state": "tool_call", "kv_blocks": 2},
+    )
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 2,
+                "kv_policy": "pinned_long",
+                "kv_pinned": True,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert offloaded == ["agent"]
+    assert pin_calls == [("agent", True), ("agent", False), ("agent", True)]
+    assert report["evictions"][0]["evicted"] is False
+    assert report["evictions"][0]["repin_result"]["pinned"] is True
+    assert controller.pending_counts()["pinned_long"] == 1
+    assert controller.pending_counts()["evicted_pending_tool"] == 0
 
 
 def test_predictor_unavailable_skips_pin_and_offload_policy():
