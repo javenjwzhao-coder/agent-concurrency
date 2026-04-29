@@ -125,13 +125,6 @@ button:hover {
   border: 1px solid #9a4c14;
 }
 
-/* Current-time line chip — matches .vis-current-time blue */
-.chip.now-line {
-  background: #1e3a5f;
-  color: #60a5fa;
-  border: 1px solid #2563eb;
-}
-
 /* Active-agent count badge */
 .active-count {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -141,6 +134,18 @@ button:hover {
   background: #0f2a1a;
   color: #4ade80;
   border: 1px solid #166534;
+  white-space: nowrap;
+}
+
+/* Waiting-queue badge */
+.waiting-queue {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: #1a1a2e;
+  color: #a78bfa;
+  border: 1px solid #4c1d95;
   white-space: nowrap;
 }
 
@@ -233,7 +238,7 @@ main {
  */
 
 .vis-custom-time {
-  cursor: crosshair !important;
+  pointer-events: none !important;  /* prevents vis.js drag; hover via container mousemove */
   width: 3px !important;
   opacity: 0.9;
   z-index: 10;
@@ -319,12 +324,8 @@ main {
   border-color: #1a2e4a;
 }
 
-/* Current-time hairline — bright blue */
-.vis-current-time {
-  background-color: #60a5fa;
-  opacity: 0.6;
-  width: 2px;
-}
+/* Current-time hairline — hidden (clutters the display) */
+.vis-current-time { display: none !important; }
 
 /* Agent row labels — larger, monospace, truncated to the fixed panel width */
 .vis-labelset .vis-label .vis-inner {

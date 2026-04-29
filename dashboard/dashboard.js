@@ -37,6 +37,7 @@
     eventCounter: 0,
     itemCounter: 0,
     customTimeIds: [],   // IDs added via addCustomTime on both charts
+    eventPoints: [],     // [{ts: epochMs, type, label, text}] for proximity tooltip
     tickHistory: [],     // [{ts: epoch_ms, count: active_agent_count}]
     latestTick: -1,
     latestTs: null,
@@ -152,6 +153,19 @@
       if (props.byUser) setPaused(true);
       updateActiveCount(props.end.getTime());
     });
+
+    setupProximityTooltips();
+  }
+
+  // ── waiting-queue badge ────────────────────────────────────────────────
+
+  function updateWaitingQueue(record) {
+    const el = $("#waitingQueue");
+    if (!el) return;
+    const queue = (record.admission || {}).queue || {};
+    const total = (queue.fresh || 0) + (queue.evicted_ready || 0);
+    el.textContent = `queue: ${total}`;
+    el.style.display = "";
   }
 
   // ── active-agent count badge ───────────────────────────────────────────
@@ -310,7 +324,9 @@
     ].join("\n");
   }
 
-  function addCustomTimeStyled(chart, container, chartSuffix, time, id, type, tooltipText) {
+  // pointer-events:none on .vis-custom-time prevents both dragging and hover.
+  // Tooltips are shown via container-level proximity detection (setupProximityTooltips).
+  function addCustomTimeStyled(chart, container, chartSuffix, time, id, type) {
     const fullId = id + "::" + chartSuffix;
     try {
       chart.addCustomTime(time, fullId);
@@ -320,14 +336,7 @@
     }
     const els = container.querySelectorAll(".vis-custom-time");
     const el = els[els.length - 1];
-    if (el) {
-      el.classList.add("ct-" + type);
-      // Block vis.js drag behaviour while still allowing hover events.
-      el.addEventListener("mousedown", (e) => e.stopPropagation(), true);
-      el.addEventListener("mouseenter", (e) => showTooltip(tooltipText, e.clientX, e.clientY));
-      el.addEventListener("mousemove",  (e) => moveTooltip(e.clientX, e.clientY));
-      el.addEventListener("mouseleave", hideTooltip);
-    }
+    if (el) el.classList.add("ct-" + type);
     return fullId;
   }
 
@@ -335,9 +344,48 @@
     const id = `evt::${++state.eventCounter}`;
     const start = new Date(ts);
     const fullText = label + "\n\n" + tooltipText;
-    const tlId = addCustomTimeStyled(state.timeline, $("#timeline"), "tl", start, id, type, fullText);
-    const kvId = addCustomTimeStyled(state.kvChart,  $("#kvChart"),  "kv", start, id, type, fullText);
+    const tlId = addCustomTimeStyled(state.timeline, $("#timeline"), "tl", start, id, type);
+    const kvId = addCustomTimeStyled(state.kvChart,  $("#kvChart"),  "kv", start, id, type);
     state.customTimeIds.push(tlId, kvId);
+    state.eventPoints.push({ ts: start.getTime(), type, label, text: fullText });
+  }
+
+  // ── proximity tooltip (fires from container mousemove) ─────────────────
+
+  function findEventAtPixel(clientX, container, chart) {
+    if (!state.eventPoints.length) return null;
+    const win = chart.getWindow();
+    const startMs = win.start.getTime();
+    const endMs   = win.end.getTime();
+    if (endMs <= startMs) return null;
+    const cRect = container.getBoundingClientRect();
+    const leftEl = container.querySelector(".vis-panel.vis-left");
+    const leftW  = leftEl ? leftEl.getBoundingClientRect().width : 220;
+    const chartW = cRect.width - leftW;
+    if (chartW <= 0) return null;
+    const THRESHOLD_PX = 7;
+    let best = null, bestDist = THRESHOLD_PX + 1;
+    for (const ep of state.eventPoints) {
+      const frac = (ep.ts - startMs) / (endMs - startMs);
+      const evClientX = cRect.left + leftW + frac * chartW;
+      const dist = Math.abs(clientX - evClientX);
+      if (dist < bestDist) { bestDist = dist; best = ep; }
+    }
+    return best;
+  }
+
+  function setupProximityTooltips() {
+    for (const [container, chart] of [
+      [$("#timeline"), state.timeline],
+      [$("#kvChart"),  state.kvChart],
+    ]) {
+      container.addEventListener("mousemove", (e) => {
+        const ev = findEventAtPixel(e.clientX, container, chart);
+        if (ev) showTooltip(ev.text, e.clientX, e.clientY);
+        else     hideTooltip();
+      });
+      container.addEventListener("mouseleave", hideTooltip);
+    }
   }
 
   // ── KV % line ──────────────────────────────────────────────────────────
@@ -365,6 +413,7 @@
     }
     applyEventsTick(record);
     applyKvTick(record);
+    updateWaitingQueue(record);
 
     // Track active-agent count for the badge.
     const activeCount = [...state.agents.values()]
@@ -452,8 +501,11 @@
     state.latestTs = null;
     state.replayBounds = null;
     state.tickHistory = [];
+    state.eventPoints = [];
     const ac = $("#activeCount");
     if (ac) ac.style.display = "none";
+    const wq = $("#waitingQueue");
+    if (wq) wq.style.display = "none";
   }
 
   async function loadReplayFile(file) {
