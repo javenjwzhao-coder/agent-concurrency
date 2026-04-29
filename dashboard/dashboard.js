@@ -162,9 +162,11 @@
   function updateWaitingQueue(record) {
     const el = $("#waitingQueue");
     if (!el) return;
-    const queue = (record.admission || {}).queue || {};
+    const adm = record.admission || {};
+    const queue = adm.queue || {};
     const total = (queue.fresh || 0) + (queue.evicted_ready || 0);
-    el.textContent = `queue: ${total}`;
+    const heapCount = (adm.heap_candidates || []).length;
+    el.textContent = `queue: ${total} | heap: ${heapCount}`;
     el.style.display = "";
   }
 
@@ -327,6 +329,7 @@
       `queue:  fresh=${fmt(adm.queue && adm.queue.fresh)} ` +
         `ready=${fmt(adm.queue && adm.queue.evicted_ready)} ` +
         `pending_tool=${fmt(adm.queue && adm.queue.evicted_pending_tool)}`,
+      `heap_candidates: ${(adm.heap_candidates || []).length}`,
     ].join("\n");
   }
 
