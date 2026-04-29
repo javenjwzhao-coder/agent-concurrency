@@ -1,4 +1,4 @@
-/* ── layout ───────────────────────────────────────────────────────────── */
+/* ── reset + base ──────────────────────────────────────────────────────── */
 
 * { box-sizing: border-box; }
 
@@ -6,83 +6,126 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
                "Helvetica Neue", Arial, sans-serif;
-  background: #0f1115;
-  color: #e6e8eb;
+  font-size: 14px;
+  background: #0b1120;
+  color: #e2e8f4;
 }
 
 body { display: flex; flex-direction: column; }
 
+/* ── header ─────────────────────────────────────────────────────────────── */
+
 header {
-  padding: 12px 16px 8px;
-  background: #15181f;
-  border-bottom: 1px solid #2a2f3a;
+  padding: 14px 20px 12px;
+  background: #111827;
+  border-top: 3px solid #3b82f6;
+  border-bottom: 1px solid #1e3352;
+  flex-shrink: 0;
 }
 
 header h1 {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 600;
+  margin: 0 0 10px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: #f0f6ff;
 }
+
+/* ── controls bar ────────────────────────────────────────────────────────── */
 
 .controls {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-  font-size: 12px;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  flex-wrap: wrap;
 }
 
-#pauseBtn {
-  background: #2a3140;
-  color: #e6e8eb;
-  border: 1px solid #3a4254;
-  border-radius: 4px;
-  padding: 4px 10px;
+button {
+  background: #1a2a45;
+  color: #c8d8f0;
+  border: 1px solid #2a3f63;
+  border-radius: 5px;
+  padding: 5px 13px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
 }
 
-#pauseBtn:hover { background: #34394a; }
-#pauseBtn.paused { background: #4a3a2a; border-color: #6a5234; }
+button:hover {
+  background: #243659;
+  border-color: #3d5f96;
+  color: #e8f0ff;
+}
+
+#pauseBtn.paused {
+  background: #3a1f08;
+  border-color: #7a4a14;
+  color: #fbbf24;
+}
+
+/* ── status badge ────────────────────────────────────────────────────────── */
 
 .status {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 2px 8px;
-  border-radius: 3px;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
-.status-pending { background: #4a4a2a; color: #ffe28a; }
-.status-live    { background: #1f4a2a; color: #9be8b4; }
-.status-error   { background: #4a1f24; color: #ff9aa2; }
+.status-pending { background: #2e2508; color: #fde68a; }
+.status-live    { background: #082e1a; color: #6ee7b7; }
+.status-error   { background: #2e0a10; color: #fca5a5; }
 
 #tickInfo {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #9aa3b2;
+  font-size: 12px;
+  color: #4a6080;
 }
+
+/* ── legend ──────────────────────────────────────────────────────────────── */
 
 .legend {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px 10px;
-  font-size: 11px;
+  gap: 5px 10px;
+  font-size: 12px;
 }
 
 .legend-title {
-  color: #9aa3b2;
-  margin-left: 4px;
+  color: #4a6080;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 6px;
 }
 
 .chip {
-  padding: 2px 8px;
-  border-radius: 3px;
+  padding: 3px 9px;
+  border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #f6f7f9;
+  font-size: 12px;
+  font-weight: 600;
+  color: #f0f4ff;
+  letter-spacing: 0.2px;
 }
+
+/* KV % chip — amber/gold, distinct from blue/green phase bars */
+.chip.kv-line {
+  background: #78340a;
+  color: #fde68a;
+  border: 1px solid #9a4c14;
+}
+
+/* ── main layout ─────────────────────────────────────────────────────────── */
 
 main {
   flex: 1;
@@ -92,42 +135,40 @@ main {
 }
 
 #kvChart {
-  flex: 0 0 140px;
-  border-bottom: 1px solid #2a2f3a;
-  background: #0f1115;
+  flex: 0 0 155px;
+  border-bottom: 1px solid #1a2e4a;
+  background: #0b1120;
 }
 
 #timeline {
   flex: 1;
   min-height: 0;
-  background: #0f1115;
+  background: #0b1120;
 }
 
-.chip.kv-line {
-  background: #4ec9ff;
-  color: #06222f;
-}
+/* ── KV % graph line (amber-gold) ────────────────────────────────────────── */
 
-.vis-graph-group0 .vis-line  { stroke: #4ec9ff !important; stroke-width: 1.5px; }
-.vis-graph-group0 .vis-fill  { fill: #4ec9ff; opacity: 0.18 !important; }
-.vis-graph-group0 .vis-point { fill: #4ec9ff; stroke: #4ec9ff; }
+.vis-graph-group0 .vis-line  { stroke: #f59e0b !important; stroke-width: 2px; }
+.vis-graph-group0 .vis-fill  { fill: #f59e0b; opacity: 0.10 !important; }
+.vis-graph-group0 .vis-point { fill: #f59e0b; stroke: #c47a07; }
 
 #kvChart .vis-y-axis .vis-label,
 #kvChart .vis-y-axis .vis-major,
 #kvChart .vis-y-axis .vis-minor {
-  color: #9aa3b2;
-  fill: #9aa3b2;
+  color: #4a6080;
+  fill: #4a6080;
+  font-size: 12px;
 }
 
-/* ── phase colours ────────────────────────────────────────────────────── */
+/* ── phase legend chips ──────────────────────────────────────────────────── */
 
-.phase-reasoning      { background: #2c5fd6; }
-.phase-tool_call      { background: #29a06a; }
-.phase-waiting        { background: #6a7280; }
-.phase-evicted_waiting{ background: #d68a2a; }
-.phase-done           { background: #3a4254; }
+.phase-reasoning       { background: #1d4ed8; }
+.phase-tool_call       { background: #15803d; }
+.phase-waiting         { background: #475569; }
+.phase-evicted_waiting { background: #c2410c; }
+.phase-done            { background: #1e293b; border: 1px solid #334155; }
 
-/* vis-timeline range items get the phase class via item.className */
+/* ── vis-timeline phase range items ─────────────────────────────────────── */
 
 .vis-item.phase-reasoning,
 .vis-item.phase-tool_call,
@@ -135,119 +176,134 @@ main {
 .vis-item.phase-evicted_waiting,
 .vis-item.phase-done {
   border: none;
-  color: #f6f7f9;
-  font-size: 11px;
+  color: #f0f6ff;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.vis-item.phase-reasoning      { background-color: #2c5fd6; border-color: #2c5fd6; }
-.vis-item.phase-tool_call      { background-color: #29a06a; border-color: #29a06a; }
-.vis-item.phase-waiting        { background-color: #6a7280; border-color: #6a7280; }
-.vis-item.phase-evicted_waiting{ background-color: #d68a2a; border-color: #d68a2a; }
-.vis-item.phase-done           { background-color: #3a4254; border-color: #3a4254; }
+.vis-item.phase-reasoning      { background-color: #1d4ed8; border-color: #1d4ed8; }
+.vis-item.phase-tool_call      { background-color: #15803d; border-color: #15803d; }
+.vis-item.phase-waiting        { background-color: #475569; border-color: #475569; }
+.vis-item.phase-evicted_waiting{ background-color: #c2410c; border-color: #c2410c; }
+.vis-item.phase-done           { background-color: #1e293b; border-color: #334155; }
 
 .vis-item.vis-selected {
-  box-shadow: 0 0 0 2px #f6f7f9 inset;
+  box-shadow: 0 0 0 2px #93c5fd inset;
 }
 
-/* ── event marker chips in the legend ─────────────────────────────────── */
+/* ── event marker chips in legend ────────────────────────────────────────── */
 
-.event-evict   { background: #c0392b; }
-.event-admit   { background: #2ecc71; color: #06210e; }
-.event-readmit { background: #9b59b6; }
-.event-sat     { background: #e1c044; color: #2a230a; }
+.event-evict   { background: #b91c1c; }
+.event-admit   { background: #166534; color: #d1fae5; }
+.event-readmit { background: #6d28d9; }
+.event-sat     { background: #a16207; color: #fef9c3; }
 
-/* ── event vertical lines (background items spanning all groups) ──────── */
+/* ── event vertical lines (background items) ─────────────────────────────── */
 
 .vis-item.event-line {
   border: none;
   opacity: 0.85;
 }
-.vis-item.event-line.event-evict   { background-color: #c0392b; }
-.vis-item.event-line.event-admit   { background-color: #2ecc71; }
-.vis-item.event-line.event-readmit { background-color: #9b59b6; }
+.vis-item.event-line.event-evict   { background-color: #ef4444; }
+.vis-item.event-line.event-admit   { background-color: #22c55e; }
+.vis-item.event-line.event-readmit { background-color: #a855f7; }
 .vis-item.event-line.event-sat {
   background: repeating-linear-gradient(
-    to bottom, #e1c044 0 6px, transparent 6px 12px
+    to bottom, #facc15 0 6px, transparent 6px 12px
   );
 }
 
-/* Background items default to no width when start==end+1ms; force a band. */
 .vis-item.vis-background.event-line { min-width: 2px; }
 
-/* ── event labels (box items in the dedicated 'events' group) ─────────── */
+/* ── event label box items (events row) ──────────────────────────────────── */
 
 .vis-item.event-marker {
   border: none;
-  font-size: 10px;
+  font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #f6f7f9;
-  padding: 1px 6px;
+  font-weight: 700;
+  color: #f0f6ff;
+  padding: 2px 7px;
+  border-radius: 3px;
 }
 
-.vis-item.event-marker.event-evict   { background-color: #c0392b; border-color: #c0392b; }
-.vis-item.event-marker.event-admit   { background-color: #2ecc71; border-color: #2ecc71; color: #06210e; }
-.vis-item.event-marker.event-readmit { background-color: #9b59b6; border-color: #9b59b6; }
-.vis-item.event-marker.event-sat     { background-color: #e1c044; border-color: #e1c044; color: #2a230a; }
+.vis-item.event-marker.event-evict   { background-color: #b91c1c; border-color: #b91c1c; }
+.vis-item.event-marker.event-admit   { background-color: #15803d; border-color: #15803d; }
+.vis-item.event-marker.event-readmit { background-color: #6d28d9; border-color: #6d28d9; }
+.vis-item.event-marker.event-sat     { background-color: #a16207; border-color: #a16207; color: #fef9c3; }
 
-/* The dedicated events group at the top of the timeline. */
 .vis-label.events-group .vis-inner {
-  color: #9aa3b2;
+  color: #4a6080;
   font-style: italic;
+  font-size: 12px;
 }
 
-/* ── tooltip ──────────────────────────────────────────────────────────── */
+/* ── tooltip ─────────────────────────────────────────────────────────────── */
 
 #tooltip {
   position: fixed;
   z-index: 9999;
-  background: #15181f;
-  border: 1px solid #3a4254;
-  border-radius: 4px;
-  padding: 8px 10px;
-  font-size: 11px;
+  background: #111827;
+  border: 1px solid #2a3f63;
+  border-radius: 6px;
+  padding: 10px 13px;
+  font-size: 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #e6e8eb;
-  max-width: 380px;
+  color: #e2e8f4;
+  max-width: 420px;
   pointer-events: none;
   display: none;
   white-space: pre;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
 }
 
-/* ── vis-timeline overrides for dark theme ────────────────────────────── */
+/* ── vis-timeline dark theme ─────────────────────────────────────────────── */
 
 .vis-timeline {
   border: none;
-  color: #e6e8eb;
+  color: #e2e8f4;
 }
 
 .vis-panel {
-  border-color: #2a2f3a !important;
-  background: #0f1115;
+  border-color: #1a2e4a !important;
+  background: #0b1120;
 }
 
 .vis-labelset .vis-label,
 .vis-foreground .vis-group {
-  border-color: #2a2f3a !important;
+  border-color: #152038 !important;
+}
+
+/* Alternating row tint for readability */
+.vis-foreground .vis-group:nth-child(odd) {
+  background: rgba(15, 27, 55, 0.5);
 }
 
 .vis-time-axis .vis-text {
-  color: #9aa3b2;
+  color: #4a6080;
+  font-size: 12px;
 }
 
 .vis-time-axis .vis-grid.vis-minor {
-  border-color: #1f242e;
+  border-color: #111e35;
 }
 
 .vis-time-axis .vis-grid.vis-major {
-  border-color: #2a2f3a;
+  border-color: #1a2e4a;
 }
 
+/* Current-time hairline — bright blue */
 .vis-current-time {
-  background-color: #f6f7f9;
+  background-color: #60a5fa;
+  opacity: 0.6;
+  width: 2px;
 }
 
+/* Agent row labels — larger, monospace */
 .vis-labelset .vis-label .vis-inner {
-  color: #c8d0db;
-  font-size: 11px;
+  color: #94b4d8;
+  font-size: 13px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 500;
+  padding: 0 8px;
 }
