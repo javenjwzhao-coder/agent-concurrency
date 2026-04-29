@@ -16,6 +16,7 @@ project-local venv's site-packages/vllm). Defaults to the shared venv path.
 import argparse
 import pathlib
 import re
+import shutil
 import sys
 import textwrap
 
@@ -1036,7 +1037,15 @@ def patch_agent_kv_eviction_api() -> None:
     ]
     for anchor in anchors:
         if anchor in txt:
-            txt = txt.replace(anchor, route + "\n" + anchor, 1)
+            # Detect how deeply the anchor is indented in the actual file so
+            # the inserted block lands at the same scope (avoids IndentationError
+            # when routes are defined inside a factory function).
+            idx = txt.index(anchor)
+            line_start = txt.rfind('\n', 0, idx) + 1
+            indent = txt[line_start:idx]  # whitespace before the anchor on its line
+            indented_route = textwrap.indent(route, indent) if indent else route
+            full_anchor = indent + anchor
+            txt = txt.replace(full_anchor, indented_route + "\n" + full_anchor, 1)
             API_SERVER.write_text(txt)
             print("[OK]  api_server.py: /agent_kv_cache/evict route added")
             print("[INFO] vllm-ascend hook target: engine_client.evict_agent_kv "
@@ -1112,7 +1121,31 @@ def validate() -> None:
     print("[OK]  Validation passed: all expected fields present")
 
 
+def _backup_or_restore(paths: list) -> None:
+    """
+    For each file in *paths*:
+    - If no .bak exists yet: copy the file to .bak (save the original).
+    - If a .bak already exists: restore it over the file so every run
+      starts from the unpatched original, making re-runs fully safe.
+    """
+    for p in paths:
+        if not p.exists():
+            continue
+        bak = p.with_suffix(p.suffix + ".bak")
+        if bak.exists():
+            shutil.copy2(bak, p)
+            print(f"[RESTORE] {p.name} ← {bak.name}")
+        else:
+            shutil.copy2(p, bak)
+            print(f"[BACKUP]  {p.name} → {bak.name}")
+
+
 if __name__ == "__main__":
+    _backup_or_restore([
+        PROTO, SERVING, API_SERVER,
+        ASYNC_LLM, CORE_CLIENT, ENGINE_CORE,
+        SCHEDULER, KV_CACHE_MANAGER, BLOCK_POOL,
+    ])
     print("=== Applying vLLM KV-block tracking patches ===")
     patch_protocol()
     patch_serving_chat()
