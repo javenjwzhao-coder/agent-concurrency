@@ -12,10 +12,13 @@ later starts. It installs the compatible local Ascend runtime stack
 (`torch==2.8.0`, `torch-npu==2.8.0.post2`, `triton-ascend==3.2.0`) before
 building `vllm-ascend` from the v0.13.0 source tree for
 `SOC_VERSION=ascend910_9391` by default, with the checkout cached under
-`.vllm-ascend-src/`. Runtime dependencies are installed under constraints that
-keep that Ascend stack pinned while filtering CUDA packages and vLLM's upstream
-torch pins. When investigating internals or applying patches, target the
-installed vllm-ascend/vLLM package and keep version-specific anchors in mind.
+`.vllm-ascend-src/`. It installs the CANN Python build dependencies (`sympy`,
+`numpy<2.0.0`, and related utilities) into `.venv` and exposes that
+site-packages path to the custom-op compiler during the source build. Runtime
+dependencies are installed under constraints that keep that Ascend stack pinned
+while filtering CUDA packages and vLLM's upstream torch pins. When
+investigating internals or applying patches, target the installed
+vllm-ascend/vLLM package and keep version-specific anchors in mind.
 
 ## Project Purpose
 

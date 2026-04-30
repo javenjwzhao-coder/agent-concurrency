@@ -105,11 +105,14 @@ The starter script installs `vllm==0.13.0` into the project `.venv` with
 `vllm-ascend` from the v0.13.0 source tree for `SOC_VERSION=ascend910_9391`
 by default. The source checkout is cached under `.vllm-ascend-src/`, and a
 `.venv/.vllm-ascend-soc-version` marker lets later starts reuse the A3 build.
-Override `VLLM_ASCEND_SOC_VERSION` if the target Ascend chip changes. Runtime
-dependencies advertised by the installed packages are then installed under
-constraints that keep the Ascend torch/Triton stack pinned while filtering CUDA
-packages and vLLM's upstream torch pins. The patcher keeps anchors compatible
-with nearby 0.11.x-0.13.x layouts where practical.
+Override `VLLM_ASCEND_SOC_VERSION` if the target Ascend chip changes. Before
+the source build, the script installs the CANN Python build dependencies
+(`sympy`, `numpy<2.0.0`, and related utilities) into `.venv` and exposes that
+site-packages path to the custom-op compiler. Runtime dependencies advertised
+by the installed packages are then installed under constraints that keep the
+Ascend torch/Triton/CANN stack pinned while filtering CUDA packages and vLLM's
+upstream torch pins. The patcher keeps anchors compatible with nearby
+0.11.x-0.13.x layouts where practical.
 
 ## Quick Start
 

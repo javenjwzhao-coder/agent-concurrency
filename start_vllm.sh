@@ -331,9 +331,14 @@ PY
               "$VLLM_ASCEND_SOURCE_DIR"
         fi
         git -C "$VLLM_ASCEND_SOURCE_DIR" submodule update --init --recursive
+        VLLM_ASCEND_BUILD_PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
         "$VENV/bin/python" -m pip install --upgrade \
+          attrs "numpy<2.0.0" decorator sympy cffi pyyaml pathlib2 psutil \
+          protobuf scipy requests absl-py typing_extensions \
           cmake ninja packaging pybind11 setuptools setuptools-scm wheel
         echo "[INFO] Building/installing vllm-ascend for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} ..."
+        PATH="$VENV/bin:$PATH" \
+        PYTHONPATH="$VLLM_ASCEND_BUILD_PYTHONPATH" \
         SOC_VERSION="$VLLM_ASCEND_SOC_VERSION" \
         "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps \
           "$VLLM_ASCEND_SOURCE_DIR"
@@ -352,6 +357,7 @@ torch-npu==${TORCH_NPU_VERSION}
 torchvision==${TORCHVISION_VERSION}
 torchaudio==${TORCHAUDIO_VERSION}
 triton-ascend==${TRITON_ASCEND_VERSION}
+numpy<2.0.0
 EOF
     VENV_RUNTIME_REQS="$VLLM_RUNTIME_REQS" "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
