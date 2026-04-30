@@ -259,15 +259,6 @@ if is_local(triton_dist_path):
     state.append(f"local standard triton={dist_version('triton')!r} at {triton_dist_path}")
     ready = False
 
-try:
-    has_triton_target_info = (
-        importlib.util.find_spec("triton.language.target_info") is not None)
-except ModuleNotFoundError:
-    has_triton_target_info = False
-if not has_triton_target_info:
-    state.append("triton.language.target_info missing")
-    ready = False
-
 if ready:
     print("[INFO] Reusing local Ascend runtime stack: " + ", ".join(state))
 else:
