@@ -14,11 +14,13 @@ building `vllm-ascend` from the v0.13.0 source tree for
 `SOC_VERSION=ascend910_9391` by default, with the checkout cached under
 `.vllm-ascend-src/`. It installs the CANN Python build dependencies (`sympy`,
 `numpy<2.0.0`, and related utilities) into `.venv` and exposes that
-site-packages path to the custom-op compiler during the source build. Runtime
-dependencies are installed under constraints that keep that Ascend stack pinned
-while filtering CUDA packages and vLLM's upstream torch pins. When
-investigating internals or applying patches, target the installed
-vllm-ascend/vLLM package and keep version-specific anchors in mind.
+site-packages path to the custom-op compiler during the source build. Custom-op
+compilation defaults to `MAX_JOBS=16`; override `VLLM_ASCEND_MAX_JOBS` if the
+build host needs a different cap. Runtime dependencies are installed under
+constraints that keep that Ascend stack pinned while filtering CUDA packages
+and vLLM's upstream torch pins. When investigating internals or applying
+patches, target the installed vllm-ascend/vLLM package and keep
+version-specific anchors in mind.
 
 ## Project Purpose
 

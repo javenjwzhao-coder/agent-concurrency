@@ -84,6 +84,7 @@ start_native() {
     TRITON_ASCEND_VERSION="${VLLM_ASCEND_TRITON_ASCEND_VERSION:-3.2.0}"
     VLLM_ASCEND_SOC_VERSION="${VLLM_ASCEND_SOC_VERSION:-ascend910_9391}"
     VLLM_ASCEND_GIT_REF="${VLLM_ASCEND_GIT_REF:-v${VLLM_ASCEND_VERSION}}"
+    VLLM_ASCEND_MAX_JOBS="${VLLM_ASCEND_MAX_JOBS:-16}"
     VLLM_ASCEND_SOURCE_DIR="${VLLM_ASCEND_SOURCE_DIR:-$REPO_DIR/.vllm-ascend-src/${VLLM_ASCEND_GIT_REF}-${VLLM_ASCEND_SOC_VERSION}}"
     VLLM_ASCEND_SOC_MARKER="$VENV/.vllm-ascend-soc-version"
 
@@ -332,11 +333,17 @@ PY
         fi
         git -C "$VLLM_ASCEND_SOURCE_DIR" submodule update --init --recursive
         VLLM_ASCEND_BUILD_PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
+        rm -rf \
+          "$VLLM_ASCEND_SOURCE_DIR"/build \
+          "$VLLM_ASCEND_SOURCE_DIR"/csrc/build \
+          "$VLLM_ASCEND_SOURCE_DIR"/vllm_ascend/_cann_ops_custom
         "$VENV/bin/python" -m pip install --upgrade \
           attrs "numpy<2.0.0" decorator sympy cffi pyyaml pathlib2 psutil \
           protobuf scipy requests absl-py typing_extensions \
           cmake ninja packaging pybind11 setuptools setuptools-scm wheel
-        echo "[INFO] Building/installing vllm-ascend for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} ..."
+        echo "[INFO] Building/installing vllm-ascend for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} (MAX_JOBS=${VLLM_ASCEND_MAX_JOBS}) ..."
+        CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS" \
+        MAX_JOBS="$VLLM_ASCEND_MAX_JOBS" \
         PATH="$VENV/bin:$PATH" \
         PYTHONPATH="$VLLM_ASCEND_BUILD_PYTHONPATH" \
         SOC_VERSION="$VLLM_ASCEND_SOC_VERSION" \

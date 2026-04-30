@@ -108,11 +108,13 @@ by default. The source checkout is cached under `.vllm-ascend-src/`, and a
 Override `VLLM_ASCEND_SOC_VERSION` if the target Ascend chip changes. Before
 the source build, the script installs the CANN Python build dependencies
 (`sympy`, `numpy<2.0.0`, and related utilities) into `.venv` and exposes that
-site-packages path to the custom-op compiler. Runtime dependencies advertised
-by the installed packages are then installed under constraints that keep the
-Ascend torch/Triton/CANN stack pinned while filtering CUDA packages and vLLM's
-upstream torch pins. The patcher keeps anchors compatible with nearby
-0.11.x-0.13.x layouts where practical.
+site-packages path to the custom-op compiler. Custom-op compilation defaults to
+`MAX_JOBS=16`; override `VLLM_ASCEND_MAX_JOBS` if the build host needs a
+different cap. Runtime dependencies advertised by the installed packages are
+then installed under constraints that keep the Ascend torch/Triton/CANN stack
+pinned while filtering CUDA packages and vLLM's upstream torch pins. The
+patcher keeps anchors compatible with nearby 0.11.x-0.13.x layouts where
+practical.
 
 ## Quick Start
 
