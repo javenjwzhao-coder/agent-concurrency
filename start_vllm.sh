@@ -105,6 +105,11 @@ start_native() {
     PYTHON_VER=$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     VENV_SITE="$VENV/lib/python${PYTHON_VER}/site-packages"
     VENV_VLLM="$VENV_SITE/vllm"
+    if [ "$VLLM_INSTALL_METHOD" = "source" ]; then
+        VLLM_PATCH_DIR="$VLLM_SOURCE_DIR/vllm"
+    else
+        VLLM_PATCH_DIR="$VENV_VLLM"
+    fi
     # Make all packages importable from the shared venv (torch, transformers,
     # torch_npu, etc.) by snapshotting the shared Python's full sys.path into a
     # .pth file. Python's site module appends .pth entries AFTER the project
@@ -613,22 +618,44 @@ PY
     unset -f check_local_vllm_ascend
 
     # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
-    echo "[INFO] Applying patches to project venv..."
+    echo "[INFO] Applying patches to vLLM package at $VLLM_PATCH_DIR ..."
     "$VENV/bin/python" "$REPO_DIR/src/vllm_patches/apply_patches.py" \
-        --vllm-dir "$VENV_VLLM"
+        --vllm-dir "$VLLM_PATCH_DIR"
 
     # ── 4. Verify the project venv imports the patched copy ──────────────────
     echo "[INFO] Verifying patched vLLM import path..."
+    VLLM_PATCH_DIR="$VLLM_PATCH_DIR" \
+    DESIRED_VLLM="$VLLM_VERSION" \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import pathlib
+
+import vllm
 import vllm.entrypoints.openai.protocol as protocol
 import vllm.entrypoints.openai.serving_chat as serving_chat
+
+target = pathlib.Path(__import__("os").environ["VLLM_PATCH_DIR"]).resolve()
+vllm_file = pathlib.Path(vllm.__file__).resolve()
+protocol_file = pathlib.Path(protocol.__file__).resolve()
+serving_chat_file = pathlib.Path(serving_chat.__file__).resolve()
+desired = __import__("os").environ["DESIRED_VLLM"]
+version = metadata.version("vllm")
+
+for path in (vllm_file, protocol_file, serving_chat_file):
+    if not path.is_relative_to(target):
+        raise AssertionError(f"Imported vLLM path {path} is not under patched target {target}")
+
+if not (version == desired or version.startswith(desired + "+") or version.startswith(desired + ".dev")):
+    raise AssertionError(f"Imported vLLM version {version!r} does not match target {desired!r}")
 
 assert "kv_blocks_used" in protocol.UsageInfo.model_fields
 assert "kv_blocks_size_gb" in protocol.UsageInfo.model_fields
 assert "agent_id" in protocol.ChatCompletionRequest.model_fields
 
-print(f"[INFO] protocol.py -> {protocol.__file__}")
-print(f"[INFO] serving_chat.py -> {serving_chat.__file__}")
+print(f"[INFO] vllm version -> {version}")
+print(f"[INFO] vllm package -> {vllm_file}")
+print(f"[INFO] protocol.py -> {protocol_file}")
+print(f"[INFO] serving_chat.py -> {serving_chat_file}")
 PY
 
     # ── 5. Skip if already running ────────────────────────────────────────────
