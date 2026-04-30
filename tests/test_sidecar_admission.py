@@ -82,8 +82,10 @@ def test_headroom_bootstrap_and_memoized_average():
 
     assert second["s_prev"] == 1.5
     assert second["w"] == 2.0
-    assert [a["agent_id"] for a in second["admissions"]] == ["fresh-b", "fresh-c"]
-    assert admitted == ["fresh-a", "fresh-b", "fresh-c"]
+    assert [a["agent_id"] for a in second["admissions"]] == ["fresh-b"]
+    assert "fresh_admit_tick_cap" in second["reasons"]
+    assert admitted == ["fresh-a", "fresh-b"]
+    assert controller.pending_counts()["fresh"] == 1
 
 
 def test_poll_vllm_reports_free_capacity_when_metric_is_derived():
@@ -135,8 +137,10 @@ def test_saturation_guard_blocks_admission_when_headroom_below_one():
     assert "headroom_low" in report["reasons"]
     assert "saturation_guard" in report["reasons"]
     assert "admission_blocked_by_headroom" in report["reasons"]
+    assert "admission_blocked_by_pressure" in report["reasons"]
     assert report["admissions"] == []
     assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
     assert report["first_saturation_seen"] is True
 
 
@@ -166,6 +170,39 @@ def test_low_headroom_without_runnable_queue_does_not_emit_saturation_guard():
     assert "admission_blocked_by_headroom" not in report["reasons"]
     assert report["queue"]["fresh"] == 0
     assert report["queue"]["evicted_ready"] == 0
+
+
+def test_pressure_threshold_alone_does_not_block_fresh_admission():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=3.2,
+        initial_admit_interval_s=0.0,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
+
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 3.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    controller.enqueue_fresh(AgentLaunchSpec("fresh"))
+
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 3.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["w"] == 3.0
+    assert [a["agent_id"] for a in report["admissions"]] == ["fresh"]
+    assert "pressure_threshold" in report["reasons"]
+    assert "admission_blocked_by_pressure" not in report["reasons"]
+    assert admitted == ["fresh"]
+    assert controller.pending_counts()["fresh"] == 0
 
 
 def test_pressure_eviction_pops_highest_score_idle_agent():
@@ -206,6 +243,7 @@ def test_pressure_eviction_pops_highest_score_idle_agent():
         bytes_per_blk=BYTES_PER_GB,
     )
 
+    assert report["pressure"] is True
     assert evicted == ["agent-a"]
     assert report["evictions"][0]["agent_id"] == "agent-a"
     assert report["evictions"][0]["e_s"] == 10.0
@@ -290,12 +328,43 @@ def test_first_sat_disables_initial_fresh_admit_ramp():
     assert sat["first_saturation_seen"] is True
     assert after_sat["first_saturation_seen"] is True
     assert "initial_admit_ramp_wait" not in after_sat["reasons"]
-    assert [a["agent_id"] for a in after_sat["admissions"]] == [
-        "fresh-0",
-        "fresh-1",
-        "fresh-2",
-    ]
+    assert [a["agent_id"] for a in after_sat["admissions"]] == ["fresh-0"]
+    assert "fresh_admit_tick_cap" in after_sat["reasons"]
+    assert admitted == ["fresh-0"]
+    assert controller.pending_counts()["fresh"] == 2
+
+
+def test_fresh_admit_tick_cap_can_be_tuned():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=0.0,
+        max_fresh_admits_per_tick=2,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    for idx in range(4):
+        controller.enqueue_fresh(AgentLaunchSpec(f"fresh-{idx}"))
+    agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
+
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert [a["agent_id"] for a in report["admissions"]] == ["fresh-1", "fresh-2"]
+    assert "fresh_admit_tick_cap" in report["reasons"]
     assert admitted == ["fresh-0", "fresh-1", "fresh-2"]
+    assert controller.pending_counts()["fresh"] == 1
 
 
 def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
@@ -523,6 +592,58 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
     assert admitted == []
 
 
+def test_pressure_offload_can_create_one_fresh_admission_slot():
+    admitted: list[str] = []
+    offloaded: list[str] = []
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=0.0,
+        predictor=FakePredictor({"idle-agent": 5.0}),
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 5.0},
+        agents={"running": {"state": "reasoning", "kv_blocks": 2}},
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    controller.enqueue_fresh(AgentLaunchSpec("fresh-after-offload"))
+    controller.on_tool_call_start(
+        "idle-agent",
+        {"agent_id": "idle-agent", "state": "tool_call", "kv_blocks": 3},
+    )
+
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "idle-agent": {
+                "agent_id": "idle-agent",
+                "state": "tool_call",
+                "kv_blocks": 3,
+                "kv_policy": "idle_long",
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert offloaded == ["idle-agent"]
+    assert report["w"] < 1.0
+    assert report["w_after_offload"] > 1.0
+    assert "saturation_guard" not in report["reasons"]
+    assert [a["agent_id"] for a in report["admissions"]] == ["fresh-after-offload"]
+    assert admitted == ["fresh-after-offload"]
+
+
 def test_next_long_tool_call_reclassifies_short_idle_then_pressure_offloads():
     offloaded: list[str] = []
     predictor = FakePredictor({"agent": 1.0})
@@ -611,6 +732,57 @@ def test_failed_long_pressure_offload_keeps_agent_admitted():
 
     assert offloaded == ["agent"]
     assert report["evictions"][0]["evicted"] is False
+    assert "offload_attempt_failed" in report["reasons"]
+    assert controller.pending_counts()["idle_long"] == 1
+    assert controller.pending_counts()["evicted_pending_tool"] == 0
+
+
+def test_failed_pressure_offload_gets_default_reason_without_eviction_state():
+    def offload(cand):
+        return {"evicted": False, "offloaded": False}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        predictor=FakePredictor({"agent": 5.0}),
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    controller.on_tool_call_start(
+        "agent",
+        {"agent_id": "agent", "state": "tool_call", "kv_blocks": 2},
+    )
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 2,
+                "kv_policy": "idle_long",
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["pressure"] is True
+    assert report["evictions"] == [
+        {
+            "agent_id": "agent",
+            "e_s": 10.0,
+            "kv_gb": 2.0,
+            "predicted_remaining_s": 5.0,
+            "tool_elapsed_s": None,
+            "policy_reason": "eligible_for_pressure_offload",
+            "evicted": False,
+            "offloaded": False,
+            "reason": "offload_rejected_without_reason",
+        }
+    ]
+    assert "offload_attempt_failed" in report["reasons"]
     assert controller.pending_counts()["idle_long"] == 1
     assert controller.pending_counts()["evicted_pending_tool"] == 0
 

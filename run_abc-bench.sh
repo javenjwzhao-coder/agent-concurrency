@@ -191,7 +191,6 @@ flat_keys = [
     ("MIN_WAVE_DELAY_S",       "launch.min_wave_delay_s"),
     ("MAX_WAVE_DELAY_S",       "launch.max_wave_delay_s"),
     ("LAUNCH_SEED",            "launch.seed"),
-    ("MAX_CONCURRENT",         "launch.max_concurrent"),
     ("TESTING_ENABLED",        "testing.enabled"),
     ("TEST_TIMEOUT_SEC",       "testing.timeout_sec"),
     ("PREDICTION_ENABLED",     "prediction.enabled"),
@@ -217,6 +216,7 @@ flat_keys = [
     ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
     ("SIDECAR_INITIAL_ADMIT_INTERVAL_S", "sidecar.admission_control.initial_admit_interval_s"),
+    ("SIDECAR_MAX_FRESH_ADMITS_PER_TICK", "sidecar.admission_control.max_fresh_admits_per_tick"),
     ("SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S", "sidecar.admission_control.short_tool_call_threshold_s"),
     ("SIDECAR_FALLBACK_LONG_TOOL_CALL_S", "sidecar.admission_control.fallback_long_tool_call_s"),
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
@@ -322,7 +322,6 @@ build_runner_cmd() {
         --base-url      "$LLM_BASE_URL"
         --api-key       "$LLM_API_KEY"
         --max-iterations "${MAX_ITERATIONS:-80}"
-        --max-concurrent "${MAX_CONCURRENT:-8}"
     )
 
     if [[ "${LAUNCH_RANDOMISE:-false}" == "true" ]]; then
@@ -368,6 +367,7 @@ build_runner_cmd() {
                 --sidecar-admission-control
                 --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
                 --sidecar-initial-admit-interval-s "${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
+                --sidecar-max-fresh-admits-per-tick "${SIDECAR_MAX_FRESH_ADMITS_PER_TICK:-1}"
                 --sidecar-short-tool-call-threshold-s "${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
                 --sidecar-fallback-long-tool-call-s "${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
                 --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
@@ -439,7 +439,6 @@ echo "    max_iterations:     ${MAX_ITERATIONS:-80}"
 echo ""
 echo -e "  ${CYAN}Launch${RESET}"
 echo "    randomise:          ${LAUNCH_RANDOMISE:-false}"
-echo "    max_concurrent:     ${MAX_CONCURRENT:-8}"
 if [[ "${LAUNCH_RANDOMISE:-false}" == "true" ]]; then
     echo "    max_agents_per_wave: ${MAX_AGENTS_PER_WAVE:-4}"
     echo "    min_wave_delay_s:   ${MIN_WAVE_DELAY_S:-2.0}"
@@ -473,6 +472,7 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
     if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
         echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
         echo "    initial_admit_s:    ${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
+        echo "    fresh_admits/tick:  ${SIDECAR_MAX_FRESH_ADMITS_PER_TICK:-1}"
         echo "    short_tool_call_s:  ${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
         echo "    fallback_long_s:    ${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"

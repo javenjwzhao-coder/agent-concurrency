@@ -203,6 +203,8 @@
   //   done      — finished agents
   //   launched  — total agents the sidecar has ever seen (cumulative)
   //   heap      — admission.heap_candidates length (eligible to offload)
+  //   C, threshold, pressure — free KV GB, configured offload threshold,
+  //                            and whether the controller is in pressure
   //   queue     — fresh + evicted_ready waiting to be admitted
 
   function snapshotCounts(record) {
@@ -222,11 +224,18 @@
     }
     const adm = record.admission || {};
     const q = adm.queue || {};
+    const C = finiteNumber(adm.C);
+    const threshold = finiteNumber(adm.threshold_gb);
+    const pressure = adm.pressure === true
+      || (C !== null && threshold !== null && C <= threshold);
     return {
       live: reasoning + tool_call + waiting,
       reasoning, tool_call, waiting, offloaded, done, launched,
       queue: (q.fresh || 0) + (q.evicted_ready || 0),
       heap: (adm.heap_candidates || []).length,
+      C,
+      threshold,
+      pressure,
     };
   }
 
@@ -262,6 +271,12 @@
       "agents whose KV is currently offloaded to CPU (evicted_waiting)");
     setBadge("heapCount", `heap: ${s.heap}`,
       "agents currently in the offload heap (eligible to be offloaded)");
+    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / T: ${fmtGb(s.threshold)}`,
+      "free KV GB / pressure threshold GB\ncontroller offloads only when C <= threshold");
+    const pressureEl = $("#pressureBadge");
+    if (pressureEl) {
+      pressureEl.classList.toggle("badge-pressure-active", s.pressure);
+    }
     setBadge("queueCount", `queue: ${s.queue}`,
       "fresh + evicted_ready agents waiting to be admitted");
     setBadge("doneCount", `done: ${s.done} / ${s.launched}`,
@@ -371,14 +386,28 @@
     const tooltipBase = baseTooltip(record);
 
     for (const ev of (adm.evictions || [])) {
-      if (!ev.evicted) continue;
-      addEvent(ts, "offload", `OFFLOAD: ${ev.agent_id}`,
-        `agent: ${ev.agent_id}\n` +
-        `freed_gb: ${fmt(ev.freed_gb)}\n` +
-        `e_s:      ${fmt(ev.e_s)}\n` +
-        `kv_gb:    ${fmt(ev.kv_gb)}\n` +
-        `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
-        tooltipBase);
+      const evicted = ev.evicted === true
+        || (ev.evicted === undefined && ev.offloaded === true);
+      if (evicted) {
+        addEvent(ts, "offload", `OFFLOAD: ${ev.agent_id}`,
+          `agent: ${ev.agent_id}\n` +
+          `freed_gb: ${fmt(ev.freed_gb)}\n` +
+          `e_s:      ${fmt(ev.e_s)}\n` +
+          `kv_gb:    ${fmt(ev.kv_gb)}\n` +
+          `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
+          tooltipBase);
+      } else {
+        addEvent(ts, "offload-fail", `OFFLOAD_FAIL: ${ev.agent_id}`,
+          `agent: ${ev.agent_id}\n` +
+          `status_code: ${fmt(ev.status_code)}\n` +
+          `reason: ${fmt(ev.reason)}\n` +
+          `offloaded: ${fmt(ev.offloaded)}\n` +
+          `freed_gb: ${fmt(ev.freed_gb)}\n` +
+          `kv_gb: ${fmt(ev.kv_gb)}\n` +
+          `C: ${fmt(adm.C)}\n` +
+          `threshold_gb: ${fmt(adm.threshold_gb)}`,
+          tooltipBase);
+      }
     }
     for (const ad of (adm.admissions || [])) {
       if (!ad.admitted) continue;
@@ -404,6 +433,8 @@
       `ts:     ${record.ts}`,
       `tick:   ${record.tick}`,
       `C:      ${fmt(adm.C)}`,
+      `threshold_gb: ${fmt(adm.threshold_gb)}`,
+      `pressure: ${pressureLabel(adm)}`,
       `s_t:    ${fmt(adm.s_t)}`,
       `s_prev: ${fmt(adm.s_prev)}`,
       `w:      ${fmt(adm.w)}`,
@@ -651,7 +682,7 @@
     state.replayBounds = null;
     state.tickHistory = [];
     state.eventPoints = [];
-    for (const id of ["liveCount", "offloadedCount", "heapCount", "queueCount", "doneCount"]) {
+    for (const id of ["liveCount", "offloadedCount", "heapCount", "pressureBadge", "queueCount", "doneCount"]) {
       const el = $("#" + id);
       if (el) el.style.display = "none";
     }
@@ -728,6 +759,18 @@
     if (v === null || v === undefined) return "null";
     if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(4);
     return String(v);
+  }
+
+  function fmtGb(v) {
+    return v === null || v === undefined ? "n/a" : Number(v).toFixed(2);
+  }
+
+  function pressureLabel(adm) {
+    if (adm && adm.pressure === true) return "yes";
+    const C = finiteNumber(adm && adm.C);
+    const threshold = finiteNumber(adm && adm.threshold_gb);
+    if (C === null || threshold === null) return "unknown";
+    return C <= threshold ? "yes" : "no";
   }
 
   function formatHMS(d) {

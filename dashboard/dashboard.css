@@ -141,11 +141,13 @@ button:hover {
   border: 1px solid transparent;
 }
 
-.badge-live      { background: #0f2a1a; color: #4ade80; border-color: #166534; }
-.badge-offloaded { background: #2e1a08; color: #fbbf24; border-color: #78340a; }
-.badge-heap      { background: #2a2008; color: #fde047; border-color: #78581a; }
-.badge-queue     { background: #1a1a2e; color: #a78bfa; border-color: #4c1d95; }
-.badge-done      { background: #1a1f2e; color: #94a3b8; border-color: #334155; }
+.badge-live             { background: #0f2a1a; color: #4ade80; border-color: #166534; }
+.badge-offloaded        { background: #2e1a08; color: #fbbf24; border-color: #78340a; }
+.badge-heap             { background: #2a2008; color: #fde047; border-color: #78581a; }
+.badge-pressure         { background: #162033; color: #93c5fd; border-color: #31547d; }
+.badge-pressure-active  { background: #3a0612; color: #fecdd3; border-color: #e11d48; }
+.badge-queue            { background: #1a1a2e; color: #a78bfa; border-color: #4c1d95; }
+.badge-done             { background: #1a1f2e; color: #94a3b8; border-color: #334155; }
 
 /* ── main layout ─────────────────────────────────────────────────────────── */
 
@@ -255,10 +257,11 @@ main {
 /* ── event marker chips in legend ────────────────────────────────────────── */
 /* Colors match the vertical event lines exactly */
 
-.event-offload { background: #f87171; color: #1a0000; }
-.event-admit   { background: #4ade80; color: #001a0a; }
-.event-readmit { background: #c084fc; color: #1a0033; }
-.event-sat     { background: #fde047; color: #3a2e00; }
+.event-offload      { background: #f87171; color: #1a0000; }
+.event-offload-fail { background: #fb7185; color: #1a0006; border: 1px dashed #fecdd3; }
+.event-admit        { background: #4ade80; color: #001a0a; }
+.event-readmit      { background: #c084fc; color: #1a0033; }
+.event-sat          { background: #fde047; color: #3a2e00; }
 
 /* ── custom-time event lines (continuous across kvChart + timeline) ──────── */
 /*
@@ -278,6 +281,11 @@ main {
 .vis-custom-time .vis-custom-time-marker { display: none !important; }
 
 .vis-custom-time.ct-offload { background-color: #f87171 !important; }   /* bright red    */
+.vis-custom-time.ct-offload-fail {
+  background: repeating-linear-gradient(
+    to bottom, #fb7185 0 5px, transparent 5px 10px
+  ) !important;                                                          /* dashed rose   */
+}
 .vis-custom-time.ct-admit   { background-color: #4ade80 !important; }   /* bright green  */
 .vis-custom-time.ct-readmit { background-color: #c084fc !important; }   /* bright purple */
 .vis-custom-time.ct-sat {

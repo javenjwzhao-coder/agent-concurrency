@@ -857,7 +857,8 @@ def launch_agents(
         return launch_agents_with_admission_control(waves, args, admission_controller)
 
     all_summaries: list[dict[str, Any]] = []
-    executor = ThreadPoolExecutor(max_workers=args.max_concurrent or 8)
+    executor_capacity = planned_agent_count(waves)
+    executor = ThreadPoolExecutor(max_workers=executor_capacity)
     futures = []
     wave_start = time.monotonic()
     global_idx = 0  # unique across all agents in all waves
@@ -913,11 +914,16 @@ def launch_agents_with_admission_control(
     import sidecar as _sidecar
 
     all_summaries: list[dict[str, Any]] = []
-    executor = ThreadPoolExecutor(max_workers=args.max_concurrent or 8)
+    total_agents = planned_agent_count(waves)
+    executor = ThreadPoolExecutor(max_workers=total_agents)
     futures = []
     futures_lock = threading.Lock()
     global_idx = 0
-    total_agents = sum(len(batch) for _, batch in waves)
+    log.info(
+        "[admission] sidecar-gated launches enabled "
+        "(executor_capacity=%d; fresh launch cadence is sidecar-controlled)",
+        total_agents,
+    )
 
     def _submit_admitted(spec: _sidecar.AgentLaunchSpec):
         payload = spec.payload
@@ -995,6 +1001,10 @@ def launch_agents_with_admission_control(
     return all_summaries
 
 
+def planned_agent_count(waves: list[tuple[float, list[Path]]]) -> int:
+    return max(1, sum(len(batch) for _, batch in waves))
+
+
 def _agent_thread(
     agent_id: str,
     task_dir: Path,
@@ -1060,8 +1070,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-wave-delay-s", type=float, default=15.0)
     p.add_argument("--launch-seed", type=int, default=None,
                    help="RNG seed for reproducible launch schedules.")
-    p.add_argument("--max-concurrent", type=int, default=8,
-                   help="Thread pool size for concurrent agents.")
 
     # ── embedded sidecar (optional) ──────────────────────────────────────────
     # Set --sidecar-log-file to enable.  The sidecar runs as a daemon thread
@@ -1087,6 +1095,8 @@ def parse_args() -> argparse.Namespace:
                     help="Free KV-cache GB threshold that triggers pressure eviction.")
     sc.add_argument("--sidecar-initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
+    sc.add_argument("--sidecar-max-fresh-admits-per-tick", type=int, default=1,
+                    help="Maximum fresh queued agents the sidecar may launch per poll tick.")
     sc.add_argument("--sidecar-short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration stay resident.")
     sc.add_argument("--sidecar-fallback-long-tool-call-s", type=float, default=30.0,
@@ -1164,6 +1174,7 @@ def main() -> int:
                 enabled=True,
                 threshold_gb=args.sidecar_admission_threshold_gb,
                 initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
+                max_fresh_admits_per_tick=args.sidecar_max_fresh_admits_per_tick,
                 short_tool_call_threshold_s=args.sidecar_short_tool_call_threshold_s,
                 fallback_long_tool_call_s=args.sidecar_fallback_long_tool_call_s,
                 offload_endpoint=(

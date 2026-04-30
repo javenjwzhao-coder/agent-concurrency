@@ -339,6 +339,7 @@ class DynamicAdmissionController:
         enabled: bool = False,
         threshold_gb: float = 0.1,
         initial_admit_interval_s: float = 2.0,
+        max_fresh_admits_per_tick: int = 1,
         short_tool_call_threshold_s: float = 2.0,
         fallback_long_tool_call_s: float = 30.0,
         offload_endpoint: Optional[str] = None,
@@ -358,6 +359,7 @@ class DynamicAdmissionController:
         self.enabled = bool(enabled)
         self.threshold_gb = max(0.0, float(threshold_gb))
         self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
+        self.max_fresh_admits_per_tick = max(1, int(max_fresh_admits_per_tick))
         self.short_tool_call_threshold_s = max(0.0, float(short_tool_call_threshold_s))
         self.fallback_long_tool_call_s = max(0.0, float(fallback_long_tool_call_s))
         self.offload_endpoint = str(offload_endpoint or eviction_endpoint or "")
@@ -581,9 +583,14 @@ class DynamicAdmissionController:
                 "active_agent_samples": avg_count,
                 "w": self._round(w),
                 "threshold_gb": self.threshold_gb,
+                "pressure": (
+                    free_gb is not None
+                    and free_gb <= self.threshold_gb
+                ),
                 "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
                 "first_saturation_seen": self._first_saturation_seen,
                 "initial_admit_interval_s": self.initial_admit_interval_s,
+                "max_fresh_admits_per_tick": self.max_fresh_admits_per_tick,
                 "next_initial_admit_in_s": None,
                 "queue": self.pending_counts(),
                 "heap_candidates": [],
@@ -625,10 +632,6 @@ class DynamicAdmissionController:
 
             if w is not None and w < 1.0:
                 report["reasons"].append("headroom_low")
-                if runnable_queue > 0:
-                    report["reasons"].append("saturation_guard")
-                    self._first_saturation_seen = True
-                    report["first_saturation_seen"] = True
 
             current_free_gb = free_gb
             while current_free_gb <= self.threshold_gb and heap:
@@ -641,15 +644,28 @@ class DynamicAdmissionController:
                         freed_gb = cand.kv_gb
                     current_free_gb += max(0.0, freed_gb)
                     self._mark_agent_evicted_locked(cand.agent_id, evict_result)
+                elif "offload_attempt_failed" not in report["reasons"]:
+                    report["reasons"].append("offload_attempt_failed")
 
             if current_free_gb <= self.threshold_gb:
                 report["reasons"].append("pressure_threshold")
 
-            admit_limit = self._admission_limit(current_free_gb, w)
-            if admit_limit <= 0 and w is not None and w < 1.0 and runnable_queue > 0:
+            effective_w = self._headroom(current_free_gb, avg_gb, prev_avg_gb)
+            if effective_w != w:
+                report["w_after_offload"] = self._round(effective_w)
+
+            admit_limit = self._admission_limit(effective_w)
+            if (
+                admit_limit <= 0
+                and effective_w is not None
+                and effective_w < 1.0
+                and runnable_queue > 0
+            ):
+                report["reasons"].append("saturation_guard")
                 report["reasons"].append("admission_blocked_by_headroom")
-            elif admit_limit <= 0 and current_free_gb <= self.threshold_gb and runnable_queue > 0:
                 report["reasons"].append("admission_blocked_by_pressure")
+                self._first_saturation_seen = True
+                report["first_saturation_seen"] = True
 
             if admit_limit > 0:
                 self._admit_with_limit_locked(admit_limit, report)
@@ -942,7 +958,11 @@ class DynamicAdmissionController:
                 evicted = True
             if evicted:
                 self._idle_long.discard(cand.agent_id)
-            return {**result, **payload, "evicted": evicted}
+            merged = {**result, **payload, "evicted": evicted}
+            merged.setdefault("offloaded", evicted)
+            if not evicted and not merged.get("reason"):
+                merged["reason"] = "offload_rejected_without_reason"
+            return merged
         except Exception as exc:
             return {**result, "evicted": False, "offloaded": False, "reason": str(exc)}
 
@@ -999,9 +1019,7 @@ class DynamicAdmissionController:
             },
         )
 
-    def _admission_limit(self, free_gb: float, w: Optional[float]) -> int:
-        if free_gb <= self.threshold_gb:
-            return 0
+    def _admission_limit(self, w: Optional[float]) -> int:
         if w is None:
             return 1
         if w < 1.0:
@@ -1027,6 +1045,10 @@ class DynamicAdmissionController:
             return
 
         fresh_limit = remaining
+        fresh_limit = min(fresh_limit, self.max_fresh_admits_per_tick)
+        if len(self._fresh) > fresh_limit:
+            report["reasons"].append("fresh_admit_tick_cap")
+
         if not self._first_saturation_seen and self.initial_admit_interval_s > 0:
             now_mono = time.monotonic()
             next_in = self._next_initial_admit_in_s_locked(now_mono)
@@ -1287,6 +1309,8 @@ def parse_args() -> argparse.Namespace:
                     help="Free KV-cache GB threshold that triggers pressure eviction.")
     ac.add_argument("--initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
+    ac.add_argument("--max-fresh-admits-per-tick", type=int, default=1,
+                    help="Maximum fresh queued agents the sidecar may launch per poll tick.")
     ac.add_argument("--short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration stay resident.")
     ac.add_argument("--fallback-long-tool-call-s", type=float, default=30.0,
@@ -1332,6 +1356,7 @@ def main() -> int:
             enabled=True,
             threshold_gb=args.admission_threshold_gb,
             initial_admit_interval_s=args.initial_admit_interval_s,
+            max_fresh_admits_per_tick=args.max_fresh_admits_per_tick,
             short_tool_call_threshold_s=args.short_tool_call_threshold_s,
             fallback_long_tool_call_s=args.fallback_long_tool_call_s,
             offload_endpoint=(

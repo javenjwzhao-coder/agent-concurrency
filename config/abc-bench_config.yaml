@@ -17,9 +17,6 @@ paths:
   workspace_root: "/root/jwzhao/abc_runs"
   results_root: "/root/jwzhao/abc_results"
 
-launch:
-  max_concurrent: 50
-
 testing:
   enabled: true
 
@@ -46,4 +43,5 @@ sidecar:
     enabled: true
     threshold_gb: 3.2
     initial_admit_interval_s: 1.0
+    max_fresh_admits_per_tick: 1
     fallback_long_tool_call_s: 5.0
