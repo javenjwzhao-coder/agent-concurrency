@@ -282,6 +282,13 @@ PY
     fi
 
     VLLM_RUNTIME_REQS="$VENV/vllm-runtime-deps.txt"
+    VLLM_CONSTRAINTS="$VENV/vllm-ascend-constraints.txt"
+    cat > "$VLLM_CONSTRAINTS" <<EOF
+torch==${TORCH_VERSION}
+torch-npu==${TORCH_NPU_VERSION}
+torchvision==${TORCHVISION_VERSION}
+torchaudio==${TORCHAUDIO_VERSION}
+EOF
     VENV_RUNTIME_REQS="$VLLM_RUNTIME_REQS" "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import os
@@ -355,12 +362,14 @@ path.write_text("\n".join(requirements) + ("\n" if requirements else ""))
 print(f"[INFO] Prepared {len(requirements)} vLLM runtime dependency requirement(s)")
 PY
     if [ -s "$VLLM_RUNTIME_REQS" ]; then
-        echo "[INFO] Installing vLLM runtime deps from wheel metadata (excluding Ascend torch stack) ..."
+        echo "[INFO] Installing vLLM runtime deps from wheel metadata with Ascend torch constraints ..."
         if command -v uv >/dev/null 2>&1; then
-            uv pip install --python "$VENV/bin/python" --upgrade --no-deps \
+            uv pip install --python "$VENV/bin/python" --upgrade \
+              -c "$VLLM_CONSTRAINTS" \
               -r "$VLLM_RUNTIME_REQS"
         else
-            "$VENV/bin/python" -m pip install --upgrade --no-deps \
+            "$VENV/bin/python" -m pip install --upgrade \
+              -c "$VLLM_CONSTRAINTS" \
               -r "$VLLM_RUNTIME_REQS"
         fi
     fi

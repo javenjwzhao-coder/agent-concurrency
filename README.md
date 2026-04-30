@@ -102,9 +102,10 @@ The project targets vllm-ascend with vLLM 0.13.0 on the NPU machine. The
 starter script installs that pair into the project `.venv` once with
 `--no-deps`, installs the compatible local Ascend torch stack
 (`torch==2.8.0`, `torch-npu==2.8.0.post2`), then installs the runtime
-dependencies advertised by the wheels while filtering CUDA packages and vLLM's
-upstream torch pins. The patcher keeps anchors compatible with nearby
-0.11.x-0.13.x layouts where practical.
+dependencies advertised by the wheels under constraints that keep that torch
+stack pinned while filtering CUDA packages and vLLM's upstream torch pins. The
+patcher keeps anchors compatible with nearby 0.11.x-0.13.x layouts where
+practical.
 
 ## Quick Start
 

@@ -10,9 +10,10 @@ This project runs on **Ascend NPU** hardware. The inference backend is
 vLLM/vllm-ascend 0.13.0 into the project `.venv` with `--no-deps` and reuses
 that install on later starts. It also installs the compatible local Ascend
 torch stack (`torch==2.8.0`, `torch-npu==2.8.0.post2`) and wheel metadata
-runtime dependencies while filtering CUDA packages and vLLM's upstream torch
-pins. When investigating internals or applying patches, target the installed
-vllm-ascend/vLLM package and keep version-specific anchors in mind.
+runtime dependencies under constraints that keep that torch stack pinned while
+filtering CUDA packages and vLLM's upstream torch pins. When investigating
+internals or applying patches, target the installed vllm-ascend/vLLM package
+and keep version-specific anchors in mind.
 
 ## Project Purpose
 
