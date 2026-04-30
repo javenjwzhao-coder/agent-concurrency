@@ -32,6 +32,7 @@
     groups: null,
     kvChart: null,
     kvPoints: null,
+    kvGroups: null,
     agents: new Map(),
     agentOrder: [],
     eventCounter: 0,
@@ -120,6 +121,11 @@
     );
 
     state.kvPoints = new vis.DataSet();
+    state.kvGroups = new vis.DataSet([
+      { id: "kv",        content: "KV used %",        className: "kv-line-used" },
+      { id: "threshold", content: "offload threshold", className: "kv-line-threshold",
+        options: { shaded: false, drawPoints: false, interpolation: false } },
+    ]);
     const kvOpts = {
       style: "line",
       shaded: { enabled: true, orientation: "bottom" },
@@ -139,7 +145,7 @@
       zoomable: true,
     };
     state.kvChart = new vis.Graph2d(
-      $("#kvChart"), state.kvPoints, kvOpts,
+      $("#kvChart"), state.kvPoints, state.kvGroups, kvOpts,
     );
 
     // Keep the two charts' time axes in sync when the user pans/zooms.
@@ -471,8 +477,44 @@
 
   function applyKvTick(record) {
     const pct = record.vllm && record.vllm.kv_cache_used_pct;
-    if (pct === null || pct === undefined) return;
-    state.kvPoints.add({ x: new Date(record.ts), y: Number(pct) });
+    const ts = new Date(record.ts);
+    if (pct !== null && pct !== undefined) {
+      state.kvPoints.add({ x: ts, y: Number(pct), group: "kv" });
+    }
+
+    const thresholdPct = offloadThresholdPct(record);
+    if (thresholdPct !== null) {
+      state.kvPoints.add({ x: ts, y: thresholdPct, group: "threshold" });
+    }
+  }
+
+  function finiteNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function totalKvGb(record) {
+    const vllm = record.vllm || {};
+    const directTotal = finiteNumber(vllm.kv_total_gb);
+    if (directTotal !== null && directTotal > 0) return directTotal;
+
+    const used = finiteNumber(vllm.kv_used_gb);
+    const free = finiteNumber(vllm.kv_free_gb);
+    if (used !== null && free !== null && used + free > 0) return used + free;
+
+    const pct = finiteNumber(vllm.kv_cache_used_pct);
+    if (pct !== null && pct > 0 && used !== null) return used / (pct / 100);
+    if (pct !== null && pct < 100 && free !== null) return free / (1 - pct / 100);
+    return null;
+  }
+
+  function offloadThresholdPct(record) {
+    const adm = record.admission || {};
+    const freeThresholdGb = finiteNumber(adm.threshold_gb);
+    const total = totalKvGb(record);
+    if (freeThresholdGb === null || total === null || total <= 0) return null;
+    return Math.max(0, Math.min(100, 100 * (1 - freeThresholdGb / total)));
   }
 
   // ── tick application ───────────────────────────────────────────────────

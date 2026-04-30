@@ -126,6 +126,7 @@ ticks it already rendered.
 | Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active) |
 | Phase color                          | reasoning=blue, tool_call=green, waiting=gray, evicted_waiting=orange (rendered as "offloaded"), done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
+| Offload threshold line               | `100 * (1 - admission.threshold_gb / vllm.kv_total_gb)` per tick    |
 | OFFLOAD marker (red)                 | `admission.evictions[*]` where `evicted == true` (KV pushed to CPU) |
 | ADMIT marker (green)                 | `admission.admissions[*]` where `admitted && !previously_evicted`   |
 | READMIT marker (purple)              | `admission.admissions[*]` where `admitted && previously_evicted`    |

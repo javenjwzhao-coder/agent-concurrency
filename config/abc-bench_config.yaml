@@ -18,7 +18,7 @@ paths:
   results_root: "/root/jwzhao/abc_results"
 
 launch:
-  max_concurrent: 15
+  max_concurrent: 50
 
 testing:
   enabled: true
