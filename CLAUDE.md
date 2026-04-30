@@ -7,10 +7,11 @@ repository.
 
 This project runs on **Ascend NPU** hardware. The inference backend is
 **vllm-ascend**, not plain upstream vLLM. `start_vllm.sh` installs
-vLLM/vllm-ascend 0.13.0 into the project `.venv` and reuses that install on
-later starts; the shared `/opt/vllm/venv` only supplies non-vLLM dependencies.
-When investigating internals or applying patches, target the installed
-vllm-ascend/vLLM package and keep version-specific anchors in mind.
+vLLM/vllm-ascend 0.13.0 into the project `.venv` with `--no-deps` and reuses
+that install on later starts; the shared `/opt/vllm/venv` supplies the Ascend
+torch/torch-npu stack and other non-vLLM dependencies. When investigating
+internals or applying patches, target the installed vllm-ascend/vLLM package
+and keep version-specific anchors in mind.
 
 ## Project Purpose
 

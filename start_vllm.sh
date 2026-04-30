@@ -173,12 +173,15 @@ PY
           "$VENV_SITE"/vllm-*.dist-info \
           "$VENV_SITE"/vllm_ascend-*.dist-info \
           "$VENV_SITE"/vllm_ascend-*.egg-info
+        # Keep torch/torch_npu and other Ascend runtime deps from the shared
+        # environment. vLLM's PyPI metadata pins upstream CUDA torch versions
+        # that can conflict with vllm-ascend's Ascend torch stack.
         if command -v uv >/dev/null 2>&1; then
-            uv pip install --python "$VENV/bin/python" --upgrade \
+            uv pip install --python "$VENV/bin/python" --upgrade --no-deps \
               "vllm==${VLLM_ASCEND_VERSION}" \
               "vllm-ascend==${VLLM_ASCEND_VERSION}"
         else
-            "$VENV/bin/python" -m pip install --upgrade \
+            "$VENV/bin/python" -m pip install --upgrade --no-deps \
               "vllm==${VLLM_ASCEND_VERSION}" \
               "vllm-ascend==${VLLM_ASCEND_VERSION}"
         fi
