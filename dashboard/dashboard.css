@@ -125,29 +125,21 @@ button:hover {
   border: 1px solid #9a4c14;
 }
 
-/* Active-agent count badge */
-.active-count {
+/* Header count badges (live / offloaded / heap / queue / done) */
+.badge {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   padding: 3px 10px;
   border-radius: 4px;
-  background: #0f2a1a;
-  color: #4ade80;
-  border: 1px solid #166534;
   white-space: nowrap;
+  border: 1px solid transparent;
 }
 
-/* Waiting-queue badge */
-.waiting-queue {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 4px;
-  background: #1a1a2e;
-  color: #a78bfa;
-  border: 1px solid #4c1d95;
-  white-space: nowrap;
-}
+.badge-live      { background: #0f2a1a; color: #4ade80; border-color: #166534; }
+.badge-offloaded { background: #2e1a08; color: #fbbf24; border-color: #78340a; }
+.badge-heap      { background: #2a2008; color: #fde047; border-color: #78581a; }
+.badge-queue     { background: #1a1a2e; color: #a78bfa; border-color: #4c1d95; }
+.badge-done      { background: #1a1f2e; color: #94a3b8; border-color: #334155; }
 
 /* ── main layout ─────────────────────────────────────────────────────────── */
 
@@ -190,7 +182,7 @@ main {
  *   reasoning      → blue      (distinct from teal tool_call)
  *   tool_call      → teal/cyan (distinct from green ADMIT lines)
  *   waiting        → slate     (neutral)
- *   evicted_waiting→ amber     (distinct from red EVICT lines)
+ *   evicted_waiting→ amber     (distinct from red OFFLOAD lines)
  *   done           → near-black
  */
 .phase-reasoning       { background: #1d4ed8; }
@@ -225,7 +217,7 @@ main {
 /* ── event marker chips in legend ────────────────────────────────────────── */
 /* Colors match the vertical event lines exactly */
 
-.event-evict   { background: #f87171; color: #1a0000; }
+.event-offload { background: #f87171; color: #1a0000; }
 .event-admit   { background: #4ade80; color: #001a0a; }
 .event-readmit { background: #c084fc; color: #1a0033; }
 .event-sat     { background: #fde047; color: #3a2e00; }
@@ -247,7 +239,7 @@ main {
 /* Hide the triangle drag handle */
 .vis-custom-time .vis-custom-time-marker { display: none !important; }
 
-.vis-custom-time.ct-evict   { background-color: #f87171 !important; }   /* bright red    */
+.vis-custom-time.ct-offload { background-color: #f87171 !important; }   /* bright red    */
 .vis-custom-time.ct-admit   { background-color: #4ade80 !important; }   /* bright green  */
 .vis-custom-time.ct-readmit { background-color: #c084fc !important; }   /* bright purple */
 .vis-custom-time.ct-sat {

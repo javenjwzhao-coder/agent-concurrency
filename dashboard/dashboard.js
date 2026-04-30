@@ -146,45 +146,92 @@
     state.timeline.on("rangechange", (props) => {
       state.kvChart.setWindow(props.start, props.end, { animation: false });
       if (props.byUser) setPaused(true);
-      updateActiveCount(props.end.getTime());
+      updateBadges(props.end.getTime());
     });
     state.kvChart.on("rangechange", (props) => {
       state.timeline.setWindow(props.start, props.end, { animation: false });
       if (props.byUser) setPaused(true);
-      updateActiveCount(props.end.getTime());
+      updateBadges(props.end.getTime());
     });
 
     setupProximityTooltips();
   }
 
-  // ── waiting-queue badge ────────────────────────────────────────────────
+  // ── header count badges ────────────────────────────────────────────────
+  //
+  // tickHistory carries a snapshot per tick so all badges stay aligned with
+  // the viewport's right edge (binary search) rather than always showing the
+  // latest sidecar tick. Snapshot fields:
+  //   ts        — epoch ms
+  //   live      — agents in reasoning|tool_call|waiting
+  //   reasoning, tool_call, waiting  — phase breakdown of `live`
+  //   offloaded — agents currently in evicted_waiting (KV pushed to CPU)
+  //   done      — finished agents
+  //   launched  — total agents the sidecar has ever seen (cumulative)
+  //   heap      — admission.heap_candidates length (eligible to offload)
+  //   queue     — fresh + evicted_ready waiting to be admitted
 
-  function updateWaitingQueue(record) {
-    const el = $("#waitingQueue");
-    if (!el) return;
+  function snapshotCounts(record) {
+    const agents = record.agents || {};
+    let reasoning = 0, tool_call = 0, waiting = 0, offloaded = 0, done = 0;
+    let launched = 0;
+    for (const id of Object.keys(agents)) {
+      launched++;
+      switch (agents[id].state) {
+        case "reasoning":       reasoning++; break;
+        case "tool_call":       tool_call++; break;
+        case "waiting":         waiting++;   break;
+        case "evicted_waiting": offloaded++; break;
+        case "done":            done++;      break;
+        default:                waiting++;   break;
+      }
+    }
     const adm = record.admission || {};
-    const queue = adm.queue || {};
-    const total = (queue.fresh || 0) + (queue.evicted_ready || 0);
-    const heapCount = (adm.heap_candidates || []).length;
-    el.textContent = `queue: ${total} | heap: ${heapCount}`;
-    el.style.display = "";
+    const q = adm.queue || {};
+    return {
+      live: reasoning + tool_call + waiting,
+      reasoning, tool_call, waiting, offloaded, done, launched,
+      queue: (q.fresh || 0) + (q.evicted_ready || 0),
+      heap: (adm.heap_candidates || []).length,
+    };
   }
 
-  // ── active-agent count badge ───────────────────────────────────────────
-
-  function updateActiveCount(timeMs) {
+  function snapshotAt(timeMs) {
     const h = state.tickHistory;
-    const el = $("#activeCount");
-    if (!el || !h.length) return;
-    // Binary search: last tick whose ts <= timeMs
+    if (!h.length) return null;
+    if (h[0].ts > timeMs) return null;
     let lo = 0, hi = h.length - 1;
-    if (h[0].ts > timeMs) { el.textContent = "0 active"; return; }
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
       if (h[mid].ts <= timeMs) lo = mid; else hi = mid - 1;
     }
-    el.textContent = `${h[lo].count} active`;
+    return h[lo];
+  }
+
+  function setBadge(id, text, title) {
+    const el = $("#" + id);
+    if (!el) return;
+    el.textContent = text;
+    if (title !== undefined) el.title = title;
     el.style.display = "";
+  }
+
+  function updateBadges(timeMs) {
+    const s = snapshotAt(timeMs);
+    if (!s) return;
+    setBadge(
+      "liveCount",
+      `live: ${s.live}`,
+      `reasoning: ${s.reasoning}\ntool_call: ${s.tool_call}\nwaiting:   ${s.waiting}\n\nlaunched: ${s.launched}`,
+    );
+    setBadge("offloadedCount", `offloaded: ${s.offloaded}`,
+      "agents whose KV is currently offloaded to CPU (evicted_waiting)");
+    setBadge("heapCount", `heap: ${s.heap}`,
+      "agents currently in the offload heap (eligible to be offloaded)");
+    setBadge("queueCount", `queue: ${s.queue}`,
+      "fresh + evicted_ready agents waiting to be admitted");
+    setBadge("doneCount", `done: ${s.done} / ${s.launched}`,
+      "completed agents / total launched");
   }
 
   function autoScroll(nowDate) {
@@ -291,7 +338,7 @@
 
     for (const ev of (adm.evictions || [])) {
       if (!ev.evicted) continue;
-      addEvent(ts, "evict", `EVICT: ${ev.agent_id}`,
+      addEvent(ts, "offload", `OFFLOAD: ${ev.agent_id}`,
         `agent: ${ev.agent_id}\n` +
         `freed_gb: ${fmt(ev.freed_gb)}\n` +
         `e_s:      ${fmt(ev.e_s)}\n` +
@@ -445,13 +492,10 @@
     }
     applyEventsTick(record);
     applyKvTick(record);
-    updateWaitingQueue(record);
 
-    // Track active-agent count for the badge.
-    const activeCount = [...state.agents.values()]
-      .filter(e => e.activePhase !== null && e.activePhase !== "done").length;
-    state.tickHistory.push({ ts: new Date(recordTs).getTime(), count: activeCount });
-    updateActiveCount(new Date(recordTs).getTime());
+    const tickMs = new Date(recordTs).getTime();
+    state.tickHistory.push({ ts: tickMs, ...snapshotCounts(record) });
+    updateBadges(tickMs);
     if (state.mode === "live") {
       autoScroll(new Date(recordTs));
     } else if (state.mode === "replay") {
@@ -534,10 +578,10 @@
     state.replayBounds = null;
     state.tickHistory = [];
     state.eventPoints = [];
-    const ac = $("#activeCount");
-    if (ac) ac.style.display = "none";
-    const wq = $("#waitingQueue");
-    if (wq) wq.style.display = "none";
+    for (const id of ["liveCount", "offloadedCount", "heapCount", "queueCount", "doneCount"]) {
+      const el = $("#" + id);
+      if (el) el.style.display = "none";
+    }
   }
 
   async function loadReplayFile(file) {

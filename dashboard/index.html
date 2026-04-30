@@ -24,8 +24,11 @@
       <input id="logFile" type="file" accept=".log,.jsonl,.json,text/plain"
              style="display:none">
       <span id="connStatus" class="status status-pending">connecting…</span>
-      <span id="activeCount" class="active-count" style="display:none">0 active</span>
-      <span id="waitingQueue" class="waiting-queue" style="display:none">queue: 0 | heap: 0</span>
+      <span id="liveCount" class="badge badge-live" style="display:none">live: 0</span>
+      <span id="offloadedCount" class="badge badge-offloaded" style="display:none">offloaded: 0</span>
+      <span id="heapCount" class="badge badge-heap" style="display:none">heap: 0</span>
+      <span id="queueCount" class="badge badge-queue" style="display:none">queue: 0</span>
+      <span id="doneCount" class="badge badge-done" style="display:none">done: 0</span>
       <span id="tickInfo"></span>
     </div>
     <div class="legend">
@@ -33,10 +36,10 @@
       <span class="chip phase-reasoning">reasoning</span>
       <span class="chip phase-tool_call">tool_call</span>
       <span class="chip phase-waiting">waiting</span>
-      <span class="chip phase-evicted_waiting">evicted</span>
+      <span class="chip phase-evicted_waiting">offloaded</span>
       <span class="chip phase-done">done</span>
       <span class="legend-title">Event</span>
-      <span class="chip event-evict">EVICT</span>
+      <span class="chip event-offload">OFFLOAD</span>
       <span class="chip event-admit">ADMIT</span>
       <span class="chip event-readmit">READMIT</span>
       <span class="chip event-sat">SAT</span>

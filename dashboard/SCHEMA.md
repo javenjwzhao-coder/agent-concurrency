@@ -120,9 +120,9 @@ ticks it already rendered.
 |--------------------------------------|---------------------------------------------------------------------|
 | One row per agent                    | keys of `agents` (first-seen order, never reshuffled)               |
 | Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active) |
-| Phase color                          | reasoning=blue, tool_call=green, waiting=gray, evicted_waiting=orange, done=light gray |
+| Phase color                          | reasoning=blue, tool_call=green, waiting=gray, evicted_waiting=orange (rendered as "offloaded"), done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
-| EVICT marker (red)                   | `admission.evictions[*]` where `evicted == true`                    |
+| OFFLOAD marker (red)                 | `admission.evictions[*]` where `evicted == true` (KV pushed to CPU) |
 | ADMIT marker (green)                 | `admission.admissions[*]` where `admitted && !previously_evicted`   |
 | READMIT marker (purple)              | `admission.admissions[*]` where `admitted && previously_evicted`    |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low headroom with runnable queued agents) |
