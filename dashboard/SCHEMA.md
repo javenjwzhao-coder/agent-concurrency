@@ -59,6 +59,7 @@ ticks it already rendered.
     "s_prev":  0.29,                           // float|null — previous tick's avg
     "w":       18.03,                          // float|null — headroom = C / min(s_t, s_prev)
     "threshold_gb": 0.1,                       // float — pressure threshold
+    "fallback_long_tool_call_s": 30.0,         // float — first-run predictor fallback age
     "first_saturation_seen": false,            // bool — initial launch ramp is disabled after first SAT
     "initial_admit_interval_s": 2.0,           // float — fresh-admit interval before first SAT
     "next_initial_admit_in_s": null,           // float|null — seconds until next ramped fresh admit
@@ -73,14 +74,17 @@ ticks it already rendered.
     },
 
     "heap_candidates": [                       // ranked idle-agent eviction heap (snapshot)
-      { "agent_id": "...", "kv_gb": 0.5, "predicted_remaining_s": 8.0, "e_s": 4.0 }
+      { "agent_id": "...", "kv_gb": 0.5, "predicted_remaining_s": 8.0,
+        "tool_elapsed_s": null, "policy_reason": "eligible_for_pressure_offload",
+        "e_s": 4.0 }
     ],
     "skipped_candidates": [                    // tool-call agents excluded from offload
       { "agent_id": "...", "reason": "idle_short" }
     ],
     "kv_policy_events": [                      // immediate tool-start policy decisions
       { "agent_id": "...", "policy": "idle_long",
-        "predicted_remaining_s": 8.0, "threshold_s": 2.0 }
+        "predicted_remaining_s": 8.0, "tool_elapsed_s": null,
+        "threshold_s": 2.0, "fallback_long_tool_call_s": 30.0 }
     ],
 
     "evictions": [                             // events fired this tick

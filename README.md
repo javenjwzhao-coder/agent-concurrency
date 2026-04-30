@@ -57,7 +57,8 @@ Policy:
 3. **Tool-call KV policy**: when a tool call starts, predict its remaining
    duration. Calls below `short_tool_call_threshold_s` stay resident and are
    excluded from pressure offload. Longer calls are eligible for the pressure
-   heap.
+   heap. If the predictor is unavailable on a first run, tool calls older than
+   `fallback_long_tool_call_s` are treated as long idle candidates.
 4. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
    `tool_call` agents by descending score:
 
@@ -65,7 +66,8 @@ Policy:
    eviction_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
    ```
 
-   Short predicted calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
+   When fallback mode is active, elapsed tool-call seconds replace the missing
+   prediction in this score. Short predicted calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
 5. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.
@@ -190,8 +192,9 @@ sidecar:
   admission_control:
     enabled: true
     threshold_gb: 0.1
-    initial_admit_interval_s: 2.0
-    short_tool_call_threshold_s: 2.0
+   initial_admit_interval_s: 2.0
+   short_tool_call_threshold_s: 2.0
+    fallback_long_tool_call_s: 30.0
     predictor_model: null        # defaults to prediction.save_model
     offload_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/offload
     restore_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/restore

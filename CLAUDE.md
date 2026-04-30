@@ -202,7 +202,9 @@ Policy order:
    sidecar capacity math. READMITs bypass this launch ramp.
 3. At tool-call start, predict remaining duration. Predicted-short calls
    (`< short_tool_call_threshold_s`) stay resident and are excluded from
-   pressure offload. Predicted-long calls remain eligible for the heap.
+   pressure offload. Predicted-long calls remain eligible for the heap. If no
+   predictor is available yet, tool calls older than
+   `fallback_long_tool_call_s` are treated as long idle candidates.
 4. If `C <= threshold_gb`, offload highest-scoring eligible long idle
    `tool_call` agents through the agent-aware OffloadingConnector.
 5. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
@@ -255,6 +257,7 @@ sidecar:
     threshold_gb: 0.1
     initial_admit_interval_s: 2.0
     short_tool_call_threshold_s: 2.0
+    fallback_long_tool_call_s: 30.0
     predictor_model: null
     offload_endpoint: null
     restore_endpoint: null

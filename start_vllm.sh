@@ -695,7 +695,7 @@ PY
           --dtype "$DTYPE" \
           --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}' \
           $EXTRA
-    ) #> /dev/null 2>&1 &
+    ) > /dev/null 2>&1 &
     echo $! > "$PID_FILE"
     echo "[INFO] vLLM PID: $(cat $PID_FILE)"
 }

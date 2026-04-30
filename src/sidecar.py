@@ -322,8 +322,10 @@ class AgentLaunchSpec:
 class _IdleAgentCandidate:
     agent_id: str
     kv_gb: float
-    predicted_remaining_s: float
+    predicted_remaining_s: Optional[float]
     score: float
+    tool_elapsed_s: Optional[float] = None
+    policy_reason: str = "eligible_for_pressure_offload"
 
 
 class DynamicAdmissionController:
@@ -338,6 +340,7 @@ class DynamicAdmissionController:
         threshold_gb: float = 0.1,
         initial_admit_interval_s: float = 2.0,
         short_tool_call_threshold_s: float = 2.0,
+        fallback_long_tool_call_s: float = 30.0,
         offload_endpoint: Optional[str] = None,
         restore_endpoint: Optional[str] = None,
         eviction_endpoint: Optional[str] = None,
@@ -356,6 +359,7 @@ class DynamicAdmissionController:
         self.threshold_gb = max(0.0, float(threshold_gb))
         self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
         self.short_tool_call_threshold_s = max(0.0, float(short_tool_call_threshold_s))
+        self.fallback_long_tool_call_s = max(0.0, float(fallback_long_tool_call_s))
         self.offload_endpoint = str(offload_endpoint or eviction_endpoint or "")
         self.restore_endpoint = str(restore_endpoint) if restore_endpoint else ""
         self.eviction_endpoint = str(eviction_endpoint) if eviction_endpoint else ""
@@ -419,7 +423,9 @@ class DynamicAdmissionController:
                 "agent_id": agent_id,
                 "policy": "skipped",
                 "predicted_remaining_s": None,
+                "tool_elapsed_s": None,
                 "threshold_s": self.short_tool_call_threshold_s,
+                "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
                 "reason": "",
             }
             if not self.enabled:
@@ -429,12 +435,39 @@ class DynamicAdmissionController:
 
             predicted = self._predict_remaining(agent)
             if predicted is None:
+                self._idle_short.discard(agent_id)
+                self._idle_long.discard(agent_id)
+                elapsed_s = self._tool_elapsed_s(agent)
+                event["tool_elapsed_s"] = self._round(elapsed_s)
+                if elapsed_s is not None and elapsed_s >= self.fallback_long_tool_call_s:
+                    self._idle_long.add(agent_id)
+                    event.update({
+                        "policy": "idle_long",
+                        "reason": "fallback_elapsed_long_tool_call",
+                    })
+                    self._update_agent_state_locked(
+                        agent_id,
+                        {
+                            "kv_policy": "idle_long",
+                            "kv_evicted": False,
+                            "admission_state": "admitted",
+                            "predicted_remaining_s": None,
+                            "tool_elapsed_s": self._round(elapsed_s),
+                            "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
+                            "last_kv_policy": event,
+                        },
+                    )
+                    self._record_kv_policy_event_locked(event)
+                    return event
+
                 event["reason"] = self._predictor_error or "predictor_unavailable"
                 self._update_agent_state_locked(
                     agent_id,
                     {
                         "kv_policy": "predictor_unavailable",
                         "kv_policy_reason": event["reason"],
+                        "tool_elapsed_s": self._round(elapsed_s),
+                        "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
                         "last_kv_policy": event,
                     },
                 )
@@ -548,6 +581,7 @@ class DynamicAdmissionController:
                 "active_agent_samples": avg_count,
                 "w": self._round(w),
                 "threshold_gb": self.threshold_gb,
+                "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
                 "first_saturation_seen": self._first_saturation_seen,
                 "initial_admit_interval_s": self.initial_admit_interval_s,
                 "next_initial_admit_in_s": None,
@@ -582,6 +616,8 @@ class DynamicAdmissionController:
                     "agent_id": cand.agent_id,
                     "kv_gb": self._round(cand.kv_gb),
                     "predicted_remaining_s": self._round(cand.predicted_remaining_s),
+                    "tool_elapsed_s": self._round(cand.tool_elapsed_s),
+                    "policy_reason": cand.policy_reason,
                     "e_s": self._round(cand.score),
                 }
                 for _, _, cand in heap
@@ -702,10 +738,53 @@ class DynamicAdmissionController:
                 continue
             remaining_s = self._predict_remaining(agent)
             if remaining_s is None:
-                skipped.append({
-                    "agent_id": agent_id,
-                    "reason": self._predictor_error or "predictor_unavailable",
-                })
+                elapsed_s = self._tool_elapsed_s(agent)
+                if elapsed_s is None or elapsed_s < self.fallback_long_tool_call_s:
+                    skipped_event = {
+                        "agent_id": agent_id,
+                        "reason": self._predictor_error or "predictor_unavailable",
+                        "tool_elapsed_s": self._round(elapsed_s),
+                        "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
+                    }
+                    skipped.append(skipped_event)
+                    continue
+
+                if agent_id not in self._idle_long:
+                    self._idle_short.discard(agent_id)
+                    self._idle_long.add(agent_id)
+                    event = {
+                        "ts": iso_utc(now_utc()),
+                        "agent_id": agent_id,
+                        "policy": "idle_long",
+                        "predicted_remaining_s": None,
+                        "tool_elapsed_s": self._round(elapsed_s),
+                        "threshold_s": self.short_tool_call_threshold_s,
+                        "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
+                        "reason": "fallback_elapsed_long_tool_call",
+                    }
+                    self._update_agent_state_locked(
+                        agent_id,
+                        {
+                            "kv_policy": "idle_long",
+                            "kv_evicted": False,
+                            "admission_state": "admitted",
+                            "predicted_remaining_s": None,
+                            "tool_elapsed_s": self._round(elapsed_s),
+                            "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
+                            "last_kv_policy": event,
+                        },
+                    )
+                    self._record_kv_policy_event_locked(event)
+                score = kv_gb * elapsed_s
+                cand = _IdleAgentCandidate(
+                    agent_id=agent_id,
+                    kv_gb=kv_gb,
+                    predicted_remaining_s=None,
+                    tool_elapsed_s=elapsed_s,
+                    policy_reason="fallback_elapsed_long_tool_call",
+                    score=score,
+                )
+                heapq.heappush(heap, (-score, agent_id, cand))
                 continue
             if remaining_s < self.short_tool_call_threshold_s:
                 skipped_event = {
@@ -768,13 +847,16 @@ class DynamicAdmissionController:
             heapq.heappush(heap, (-score, agent_id, cand))
         return heap, skipped
 
-    def _predict_remaining(self, agent: dict[str, Any]) -> Optional[float]:
+    def _tool_elapsed_s(self, agent: dict[str, Any]) -> Optional[float]:
         start_dt = _parse_iso_ts(agent.get("tool_started_at")) or _parse_iso_ts(
             agent.get("state_since")
         )
-        elapsed_s = 0.0
-        if start_dt is not None:
-            elapsed_s = max(0.0, (now_utc() - start_dt).total_seconds())
+        if start_dt is None:
+            return None
+        return max(0.0, (now_utc() - start_dt).total_seconds())
+
+    def _predict_remaining(self, agent: dict[str, Any]) -> Optional[float]:
+        elapsed_s = self._tool_elapsed_s(agent) or 0.0
 
         if hasattr(self._predictor, "predict_agent_remaining"):
             try:
@@ -817,6 +899,8 @@ class DynamicAdmissionController:
             "e_s": self._round(cand.score),
             "kv_gb": self._round(cand.kv_gb),
             "predicted_remaining_s": self._round(cand.predicted_remaining_s),
+            "tool_elapsed_s": self._round(cand.tool_elapsed_s),
+            "policy_reason": cand.policy_reason,
         }
         try:
             if self._offload_callback is not None:
@@ -836,6 +920,8 @@ class DynamicAdmissionController:
                         "agent_id": cand.agent_id,
                         "only_ref_cnt_zero": True,
                         "predicted_remaining_s": cand.predicted_remaining_s,
+                        "tool_elapsed_s": cand.tool_elapsed_s,
+                        "policy_reason": cand.policy_reason,
                     },
                     timeout=self.eviction_timeout_s,
                 )
@@ -1203,6 +1289,9 @@ def parse_args() -> argparse.Namespace:
                     help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration stay resident.")
+    ac.add_argument("--fallback-long-tool-call-s", type=float, default=30.0,
+                    help="When the predictor is unavailable, treat tool calls "
+                         "older than this many seconds as offload-eligible.")
     ac.add_argument("--admission-predictor-model", default=None,
                     help="Saved remaining-time predictor model for idle-agent scoring.")
     ac.add_argument("--offload-endpoint", default=None,
@@ -1244,6 +1333,7 @@ def main() -> int:
             threshold_gb=args.admission_threshold_gb,
             initial_admit_interval_s=args.initial_admit_interval_s,
             short_tool_call_threshold_s=args.short_tool_call_threshold_s,
+            fallback_long_tool_call_s=args.fallback_long_tool_call_s,
             offload_endpoint=(
                 args.offload_endpoint
                 or args.eviction_endpoint

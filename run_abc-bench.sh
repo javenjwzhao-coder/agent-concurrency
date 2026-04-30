@@ -218,6 +218,7 @@ flat_keys = [
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
     ("SIDECAR_INITIAL_ADMIT_INTERVAL_S", "sidecar.admission_control.initial_admit_interval_s"),
     ("SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S", "sidecar.admission_control.short_tool_call_threshold_s"),
+    ("SIDECAR_FALLBACK_LONG_TOOL_CALL_S", "sidecar.admission_control.fallback_long_tool_call_s"),
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
     ("SIDECAR_OFFLOAD_ENDPOINT", "sidecar.admission_control.offload_endpoint"),
     ("SIDECAR_RESTORE_ENDPOINT", "sidecar.admission_control.restore_endpoint"),
@@ -356,6 +357,7 @@ build_runner_cmd() {
                 --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
                 --sidecar-initial-admit-interval-s "${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
                 --sidecar-short-tool-call-threshold-s "${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
+                --sidecar-fallback-long-tool-call-s "${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
                 --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
             )
             if [[ -n "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
@@ -458,6 +460,7 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
         echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
         echo "    initial_admit_s:    ${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
         echo "    short_tool_call_s:  ${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
+        echo "    fallback_long_s:    ${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"
         echo "    offload_endpoint:   ${SIDECAR_OFFLOAD_ENDPOINT:-${SIDECAR_EVICTION_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload}}"
         echo "    restore_endpoint:   ${SIDECAR_RESTORE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/restore}"

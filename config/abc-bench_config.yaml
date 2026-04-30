@@ -178,6 +178,9 @@ sidecar:
     # After the first SAT, normal sidecar capacity policy drains the queue.
     initial_admit_interval_s: 1.0
     short_tool_call_threshold_s: 2.0
+    # First-run fallback: if the predictor is missing/unavailable, tool calls
+    # older than this many seconds become eligible for pressure offload.
+    fallback_long_tool_call_s: 5.0
     # null → defaults to prediction.save_model in run_abc-bench.sh.
     predictor_model: null
     # null → <sidecar.vllm_url>/agent_kv_cache/offload

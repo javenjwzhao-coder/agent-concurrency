@@ -1089,6 +1089,9 @@ def parse_args() -> argparse.Namespace:
                     help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration stay resident.")
+    sc.add_argument("--sidecar-fallback-long-tool-call-s", type=float, default=30.0,
+                    help="When the predictor is unavailable, treat tool calls "
+                         "older than this many seconds as offload-eligible.")
     sc.add_argument("--sidecar-admission-predictor-model", default=None,
                     help="Saved remaining-time predictor model for tool-call scoring.")
     sc.add_argument("--sidecar-offload-endpoint", default=None,
@@ -1162,6 +1165,7 @@ def main() -> int:
                 threshold_gb=args.sidecar_admission_threshold_gb,
                 initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
                 short_tool_call_threshold_s=args.sidecar_short_tool_call_threshold_s,
+                fallback_long_tool_call_s=args.sidecar_fallback_long_tool_call_s,
                 offload_endpoint=(
                     args.sidecar_offload_endpoint
                     or args.sidecar_eviction_endpoint

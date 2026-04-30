@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import types
+from datetime import timedelta
 from pathlib import Path
 
 
@@ -22,7 +23,13 @@ except ModuleNotFoundError:
 
     sys.modules["requests"] = types.SimpleNamespace(Session=_FakeSession)
 
-from sidecar import AgentLaunchSpec, DynamicAdmissionController, poll_vllm
+from sidecar import (
+    AgentLaunchSpec,
+    DynamicAdmissionController,
+    iso_utc,
+    now_utc,
+    poll_vllm,
+)
 
 
 BYTES_PER_GB = 1_000_000_000
@@ -643,8 +650,72 @@ def test_predictor_unavailable_skips_idle_offload_policy():
     assert offloaded == []
     assert report["evictions"] == []
     assert report["skipped_candidates"] == [
-        {"agent_id": "agent-no-predictor", "reason": "predictor_unavailable"}
+        {
+            "agent_id": "agent-no-predictor",
+            "reason": "predictor_unavailable",
+            "tool_elapsed_s": None,
+            "fallback_long_tool_call_s": 30.0,
+        }
     ]
+
+
+def test_predictor_unavailable_falls_back_to_elapsed_long_tool_call():
+    offloaded: list[str] = []
+    state_updates: dict[str, dict] = {}
+    old_ts = iso_utc(now_utc() - timedelta(seconds=45))
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+
+    def update(agent_id, patch):
+        state_updates.setdefault(agent_id, {}).update(patch)
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        fallback_long_tool_call_s=30.0,
+        offload_callback=offload,
+        state_update_callback=update,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    controller._idle_short.add("fallback-agent")
+
+    policy = controller.on_tool_call_start(
+        "fallback-agent",
+        {
+            "agent_id": "fallback-agent",
+            "state": "tool_call",
+            "state_since": old_ts,
+            "kv_blocks": 2,
+        },
+    )
+    assert policy["policy"] == "idle_long"
+    assert policy["reason"] == "fallback_elapsed_long_tool_call"
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "fallback-agent": {
+                "agent_id": "fallback-agent",
+                "state": "tool_call",
+                "state_since": old_ts,
+                "kv_blocks": 2,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert offloaded == ["fallback-agent"]
+    assert report["heap_candidates"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["heap_candidates"][0]["predicted_remaining_s"] is None
+    assert report["heap_candidates"][0]["tool_elapsed_s"] >= 30.0
+    assert report["evictions"][0]["agent_id"] == "fallback-agent"
+    assert report["evictions"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["evictions"][0]["tool_elapsed_s"] >= 30.0
+    assert state_updates["fallback-agent"]["kv_policy"] == "idle_long"
+    assert state_updates["fallback-agent"]["fallback_long_tool_call_s"] == 30.0
 
 
 def test_evicted_ready_lane_admits_before_fresh_agents():
