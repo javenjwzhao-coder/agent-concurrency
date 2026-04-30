@@ -77,6 +77,10 @@ start_native() {
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
     VENV="$REPO_DIR/.venv"
     VLLM_ASCEND_VERSION="${VLLM_ASCEND_VERSION:-0.13.0}"
+    TORCH_VERSION="${VLLM_ASCEND_TORCH_VERSION:-2.8.0}"
+    TORCH_NPU_VERSION="${VLLM_ASCEND_TORCH_NPU_VERSION:-2.8.0.post2}"
+    TORCHVISION_VERSION="${VLLM_ASCEND_TORCHVISION_VERSION:-0.23.0}"
+    TORCHAUDIO_VERSION="${VLLM_ASCEND_TORCHAUDIO_VERSION:-2.8.0}"
 
     # ── 1. Create project venv via uv (skipped if already exists) ────────────
     if [ ! -f "$VENV/bin/activate" ]; then
@@ -191,6 +195,92 @@ PY
         fi
     fi
 
+    check_local_torch_stack() {
+        VENV="$VENV" \
+        DESIRED_TORCH="$TORCH_VERSION" \
+        DESIRED_TORCH_NPU="$TORCH_NPU_VERSION" \
+        "$VENV/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import os
+import pathlib
+import sys
+
+venv = pathlib.Path(os.environ["VENV"]).resolve()
+desired = {
+    "torch": os.environ["DESIRED_TORCH"],
+    "torch-npu": os.environ["DESIRED_TORCH_NPU"],
+}
+modules = {
+    "torch": "torch",
+    "torch-npu": "torch_npu",
+}
+
+def dist_version(name):
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+def module_path(module_name):
+    spec = importlib.util.find_spec(module_name)
+    if spec is None:
+        return None
+    if spec.origin:
+        return pathlib.Path(spec.origin).resolve()
+    locations = spec.submodule_search_locations
+    if locations:
+        return pathlib.Path(next(iter(locations))).resolve()
+    return None
+
+def is_local(path):
+    if path is None:
+        return False
+    try:
+        path.relative_to(venv)
+        return True
+    except ValueError:
+        return False
+
+state = []
+ready = True
+for dist_name, want in desired.items():
+    version = dist_version(dist_name)
+    path = module_path(modules[dist_name])
+    state.append(f"{dist_name}={version!r} at {path}")
+    ready = ready and version == want and is_local(path)
+
+if ready:
+    print("[INFO] Reusing local Ascend torch stack: " + ", ".join(state))
+else:
+    print("[INFO] Local Ascend torch stack install needed (" + ", ".join(state) + ")")
+sys.exit(0 if ready else 1)
+PY
+    }
+
+    if check_local_torch_stack; then
+        :
+    else
+        echo "[INFO] Installing Ascend torch stack into $VENV ..."
+        if command -v uv >/dev/null 2>&1; then
+            uv pip install --python "$VENV/bin/python" --upgrade \
+              "torch==${TORCH_VERSION}" \
+              "torch-npu==${TORCH_NPU_VERSION}" \
+              "torchvision==${TORCHVISION_VERSION}" \
+              "torchaudio==${TORCHAUDIO_VERSION}"
+        else
+            "$VENV/bin/python" -m pip install --upgrade \
+              "torch==${TORCH_VERSION}" \
+              "torch-npu==${TORCH_NPU_VERSION}" \
+              "torchvision==${TORCHVISION_VERSION}" \
+              "torchaudio==${TORCHAUDIO_VERSION}"
+        fi
+        if ! check_local_torch_stack; then
+            echo "[ERROR] Ascend torch stack verification failed after install" >&2
+            exit 1
+        fi
+    fi
+
     VLLM_RUNTIME_REQS="$VENV/vllm-runtime-deps.txt"
     VENV_RUNTIME_REQS="$VLLM_RUNTIME_REQS" "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
@@ -267,14 +357,15 @@ PY
     if [ -s "$VLLM_RUNTIME_REQS" ]; then
         echo "[INFO] Installing vLLM runtime deps from wheel metadata (excluding Ascend torch stack) ..."
         if command -v uv >/dev/null 2>&1; then
-            uv pip install --python "$VENV/bin/python" --upgrade \
+            uv pip install --python "$VENV/bin/python" --upgrade --no-deps \
               -r "$VLLM_RUNTIME_REQS"
         else
-            "$VENV/bin/python" -m pip install --upgrade \
+            "$VENV/bin/python" -m pip install --upgrade --no-deps \
               -r "$VLLM_RUNTIME_REQS"
         fi
     fi
 
+    unset -f check_local_torch_stack
     unset -f check_local_vllm_ascend
 
     # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
@@ -284,7 +375,7 @@ PY
 
     # ── 4. Verify the project venv imports the patched copy ──────────────────
     echo "[INFO] Verifying patched vLLM import path..."
-    "$VENV/bin/python" - <<'PY'
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
 import vllm.entrypoints.openai.protocol as protocol
 import vllm.entrypoints.openai.serving_chat as serving_chat
 
