@@ -34,5 +34,7 @@ def test_dashboard_exposes_controller_pressure_badge():
 
     assert "pressureBadge" in html
     assert "pressureBadge" in js
+    assert "W: ${fmtW(s.effectiveW)}" in js
+    assert "w_after_offload: ${fmtW(s.wAfterOffload)}" in js
     assert "controller offloads only when C <= threshold" in js
     assert "badge-pressure-active" in css

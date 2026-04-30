@@ -226,6 +226,9 @@
     const q = adm.queue || {};
     const C = finiteNumber(adm.C);
     const threshold = finiteNumber(adm.threshold_gb);
+    const w = finiteNumber(adm.w);
+    const wAfterOffload = finiteNumber(adm.w_after_offload);
+    const effectiveW = wAfterOffload !== null ? wAfterOffload : w;
     const pressure = adm.pressure === true
       || (C !== null && threshold !== null && C <= threshold);
     return {
@@ -235,6 +238,9 @@
       heap: (adm.heap_candidates || []).length,
       C,
       threshold,
+      w,
+      wAfterOffload,
+      effectiveW,
       pressure,
     };
   }
@@ -271,8 +277,10 @@
       "agents whose KV is currently offloaded to CPU (evicted_waiting)");
     setBadge("heapCount", `heap: ${s.heap}`,
       "agents currently in the offload heap (eligible to be offloaded)");
-    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / T: ${fmtGb(s.threshold)}`,
-      "free KV GB / pressure threshold GB\ncontroller offloads only when C <= threshold");
+    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.effectiveW)} / T: ${fmtGb(s.threshold)}`,
+      "free KV GB / effective headroom W / pressure threshold GB\n" +
+      `raw w: ${fmtW(s.w)}\nw_after_offload: ${fmtW(s.wAfterOffload)}\n` +
+      "controller offloads only when C <= threshold");
     const pressureEl = $("#pressureBadge");
     if (pressureEl) {
       pressureEl.classList.toggle("badge-pressure-active", s.pressure);
@@ -762,6 +770,10 @@
   }
 
   function fmtGb(v) {
+    return v === null || v === undefined ? "n/a" : Number(v).toFixed(2);
+  }
+
+  function fmtW(v) {
     return v === null || v === undefined ? "n/a" : Number(v).toFixed(2);
   }
 
