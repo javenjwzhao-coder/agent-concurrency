@@ -91,7 +91,7 @@ launch:
 
   # Thread-pool size for concurrent agent execution.
   # Set this ≤ the number of NPU cards to avoid over-subscribing vLLM.
-  max_concurrent: 50
+  max_concurrent: 15
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -173,7 +173,7 @@ sidecar:
   # monitor-only sidecar behavior.
   admission_control:
     enabled: true
-    threshold_gb: 1
+    threshold_gb: 3.2
     # Before the first SAT, admit at most one fresh task per interval.
     # After the first SAT, normal sidecar capacity policy drains the queue.
     initial_admit_interval_s: 1.0
