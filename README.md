@@ -100,9 +100,10 @@ python src/vllm_patches/apply_patches.py \
 
 The project targets vllm-ascend with vLLM 0.13.0 on the NPU machine. The
 starter script installs that pair into the project `.venv` once with
-`--no-deps` and then reuses it, so the existing Ascend torch/torch-npu stack
-continues to come from the shared environment. The patcher keeps anchors
-compatible with nearby 0.11.x-0.13.x layouts where practical.
+`--no-deps`, then installs the runtime dependencies advertised by the wheels
+while filtering out CUDA packages and the Ascend-owned torch/torch-npu stack.
+The patcher keeps anchors compatible with nearby 0.11.x-0.13.x layouts where
+practical.
 
 ## Quick Start
 

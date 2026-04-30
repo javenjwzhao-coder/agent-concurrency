@@ -191,6 +191,90 @@ PY
         fi
     fi
 
+    VLLM_RUNTIME_REQS="$VENV/vllm-runtime-deps.txt"
+    VENV_RUNTIME_REQS="$VLLM_RUNTIME_REQS" "$VENV/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import os
+import pathlib
+import re
+import sys
+
+try:
+    from packaging.markers import default_environment
+    from packaging.requirements import Requirement
+except Exception:
+    default_environment = None
+    Requirement = None
+
+skip_names = {
+    "flash-attn",
+    "flashinfer-python",
+    "torch",
+    "torch-npu",
+    "torchaudio",
+    "torchvision",
+    "triton",
+    "vllm",
+    "vllm-ascend",
+    "vllm-flash-attn",
+    "xformers",
+}
+skip_prefixes = ("nvidia-",)
+
+def canonicalize(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+def should_skip(name: str) -> bool:
+    normalized = canonicalize(name)
+    return normalized in skip_names or any(
+        normalized.startswith(prefix) for prefix in skip_prefixes)
+
+def fallback_name(req_line: str) -> str:
+    return re.split(r"[ ;<>=!~\[]", req_line, maxsplit=1)[0]
+
+env = default_environment() if default_environment is not None else {}
+if env:
+    env["extra"] = ""
+
+requirements = []
+seen = set()
+for dist_name in ("vllm", "vllm-ascend"):
+    try:
+        req_lines = metadata.requires(dist_name) or []
+    except metadata.PackageNotFoundError:
+        continue
+    for req_line in req_lines:
+        if Requirement is None:
+            name = fallback_name(req_line)
+            if not name or should_skip(name) or "extra ==" in req_line:
+                continue
+            requirement = req_line
+        else:
+            req = Requirement(req_line)
+            if should_skip(req.name):
+                continue
+            if req.marker is not None and not req.marker.evaluate(env):
+                continue
+            requirement = str(req)
+        if requirement not in seen:
+            seen.add(requirement)
+            requirements.append(requirement)
+
+path = pathlib.Path(os.environ["VENV_RUNTIME_REQS"])
+path.write_text("\n".join(requirements) + ("\n" if requirements else ""))
+print(f"[INFO] Prepared {len(requirements)} vLLM runtime dependency requirement(s)")
+PY
+    if [ -s "$VLLM_RUNTIME_REQS" ]; then
+        echo "[INFO] Installing vLLM runtime deps from wheel metadata (excluding Ascend torch stack) ..."
+        if command -v uv >/dev/null 2>&1; then
+            uv pip install --python "$VENV/bin/python" --upgrade \
+              -r "$VLLM_RUNTIME_REQS"
+        else
+            "$VENV/bin/python" -m pip install --upgrade \
+              -r "$VLLM_RUNTIME_REQS"
+        fi
+    fi
+
     unset -f check_local_vllm_ascend
 
     # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
