@@ -628,6 +628,7 @@ PY
     DESIRED_VLLM="$VLLM_VERSION" \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
+import importlib
 import pathlib
 
 import vllm
@@ -651,11 +652,16 @@ if not (version == desired or version.startswith(desired + "+") or version.start
 assert "kv_blocks_used" in protocol.UsageInfo.model_fields
 assert "kv_blocks_size_gb" in protocol.UsageInfo.model_fields
 assert "agent_id" in protocol.ChatCompletionRequest.model_fields
+connector = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector"
+)
+assert hasattr(connector, "AgentAwareOffloadingConnector")
 
 print(f"[INFO] vllm version -> {version}")
 print(f"[INFO] vllm package -> {vllm_file}")
 print(f"[INFO] protocol.py -> {protocol_file}")
 print(f"[INFO] serving_chat.py -> {serving_chat_file}")
+print(f"[INFO] connector.py -> {pathlib.Path(connector.__file__).resolve()}")
 PY
 
     # ── 5. Skip if already running ────────────────────────────────────────────
@@ -687,7 +693,7 @@ PY
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
-          --kv-transfer-config '{"kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}' \
+          --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}' \
           $EXTRA
     ) #> /dev/null 2>&1 &
     echo $! > "$PID_FILE"

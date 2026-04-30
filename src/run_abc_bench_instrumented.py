@@ -1088,13 +1088,13 @@ def parse_args() -> argparse.Namespace:
     sc.add_argument("--sidecar-initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-short-tool-call-threshold-s", type=float, default=2.0,
-                    help="Predicted tool calls below this duration are pinned.")
+                    help="Predicted tool calls below this duration stay resident.")
     sc.add_argument("--sidecar-admission-predictor-model", default=None,
                     help="Saved remaining-time predictor model for tool-call scoring.")
-    sc.add_argument("--sidecar-pin-endpoint", default=None,
-                    help="vLLM admin endpoint for per-agent KV pin/unpin.")
     sc.add_argument("--sidecar-offload-endpoint", default=None,
                     help="vLLM admin endpoint for per-agent KV CPU offload.")
+    sc.add_argument("--sidecar-restore-endpoint", default=None,
+                    help="vLLM admin endpoint to notify agent KV readmission.")
     sc.add_argument("--sidecar-eviction-endpoint", default=None,
                     help="Backward-compatible alias for --sidecar-offload-endpoint.")
     sc.add_argument("--sidecar-http-port", type=int, default=0,
@@ -1162,14 +1162,14 @@ def main() -> int:
                 threshold_gb=args.sidecar_admission_threshold_gb,
                 initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
                 short_tool_call_threshold_s=args.sidecar_short_tool_call_threshold_s,
-                pin_endpoint=(
-                    args.sidecar_pin_endpoint
-                    or _sidecar.default_pin_endpoint(args.sidecar_vllm_url)
-                ),
                 offload_endpoint=(
                     args.sidecar_offload_endpoint
                     or args.sidecar_eviction_endpoint
                     or _sidecar.default_offload_endpoint(args.sidecar_vllm_url)
+                ),
+                restore_endpoint=(
+                    args.sidecar_restore_endpoint
+                    or _sidecar.default_restore_endpoint(args.sidecar_vllm_url)
                 ),
                 eviction_endpoint=args.sidecar_eviction_endpoint,
                 eviction_timeout_s=args.sidecar_eviction_timeout_s,

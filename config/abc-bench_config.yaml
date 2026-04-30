@@ -180,10 +180,10 @@ sidecar:
     short_tool_call_threshold_s: 2.0
     # null → defaults to prediction.save_model in run_abc-bench.sh.
     predictor_model: null
-    # null → <sidecar.vllm_url>/agent_kv_cache/pin
-    pin_endpoint: null
     # null → <sidecar.vllm_url>/agent_kv_cache/offload
     offload_endpoint: null
+    # null → <sidecar.vllm_url>/agent_kv_cache/restore
+    restore_endpoint: null
     # null → <sidecar.vllm_url>/agent_kv_cache/evict
     # Backward-compatible alias for offload_endpoint.
     eviction_endpoint: null

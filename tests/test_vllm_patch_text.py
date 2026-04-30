@@ -2,22 +2,31 @@ from pathlib import Path
 
 
 PATCH_TEXT = Path("src/vllm_patches/apply_patches.py").read_text()
+CONNECTOR_TEXT = Path("src/vllm_patches/agent_offloading_connector.py").read_text()
 
 
-def test_vllm_patch_exposes_pin_offload_and_compat_routes():
-    assert '"/agent_kv_cache/pin"' in PATCH_TEXT
+def test_vllm_patch_exposes_offload_restore_and_compat_routes():
     assert '"/agent_kv_cache/offload"' in PATCH_TEXT
+    assert '"/agent_kv_cache/restore"' in PATCH_TEXT
     assert '"/agent_kv_cache/evict"' in PATCH_TEXT
-    assert "pin_agent_kv" in PATCH_TEXT
     assert "offload_agent_kv" in PATCH_TEXT
+    assert "restore_agent_kv" in PATCH_TEXT
 
 
-def test_vllm_patch_skips_pinned_blocks_until_unpinned():
-    assert "_agent_kv_pinned_blocks" in PATCH_TEXT
-    assert "def pin_blocks" in PATCH_TEXT
-    assert "block_ids.difference_update(pinned)" in PATCH_TEXT
-    assert "if block_id_int in pinned:" in PATCH_TEXT
+def test_custom_connector_reuses_offloading_infrastructure():
+    assert "class AgentAwareOffloadingConnector(OffloadingConnector)" in CONNECTOR_TEXT
+    assert "class AgentAwareOffloadingWorker(OffloadingConnectorWorker)" in CONNECTOR_TEXT
+    assert "GPULoadStoreSpec" in CONNECTOR_TEXT
+    assert "_AGENT_STORE_PREFIX" in CONNECTOR_TEXT
     assert "return await offload_agent_kv_cache(raw_request)" in PATCH_TEXT
+
+
+def test_custom_connector_holds_real_request_for_synthetic_store_jobs():
+    assert "_make_agent_store_job_id(agent_id, req_id" in CONNECTOR_TEXT
+    assert "_parse_agent_store_job_id(req_id)" in CONNECTOR_TEXT
+    assert "_agent_real_req_pending_jobs[req_id].add(job_id)" in CONNECTOR_TEXT
+    assert "return request_being_stored or agent_store_pending, params" in CONNECTOR_TEXT
+    assert "finished_sending.add(real_req_id)" in CONNECTOR_TEXT
 
 
 def test_vllm_patch_has_v013_engine_forwarding_anchors():

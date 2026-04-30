@@ -46,8 +46,7 @@ ticks it already rendered.
       "kv_gb":   0.34,                         // float | null
       "kv_blocks": 1024,                       // int   | null
       "admission_state": "admitted",           // "admitted"|"evicted_pending_tool"|"evicted_ready"
-      "kv_policy": "pinned_short",             // optional: "pinned_short"|"pinned_long"|"readmitted"|...
-      "kv_pinned": true,                       // optional bool, true while sidecar pins tool-call KV
+      "kv_policy": "idle_short",               // optional: "idle_short"|"idle_long"|"readmitted"|...
       "tool_name": "execute_bash"              // present only during "tool_call"
       // …additional tool-call fields (tool_args_json, tool_payload_bytes, …) may also appear
     }
@@ -69,18 +68,18 @@ ticks it already rendered.
       "fresh": 2,
       "evicted_ready": 0,
       "evicted_pending_tool": 1,
-      "pinned_short": 3,
-      "pinned_long": 4
+      "idle_short": 3,
+      "idle_long": 4
     },
 
     "heap_candidates": [                       // ranked idle-agent eviction heap (snapshot)
       { "agent_id": "...", "kv_gb": 0.5, "predicted_remaining_s": 8.0, "e_s": 4.0 }
     ],
     "skipped_candidates": [                    // tool-call agents excluded from offload
-      { "agent_id": "...", "reason": "pinned_short" }
+      { "agent_id": "...", "reason": "idle_short" }
     ],
     "kv_policy_events": [                      // immediate tool-start policy decisions
-      { "agent_id": "...", "policy": "pinned_long",
+      { "agent_id": "...", "policy": "idle_long",
         "predicted_remaining_s": 8.0, "threshold_s": 2.0 }
     ],
 

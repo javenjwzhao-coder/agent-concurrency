@@ -267,10 +267,10 @@ def default_offload_endpoint(vllm_url: str) -> str:
     return urljoin(base, "agent_kv_cache/offload")
 
 
-def default_pin_endpoint(vllm_url: str) -> str:
-    """Return the default local vLLM agent-KV pin endpoint."""
+def default_restore_endpoint(vllm_url: str) -> str:
+    """Return the default local vLLM agent-KV restore/readmit endpoint."""
     base = vllm_url.rstrip("/") + "/"
-    return urljoin(base, "agent_kv_cache/pin")
+    return urljoin(base, "agent_kv_cache/restore")
 
 
 def _parse_iso_ts(value: Any) -> Optional[datetime]:
@@ -338,8 +338,8 @@ class DynamicAdmissionController:
         threshold_gb: float = 0.1,
         initial_admit_interval_s: float = 2.0,
         short_tool_call_threshold_s: float = 2.0,
-        pin_endpoint: Optional[str] = None,
         offload_endpoint: Optional[str] = None,
+        restore_endpoint: Optional[str] = None,
         eviction_endpoint: Optional[str] = None,
         eviction_timeout_s: float = 2.0,
         bytes_per_blk: Optional[int] = None,
@@ -349,31 +349,31 @@ class DynamicAdmissionController:
         state_update_callback: Optional[Callable[[str, dict[str, Any]], None]] = None,
         evict_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
         offload_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
-        pin_callback: Optional[Callable[[str, bool], dict[str, Any]]] = None,
+        restore_callback: Optional[Callable[[str], dict[str, Any]]] = None,
         session: Optional[requests.Session] = None,
     ) -> None:
         self.enabled = bool(enabled)
         self.threshold_gb = max(0.0, float(threshold_gb))
         self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
         self.short_tool_call_threshold_s = max(0.0, float(short_tool_call_threshold_s))
-        self.pin_endpoint = str(pin_endpoint) if pin_endpoint else ""
         self.offload_endpoint = str(offload_endpoint or eviction_endpoint or "")
+        self.restore_endpoint = str(restore_endpoint) if restore_endpoint else ""
         self.eviction_endpoint = str(eviction_endpoint) if eviction_endpoint else ""
         self.eviction_timeout_s = max(0.1, float(eviction_timeout_s))
         self.bytes_per_blk = int(bytes_per_blk) if bytes_per_blk else None
         self._admit_callback = admit_callback
         self._state_update_callback = state_update_callback
         self._offload_callback = offload_callback or evict_callback
+        self._restore_callback = restore_callback
         self._session = session or requests.Session()
-        self._pin_callback = pin_callback
 
         self._fresh: deque[AgentLaunchSpec] = deque()
         self._evicted_ready: deque[str] = deque()
         self._evicted_ready_set: set[str] = set()
         self._evicted_events: dict[str, threading.Event] = {}
         self._evicted_pending: set[str] = set()
-        self._pinned_short: set[str] = set()
-        self._pinned_long: set[str] = set()
+        self._idle_short: set[str] = set()
+        self._idle_long: set[str] = set()
         self._kv_policy_events: deque[dict[str, Any]] = deque(maxlen=1024)
         self._prev_avg_gb: Optional[float] = None
         self._first_saturation_seen = False
@@ -403,8 +403,8 @@ class DynamicAdmissionController:
                 "fresh": len(self._fresh),
                 "evicted_ready": len(self._evicted_ready),
                 "evicted_pending_tool": len(self._evicted_pending),
-                "pinned_short": len(self._pinned_short),
-                "pinned_long": len(self._pinned_long),
+                "idle_short": len(self._idle_short),
+                "idle_long": len(self._idle_long),
             }
 
     def on_tool_call_start(
@@ -443,19 +443,16 @@ class DynamicAdmissionController:
 
             event["predicted_remaining_s"] = self._round(predicted)
             if predicted < self.short_tool_call_threshold_s:
-                pin_result = self._pin_agent_locked(agent_id, True)
-                self._pinned_long.discard(agent_id)
-                self._pinned_short.add(agent_id)
+                self._idle_long.discard(agent_id)
+                self._idle_short.add(agent_id)
                 event.update({
-                    "policy": "pinned_short",
-                    "pin_result": pin_result,
-                    "reason": pin_result.get("reason", "ok"),
+                    "policy": "idle_short",
+                    "reason": "predicted_short",
                 })
                 self._update_agent_state_locked(
                     agent_id,
                     {
-                        "kv_policy": "pinned_short",
-                        "kv_pinned": bool(pin_result.get("pinned")),
+                        "kv_policy": "idle_short",
                         "kv_evicted": False,
                         "admission_state": "admitted",
                         "predicted_remaining_s": self._round(predicted),
@@ -465,19 +462,16 @@ class DynamicAdmissionController:
                 self._record_kv_policy_event_locked(event)
                 return event
 
-            pin_result = self._pin_agent_locked(agent_id, True)
-            self._pinned_short.discard(agent_id)
-            self._pinned_long.add(agent_id)
+            self._idle_short.discard(agent_id)
+            self._idle_long.add(agent_id)
             event.update({
-                "policy": "pinned_long",
-                "pin_result": pin_result,
-                "reason": pin_result.get("reason", "ok"),
+                "policy": "idle_long",
+                "reason": "eligible_for_pressure_offload",
             })
             self._update_agent_state_locked(
                 agent_id,
                 {
                     "kv_policy": event["policy"],
-                    "kv_pinned": bool(pin_result.get("pinned")),
                     "kv_evicted": False,
                     "admission_state": "admitted",
                     "predicted_remaining_s": self._round(predicted),
@@ -529,15 +523,6 @@ class DynamicAdmissionController:
             event = self._evicted_events.get(agent_id)
             if event is not None:
                 event.set()
-            if agent_id in self._pinned_short or agent_id in self._pinned_long:
-                result = self._pin_agent_locked(agent_id, False)
-                self._record_kv_policy_event_locked({
-                    "ts": iso_utc(now_utc()),
-                    "agent_id": agent_id,
-                    "policy": "unpinned_finish",
-                    "pin_result": result,
-                    "reason": result.get("reason", "ok"),
-                })
             self._clear_evicted_locked(agent_id)
 
     def on_tick(
@@ -707,17 +692,10 @@ class DynamicAdmissionController:
             if agent_id in self._evicted_events or agent.get("kv_evicted"):
                 continue
             if (
-                agent_id in self._pinned_short
-                or agent.get("kv_policy") == "pinned_short"
+                agent_id in self._idle_short
+                or agent.get("kv_policy") == "idle_short"
             ):
-                skipped.append({"agent_id": agent_id, "reason": "pinned_short"})
-                continue
-            is_pinned_long = (
-                agent_id in self._pinned_long
-                or agent.get("kv_policy") == "pinned_long"
-            )
-            if agent.get("kv_pinned") and not is_pinned_long:
-                skipped.append({"agent_id": agent_id, "reason": "pinned_unknown"})
+                skipped.append({"agent_id": agent_id, "reason": "idle_short"})
                 continue
             kv_gb = _agent_kv_gb(agent, bytes_per_blk)
             if kv_gb is None or kv_gb <= 0:
@@ -735,25 +713,21 @@ class DynamicAdmissionController:
                     "reason": "predicted_short",
                     "predicted_remaining_s": self._round(remaining_s),
                 }
-                if agent_id not in self._pinned_short:
-                    pin_result = self._pin_agent_locked(agent_id, True)
-                    self._pinned_long.discard(agent_id)
-                    self._pinned_short.add(agent_id)
-                    skipped_event["pin_result"] = pin_result
+                if agent_id not in self._idle_short:
+                    self._idle_long.discard(agent_id)
+                    self._idle_short.add(agent_id)
                     event = {
                         "ts": iso_utc(now_utc()),
                         "agent_id": agent_id,
-                        "policy": "pinned_short",
+                        "policy": "idle_short",
                         "predicted_remaining_s": self._round(remaining_s),
                         "threshold_s": self.short_tool_call_threshold_s,
-                        "reason": pin_result.get("reason", "ok"),
-                        "pin_result": pin_result,
+                        "reason": "predicted_short",
                     }
                     self._update_agent_state_locked(
                         agent_id,
                         {
-                            "kv_policy": "pinned_short",
-                            "kv_pinned": bool(pin_result.get("pinned")),
+                            "kv_policy": "idle_short",
                             "kv_evicted": False,
                             "admission_state": "admitted",
                             "predicted_remaining_s": self._round(remaining_s),
@@ -763,23 +737,20 @@ class DynamicAdmissionController:
                     self._record_kv_policy_event_locked(event)
                 skipped.append(skipped_event)
                 continue
-            if not is_pinned_long:
-                pin_result = self._pin_agent_locked(agent_id, True)
-                self._pinned_long.add(agent_id)
+            if agent_id not in self._idle_long:
+                self._idle_long.add(agent_id)
                 event = {
                     "ts": iso_utc(now_utc()),
                     "agent_id": agent_id,
-                    "policy": "pinned_long",
+                    "policy": "idle_long",
                     "predicted_remaining_s": self._round(remaining_s),
                     "threshold_s": self.short_tool_call_threshold_s,
-                    "reason": pin_result.get("reason", "ok"),
-                    "pin_result": pin_result,
+                    "reason": "eligible_for_pressure_offload",
                 }
                 self._update_agent_state_locked(
                     agent_id,
                     {
-                        "kv_policy": "pinned_long",
-                        "kv_pinned": bool(pin_result.get("pinned")),
+                        "kv_policy": "idle_long",
                         "kv_evicted": False,
                         "admission_state": "admitted",
                         "predicted_remaining_s": self._round(remaining_s),
@@ -847,39 +818,35 @@ class DynamicAdmissionController:
             "kv_gb": self._round(cand.kv_gb),
             "predicted_remaining_s": self._round(cand.predicted_remaining_s),
         }
-        unpin_result = None
-        was_pinned_long = cand.agent_id in self._pinned_long
         try:
-            if was_pinned_long:
-                unpin_result = self._pin_agent_locked(cand.agent_id, False)
             if self._offload_callback is not None:
                 payload = self._offload_callback(cand) or {}
             else:
                 endpoint = self.offload_endpoint or self.eviction_endpoint
                 if not endpoint:
-                    return self._finalize_offload_result_locked(
-                        cand.agent_id,
-                        {**result, "evicted": False, "reason": "missing_offload_endpoint"},
-                        unpin_result,
-                        was_pinned_long,
-                    )
+                    return {
+                        **result,
+                        "evicted": False,
+                        "offloaded": False,
+                        "reason": "missing_offload_endpoint",
+                    }
                 resp = self._session.post(
                     endpoint,
-                    json={"agent_id": cand.agent_id, "only_ref_cnt_zero": True},
+                    json={
+                        "agent_id": cand.agent_id,
+                        "only_ref_cnt_zero": True,
+                        "predicted_remaining_s": cand.predicted_remaining_s,
+                    },
                     timeout=self.eviction_timeout_s,
                 )
                 if resp.status_code >= 400:
-                    return self._finalize_offload_result_locked(
-                        cand.agent_id,
-                        {
-                            **result,
-                            "evicted": False,
-                            "status_code": resp.status_code,
-                            "reason": resp.text[:300],
-                        },
-                        unpin_result,
-                        was_pinned_long,
-                    )
+                    return {
+                        **result,
+                        "evicted": False,
+                        "offloaded": False,
+                        "status_code": resp.status_code,
+                        "reason": resp.text[:300],
+                    }
                 payload = resp.json()
             if "evicted" in payload:
                 evicted = bool(payload.get("evicted"))
@@ -887,65 +854,37 @@ class DynamicAdmissionController:
                 evicted = bool(payload.get("offloaded"))
             else:
                 evicted = True
-            merged = {**result, **payload, "evicted": evicted}
-            return self._finalize_offload_result_locked(
-                cand.agent_id, merged, unpin_result, was_pinned_long
-            )
+            if evicted:
+                self._idle_long.discard(cand.agent_id)
+            return {**result, **payload, "evicted": evicted}
         except Exception as exc:
-            merged = {**result, "evicted": False, "reason": str(exc)}
-            return self._finalize_offload_result_locked(
-                cand.agent_id, merged, unpin_result, was_pinned_long
-            )
+            return {**result, "evicted": False, "offloaded": False, "reason": str(exc)}
 
-    def _finalize_offload_result_locked(
-        self,
-        agent_id: str,
-        result: dict[str, Any],
-        unpin_result: Optional[dict[str, Any]],
-        restore_pin_on_failure: bool,
-    ) -> dict[str, Any]:
-        if unpin_result is not None:
-            result["unpin_result"] = unpin_result
-        if result.get("evicted"):
-            self._pinned_long.discard(agent_id)
-            return result
-        if restore_pin_on_failure:
-            repin_result = self._pin_agent_locked(agent_id, True)
-            self._pinned_long.add(agent_id)
-            result["repin_result"] = repin_result
-        return result
-
-    def _pin_agent_locked(self, agent_id: str, pin: bool) -> dict[str, Any]:
-        result: dict[str, Any] = {"agent_id": agent_id, "pin": bool(pin)}
+    def _restore_agent_locked(self, agent_id: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"agent_id": agent_id}
         try:
-            if self._pin_callback is not None:
-                payload = self._pin_callback(agent_id, bool(pin)) or {}
+            if self._restore_callback is not None:
+                payload = self._restore_callback(agent_id) or {}
             else:
-                if not self.pin_endpoint:
-                    return {**result, "pinned": False, "reason": "missing_pin_endpoint"}
+                if not self.restore_endpoint:
+                    return {**result, "restored": False, "reason": "missing_restore_endpoint"}
                 resp = self._session.post(
-                    self.pin_endpoint,
-                    json={"agent_id": agent_id, "pin": bool(pin)},
+                    self.restore_endpoint,
+                    json={"agent_id": agent_id},
                     timeout=self.eviction_timeout_s,
                 )
                 if resp.status_code >= 400:
                     return {
                         **result,
-                        "pinned": False,
+                        "restored": False,
                         "status_code": resp.status_code,
                         "reason": resp.text[:300],
                     }
                 payload = resp.json()
-            pinned = bool(payload.get("pinned", pin))
-            return {**result, **payload, "pinned": pinned}
+            restored = bool(payload.get("restored", True))
+            return {**result, **payload, "restored": restored}
         except Exception as exc:
-            return {**result, "pinned": False, "reason": str(exc)}
-
-    def _agent_kv_gb_for_policy(self, agent: dict[str, Any]) -> Optional[float]:
-        if self.bytes_per_blk:
-            return _agent_kv_gb(agent, self.bytes_per_blk)
-        gb = _finite_float(agent.get("kv_gb"))
-        return gb if gb is not None and gb >= 0 else None
+            return {**result, "restored": False, "reason": str(exc)}
 
     def _record_kv_policy_event_locked(self, event: dict[str, Any]) -> None:
         self._kv_policy_events.append(dict(event))
@@ -963,12 +902,11 @@ class DynamicAdmissionController:
             event = threading.Event()
             self._evicted_events[agent_id] = event
         self._evicted_pending.add(agent_id)
-        self._pinned_long.discard(agent_id)
+        self._idle_long.discard(agent_id)
         self._update_agent_state_locked(
             agent_id,
             {
                 "kv_evicted": True,
-                "kv_pinned": False,
                 "admission_state": "evicted_pending_tool",
                 "last_eviction": iso_utc(now_utc()),
                 "last_eviction_result": evict_result,
@@ -1045,6 +983,7 @@ class DynamicAdmissionController:
     def _admit_locked(self, item: AgentLaunchSpec | str) -> dict[str, Any]:
         if isinstance(item, str):
             agent_id = item
+            restore_result = self._restore_agent_locked(agent_id)
             event = self._evicted_events.get(agent_id)
             if event is not None:
                 event.set()
@@ -1053,9 +992,15 @@ class DynamicAdmissionController:
                 {
                     "admission_state": "admitted",
                     "admitted_since": iso_utc(now_utc()),
+                    "last_restore_result": restore_result,
                 },
             )
-            return {"agent_id": agent_id, "previously_evicted": True, "admitted": True}
+            return {
+                "agent_id": agent_id,
+                "previously_evicted": True,
+                "admitted": True,
+                "restore_result": restore_result,
+            }
 
         assert self._admit_callback is not None
         self._admit_callback(item)
@@ -1069,8 +1014,8 @@ class DynamicAdmissionController:
         self._evicted_events.pop(agent_id, None)
         self._evicted_pending.discard(agent_id)
         self._evicted_ready_set.discard(agent_id)
-        self._pinned_short.discard(agent_id)
-        self._pinned_long.discard(agent_id)
+        self._idle_short.discard(agent_id)
+        self._idle_long.discard(agent_id)
         if self._evicted_ready:
             self._evicted_ready = deque(
                 aid for aid in self._evicted_ready if aid != agent_id
@@ -1257,15 +1202,15 @@ def parse_args() -> argparse.Namespace:
     ac.add_argument("--initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--short-tool-call-threshold-s", type=float, default=2.0,
-                    help="Predicted tool calls below this duration are pinned.")
+                    help="Predicted tool calls below this duration stay resident.")
     ac.add_argument("--admission-predictor-model", default=None,
                     help="Saved remaining-time predictor model for idle-agent scoring.")
-    ac.add_argument("--pin-endpoint", default=None,
-                    help="vLLM admin endpoint for per-agent KV pin/unpin. Defaults to "
-                         "<vllm-url>/agent_kv_cache/pin.")
     ac.add_argument("--offload-endpoint", default=None,
                     help="vLLM admin endpoint for per-agent KV CPU offload. Defaults to "
                          "<vllm-url>/agent_kv_cache/offload.")
+    ac.add_argument("--restore-endpoint", default=None,
+                    help="vLLM admin endpoint to notify readmission. Defaults to "
+                         "<vllm-url>/agent_kv_cache/restore.")
     ac.add_argument("--eviction-endpoint", default=None,
                     help="Backward-compatible alias for --offload-endpoint.")
     ac.add_argument("--eviction-timeout-s", type=float, default=2.0,
@@ -1299,12 +1244,12 @@ def main() -> int:
             threshold_gb=args.admission_threshold_gb,
             initial_admit_interval_s=args.initial_admit_interval_s,
             short_tool_call_threshold_s=args.short_tool_call_threshold_s,
-            pin_endpoint=args.pin_endpoint or default_pin_endpoint(args.vllm_url),
             offload_endpoint=(
                 args.offload_endpoint
                 or args.eviction_endpoint
                 or default_offload_endpoint(args.vllm_url)
             ),
+            restore_endpoint=args.restore_endpoint or default_restore_endpoint(args.vllm_url),
             eviction_endpoint=args.eviction_endpoint,
             eviction_timeout_s=args.eviction_timeout_s,
             bytes_per_blk=bpb,

@@ -311,6 +311,7 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
         predictor=FakePredictor({"evicted-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),
         offload_callback=offload,
+        restore_callback=lambda agent_id: {"restored": True},
         state_update_callback=update,
         bytes_per_blk=BYTES_PER_GB,
     )
@@ -333,8 +334,7 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
                 "agent_id": "evicted-agent",
                 "state": "tool_call",
                 "kv_blocks": 1,
-                "kv_policy": "pinned_long",
-                "kv_pinned": True,
+                "kv_policy": "idle_long",
             }
         },
         bytes_per_blk=BYTES_PER_GB,
@@ -361,22 +361,17 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
     waiter.join(timeout=2)
     assert offloaded == ["evicted-agent"]
     assert resumed == [True]
-    assert report["admissions"] == [
-        {"agent_id": "evicted-agent", "previously_evicted": True, "admitted": True}
-    ]
+    assert report["admissions"][0]["agent_id"] == "evicted-agent"
+    assert report["admissions"][0]["previously_evicted"] is True
+    assert report["admissions"][0]["restore_result"]["restored"] is True
     assert "initial_admit_ramp_wait" in report["reasons"]
     assert admitted == []
     assert controller.pending_counts()["fresh"] == 1
     assert state_updates["evicted-agent"]["admission_state"] == "admitted"
 
 
-def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
-    pin_calls: list[tuple[str, bool]] = []
+def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
     offloaded: list[str] = []
-
-    def pin(agent_id, pin):
-        pin_calls.append((agent_id, pin))
-        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
 
     def offload(cand):
         offloaded.append(cand.agent_id)
@@ -387,7 +382,6 @@ def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
         threshold_gb=0.1,
         short_tool_call_threshold_s=2.0,
         predictor=FakePredictor({"short-agent": 1.0}),
-        pin_callback=pin,
         offload_callback=offload,
         bytes_per_blk=BYTES_PER_GB,
     )
@@ -400,8 +394,7 @@ def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
         },
     )
 
-    assert policy["policy"] == "pinned_short"
-    assert pin_calls == [("short-agent", True)]
+    assert policy["policy"] == "idle_short"
 
     report = controller.on_tick(
         tick=0,
@@ -419,19 +412,14 @@ def test_short_tool_call_is_pinned_and_excluded_from_pressure_offload():
     assert offloaded == []
     assert report["evictions"] == []
     assert report["skipped_candidates"] == [
-        {"agent_id": "short-agent", "reason": "pinned_short"}
+        {"agent_id": "short-agent", "reason": "idle_short"}
     ]
 
 
-def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
+def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
     state_updates: dict[str, dict] = {}
-    pin_calls: list[tuple[str, bool]] = []
     offloaded: list[str] = []
     admitted: list[str] = []
-
-    def pin(agent_id, pin):
-        pin_calls.append((agent_id, pin))
-        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
 
     def offload(cand):
         offloaded.append(cand.agent_id)
@@ -446,8 +434,8 @@ def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
         short_tool_call_threshold_s=2.0,
         predictor=FakePredictor({"long-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),
-        pin_callback=pin,
         offload_callback=offload,
+        restore_callback=lambda agent_id: {"restored": True},
         state_update_callback=update,
         bytes_per_blk=BYTES_PER_GB,
     )
@@ -461,12 +449,11 @@ def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
         },
     )
 
-    assert policy["policy"] == "pinned_long"
-    assert pin_calls == [("long-agent", True)]
+    assert policy["policy"] == "idle_long"
     assert offloaded == []
-    assert controller.pending_counts()["pinned_long"] == 1
+    assert controller.pending_counts()["idle_long"] == 1
     assert controller.pending_counts()["evicted_pending_tool"] == 0
-    assert state_updates["long-agent"]["kv_policy"] == "pinned_long"
+    assert state_updates["long-agent"]["kv_policy"] == "idle_long"
     assert state_updates["long-agent"]["admission_state"] == "admitted"
 
     no_pressure = controller.on_tick(
@@ -477,8 +464,7 @@ def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
                 "agent_id": "long-agent",
                 "state": "tool_call",
                 "kv_blocks": 3,
-                "kv_policy": "pinned_long",
-                "kv_pinned": True,
+                "kv_policy": "idle_long",
             }
         },
         bytes_per_blk=BYTES_PER_GB,
@@ -495,17 +481,14 @@ def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
                 "agent_id": "long-agent",
                 "state": "tool_call",
                 "kv_blocks": 3,
-                "kv_policy": "pinned_long",
-                "kv_pinned": True,
+                "kv_policy": "idle_long",
             }
         },
         bytes_per_blk=BYTES_PER_GB,
     )
 
     assert offloaded == ["long-agent"]
-    assert pin_calls == [("long-agent", True), ("long-agent", False)]
     assert pressure["evictions"][0]["agent_id"] == "long-agent"
-    assert pressure["evictions"][0]["unpin_result"]["pinned"] is False
     assert controller.pending_counts()["evicted_pending_tool"] == 1
     assert state_updates["long-agent"]["kv_evicted"] is True
     assert state_updates["long-agent"]["admission_state"] == "evicted_pending_tool"
@@ -528,20 +511,14 @@ def test_long_tool_call_pins_then_pressure_offloads_and_uses_readmit_flow():
 
     waiter.join(timeout=2)
     assert resumed == [True]
-    assert report["admissions"] == [
-        {"agent_id": "long-agent", "previously_evicted": True, "admitted": True}
-    ]
+    assert report["admissions"][0]["agent_id"] == "long-agent"
+    assert report["admissions"][0]["restore_result"]["restored"] is True
     assert admitted == []
 
 
-def test_next_long_tool_call_reclassifies_short_pin_then_pressure_offloads():
-    pin_calls: list[tuple[str, bool]] = []
+def test_next_long_tool_call_reclassifies_short_idle_then_pressure_offloads():
     offloaded: list[str] = []
     predictor = FakePredictor({"agent": 1.0})
-
-    def pin(agent_id, pin):
-        pin_calls.append((agent_id, pin))
-        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
 
     def offload(cand):
         offloaded.append(cand.agent_id)
@@ -552,7 +529,6 @@ def test_next_long_tool_call_reclassifies_short_pin_then_pressure_offloads():
         threshold_gb=0.1,
         short_tool_call_threshold_s=2.0,
         predictor=predictor,
-        pin_callback=pin,
         offload_callback=offload,
         bytes_per_blk=BYTES_PER_GB,
     )
@@ -568,12 +544,10 @@ def test_next_long_tool_call_reclassifies_short_pin_then_pressure_offloads():
             "agent_id": "agent",
             "state": "tool_call",
             "kv_blocks": 1,
-            "kv_pinned": True,
         },
     )
 
-    assert policy["policy"] == "pinned_long"
-    assert pin_calls == [("agent", True), ("agent", True)]
+    assert policy["policy"] == "idle_long"
     assert offloaded == []
 
     report = controller.on_tick(
@@ -584,25 +558,18 @@ def test_next_long_tool_call_reclassifies_short_pin_then_pressure_offloads():
                 "agent_id": "agent",
                 "state": "tool_call",
                 "kv_blocks": 1,
-                "kv_policy": "pinned_long",
-                "kv_pinned": True,
+                "kv_policy": "idle_long",
             }
         },
         bytes_per_blk=BYTES_PER_GB,
     )
 
     assert report["evictions"][0]["agent_id"] == "agent"
-    assert pin_calls == [("agent", True), ("agent", True), ("agent", False)]
     assert offloaded == ["agent"]
 
 
-def test_failed_long_pressure_offload_restores_pin():
-    pin_calls: list[tuple[str, bool]] = []
+def test_failed_long_pressure_offload_keeps_agent_admitted():
     offloaded: list[str] = []
-
-    def pin(agent_id, pin):
-        pin_calls.append((agent_id, pin))
-        return {"pinned": pin, "changed_blocks": 1, "reason": "ok"}
 
     def offload(cand):
         offloaded.append(cand.agent_id)
@@ -613,7 +580,6 @@ def test_failed_long_pressure_offload_restores_pin():
         threshold_gb=0.1,
         short_tool_call_threshold_s=2.0,
         predictor=FakePredictor({"agent": 5.0}),
-        pin_callback=pin,
         offload_callback=offload,
         bytes_per_blk=BYTES_PER_GB,
     )
@@ -630,29 +596,24 @@ def test_failed_long_pressure_offload_restores_pin():
                 "agent_id": "agent",
                 "state": "tool_call",
                 "kv_blocks": 2,
-                "kv_policy": "pinned_long",
-                "kv_pinned": True,
+                "kv_policy": "idle_long",
             }
         },
         bytes_per_blk=BYTES_PER_GB,
     )
 
     assert offloaded == ["agent"]
-    assert pin_calls == [("agent", True), ("agent", False), ("agent", True)]
     assert report["evictions"][0]["evicted"] is False
-    assert report["evictions"][0]["repin_result"]["pinned"] is True
-    assert controller.pending_counts()["pinned_long"] == 1
+    assert controller.pending_counts()["idle_long"] == 1
     assert controller.pending_counts()["evicted_pending_tool"] == 0
 
 
-def test_predictor_unavailable_skips_pin_and_offload_policy():
-    pin_calls: list[tuple[str, bool]] = []
+def test_predictor_unavailable_skips_idle_offload_policy():
     offloaded: list[str] = []
 
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
-        pin_callback=lambda agent_id, pin: pin_calls.append((agent_id, pin)) or {},
         offload_callback=lambda cand: offloaded.append(cand.agent_id) or {},
     )
 
@@ -679,7 +640,6 @@ def test_predictor_unavailable_skips_pin_and_offload_policy():
 
     assert policy["policy"] == "skipped"
     assert policy["reason"] == "predictor_unavailable"
-    assert pin_calls == []
     assert offloaded == []
     assert report["evictions"] == []
     assert report["skipped_candidates"] == [
@@ -699,6 +659,7 @@ def test_evicted_ready_lane_admits_before_fresh_agents():
         predictor=FakePredictor({"evicted-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),
         evict_callback=evict,
+        restore_callback=lambda agent_id: {"restored": True},
     )
     controller.on_tick(
         tick=0,
@@ -732,10 +693,7 @@ def test_evicted_ready_lane_admits_before_fresh_agents():
 
     waiter.join(timeout=2)
     assert resumed == [True]
-    assert report["admissions"][0] == {
-        "agent_id": "evicted-agent",
-        "previously_evicted": True,
-        "admitted": True,
-    }
+    assert report["admissions"][0]["agent_id"] == "evicted-agent"
+    assert report["admissions"][0]["previously_evicted"] is True
     assert admitted == []
     assert controller.pending_counts()["fresh"] == 1

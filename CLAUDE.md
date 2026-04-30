@@ -201,12 +201,10 @@ Policy order:
    `initial_admit_interval_s`. After first SAT, fresh admissions use normal
    sidecar capacity math. READMITs bypass this launch ramp.
 3. At tool-call start, predict remaining duration. Predicted-short calls
-   (`< short_tool_call_threshold_s`) are pinned in accelerator KV cache.
-   Predicted-long calls are pinned too, but remain eligible for pressure
-   offload through the heap.
+   (`< short_tool_call_threshold_s`) stay resident and are excluded from
+   pressure offload. Predicted-long calls remain eligible for the heap.
 4. If `C <= threshold_gb`, offload highest-scoring eligible long idle
-   `tool_call` agents. The sidecar unpins selected long agents immediately
-   before offload. Pinned short calls are never offloaded by sidecar.
+   `tool_call` agents through the agent-aware OffloadingConnector.
 5. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
 
 The waiting queue has two lanes: previously evicted agents first, then fresh
@@ -224,14 +222,15 @@ Telemetry:
 
 Control:
 
-- Adds `POST /agent_kv_cache/evict`.
-- Forwards `evict_agent_kv(...)` through AsyncLLM, core client, engine core,
-  scheduler, KV cache manager, and block pool.
-- Tracks `agent_id -> request_id -> block_ids` in the scheduler.
-- Evicts only cached blocks with `ref_cnt == 0` for proactive sidecar eviction.
+- Adds `POST /agent_kv_cache/offload`, `POST /agent_kv_cache/restore`, and
+  keeps `POST /agent_kv_cache/evict` as an offload alias.
+- Installs `AgentAwareOffloadingConnector` under vLLM's KV connector package.
+- Reuses vLLM's `OffloadingConnector` async worker and the configured
+  vllm-ascend `NPUOffloadingSpec`.
+- Tracks `agent_id -> request_id -> block_ids` in the connector scheduler.
 
 Do not try to evict from sidecar using only `kv_blocks_size_gb`; those fields
-are telemetry. Safe mutation requires scheduler/block-pool state.
+are telemetry. Safe mutation requires connector/scheduler block ownership.
 
 ## Key Configuration
 
@@ -257,17 +256,17 @@ sidecar:
     initial_admit_interval_s: 2.0
     short_tool_call_threshold_s: 2.0
     predictor_model: null
-    pin_endpoint: null
     offload_endpoint: null
+    restore_endpoint: null
     eviction_endpoint: null
     eviction_timeout_s: 2.0
 ```
 
 `predictor_model: null` defaults to `prediction.save_model` in the wrapper.
-`pin_endpoint: null` defaults to `<sidecar.vllm_url>/agent_kv_cache/pin`.
 `offload_endpoint: null` defaults to
-`<sidecar.vllm_url>/agent_kv_cache/offload`. `eviction_endpoint` is kept as
-a backward-compatible alias for offload.
+`<sidecar.vllm_url>/agent_kv_cache/offload`. `restore_endpoint: null`
+defaults to `<sidecar.vllm_url>/agent_kv_cache/restore`. `eviction_endpoint`
+is kept as a backward-compatible alias for offload.
 
 ## Output Artifacts
 

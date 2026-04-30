@@ -33,7 +33,7 @@ Main components:
 | `src/sidecar.py` | Polls vLLM metrics and live agent state, computes KV headroom, scores idle agents, evicts under pressure, and admits queued agents. |
 | `src/build_tool_predictor.py` | Trains or loads a model that predicts remaining tool-call time, used to score which idle agent is best to evict. |
 | `src/collect_tool_trace.py` | Standalone collector for detailed ActionEvent -> ObservationEvent tool traces. |
-| `src/vllm_patches/apply_patches.py` | Patches vLLM/vllm-ascend 0.11.x-0.13.x to report per-agent KV usage and expose `POST /agent_kv_cache/evict`. |
+| `src/vllm_patches/apply_patches.py` | Patches vLLM/vllm-ascend 0.13.0 to report per-agent KV usage and install the agent-aware offloading connector. |
 | `run_abc-bench.sh` | YAML-driven wrapper that expands config, validates settings, starts the runner, sidecar, and optional predictor build. |
 
 ## Dynamic Admission Control
@@ -55,9 +55,9 @@ Policy:
    capacity math drains the fresh queue on each sidecar tick. READMITs are not
    delayed by the ramp.
 3. **Tool-call KV policy**: when a tool call starts, predict its remaining
-   duration. Calls below `short_tool_call_threshold_s` are pinned in accelerator
-   KV cache and excluded from pressure offload. Longer calls are also pinned,
-   but remain eligible for the pressure heap.
+   duration. Calls below `short_tool_call_threshold_s` stay resident and are
+   excluded from pressure offload. Longer calls are eligible for the pressure
+   heap.
 4. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
    `tool_call` agents by descending score:
 
@@ -65,8 +65,7 @@ Policy:
    eviction_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
    ```
 
-   Pinned short calls are excluded. Pinned long calls are unpinned only when
-   selected for offload. Offloaded agents continue their current tool call. After the tool returns,
+   Short predicted calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
 5. **Admission**: when `C > threshold_gb` and `w >= 1`, launch queued agents.
@@ -81,15 +80,15 @@ The vLLM patch provides two capabilities needed for the control loop:
 
 1. Telemetry: OpenAI responses include `kv_blocks_used` and
    `kv_blocks_size_gb` when the request carries `agent_id`.
-2. Control: `POST /agent_kv_cache/pin` pins/unpins agent-owned cached blocks,
-   `POST /agent_kv_cache/offload` offloads unpinned cached blocks, and
+2. Control: `POST /agent_kv_cache/offload` marks an agent for connector-backed
+   CPU offload, `POST /agent_kv_cache/restore` notifies readmission, and
    `POST /agent_kv_cache/evict` remains a backward-compatible alias.
 
-The scheduler hook tracks `agent_id -> request_id -> block_ids`, records cached
-blocks as requests finish, pins short-call blocks against normal cache
-pressure, and offloads only unpinned cached blocks whose `ref_cnt == 0`
-when requested by the sidecar. This is required because the sidecar's GB
-metrics are not enough to safely mutate vLLM's internal KV block pool.
+The patch installs `AgentAwareOffloadingConnector`, a small subclass/wrapper of
+vLLM's `OffloadingConnector`. It tracks `agent_id -> request_id -> block_ids`,
+uses the existing async transfer worker and the configured
+`vllm_ascend.kv_offload.npu.NPUOffloadingSpec`, and changes only the save
+decision logic.
 
 Apply the patch on the NPU machine:
 
@@ -118,8 +117,8 @@ CANN 8.5.1 host object files installed under `objects-*` are copied to the
 top-level directory expected by `recompile_binary.py`. Runtime dependencies
 advertised by the installed packages are then installed under constraints that
 keep the Ascend torch/Triton/CANN stack pinned while filtering CUDA packages
-and vLLM's upstream torch pins. The patcher keeps anchors compatible with
-nearby 0.11.x-0.13.x layouts where practical.
+and vLLM's upstream torch pins. The patcher targets the vLLM/vllm-ascend
+0.13.0 layout used by the Ascend server.
 
 ## Quick Start
 
@@ -194,8 +193,8 @@ sidecar:
     initial_admit_interval_s: 2.0
     short_tool_call_threshold_s: 2.0
     predictor_model: null        # defaults to prediction.save_model
-    pin_endpoint: null           # defaults to <sidecar.vllm_url>/agent_kv_cache/pin
     offload_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/offload
+    restore_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/restore
     eviction_endpoint: null      # backward-compatible alias for offload_endpoint
     eviction_timeout_s: 2.0
 ```
