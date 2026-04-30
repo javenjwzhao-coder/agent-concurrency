@@ -558,6 +558,10 @@ def _patch_core_client_agent_kv() -> None:
             [
                 "    def reset_prefix_cache(self) -> None:\n"
                 "        raise NotImplementedError\n",
+                "    def reset_prefix_cache(\n"
+                "        self, reset_running_requests: bool = False, reset_connector: bool = False\n"
+                "    ) -> bool:\n"
+                "        raise NotImplementedError\n",
             ],
             abstract_sync,
             "core_client.py abstract sync agent KV methods",
@@ -588,6 +592,10 @@ def _patch_core_client_agent_kv() -> None:
             txt,
             [
                 "    async def reset_prefix_cache_async(self) -> None:\n"
+                "        raise NotImplementedError\n",
+                "    async def reset_prefix_cache_async(\n"
+                "        self, reset_running_requests: bool = False, reset_connector: bool = False\n"
+                "    ) -> bool:\n"
                 "        raise NotImplementedError\n",
             ],
             abstract_async,
@@ -622,6 +630,12 @@ def _patch_core_client_agent_kv() -> None:
             [
                 "    def reset_prefix_cache(self) -> None:\n"
                 "        self.engine_core.reset_prefix_cache()\n",
+                "    def reset_prefix_cache(\n"
+                "        self, reset_running_requests: bool = False, reset_connector: bool = False\n"
+                "    ) -> bool:\n"
+                "        return self.engine_core.reset_prefix_cache(\n"
+                "            reset_running_requests, reset_connector\n"
+                "        )\n",
             ],
             inproc_sync,
             "core_client.py in-process agent KV methods",
@@ -656,6 +670,12 @@ def _patch_core_client_agent_kv() -> None:
             [
                 "    def reset_prefix_cache(self) -> None:\n"
                 "        self.call_utility(\"reset_prefix_cache\")\n",
+                "    def reset_prefix_cache(\n"
+                "        self, reset_running_requests: bool = False, reset_connector: bool = False\n"
+                "    ) -> bool:\n"
+                "        return self.call_utility(\n"
+                "            \"reset_prefix_cache\", reset_running_requests, reset_connector\n"
+                "        )\n",
             ],
             mp_sync,
             "core_client.py sync MP agent KV methods",
@@ -694,6 +714,12 @@ def _patch_core_client_agent_kv() -> None:
             [
                 "    async def reset_prefix_cache_async(self) -> None:\n"
                 "        await self.call_utility_async(\"reset_prefix_cache\")\n",
+                "    async def reset_prefix_cache_async(\n"
+                "        self, reset_running_requests: bool = False, reset_connector: bool = False\n"
+                "    ) -> bool:\n"
+                "        return await self.call_utility_async(\n"
+                "            \"reset_prefix_cache\", reset_running_requests, reset_connector\n"
+                "        )\n",
             ],
             async_mp,
             "core_client.py async MP agent KV methods",
@@ -744,6 +770,12 @@ def _patch_engine_core_agent_kv() -> None:
             "        self.scheduler.reset_prefix_cache()\n",
             "    def reset_prefix_cache(self) -> bool:\n"
             "        return self.scheduler.reset_prefix_cache()\n",
+            "    def reset_prefix_cache(\n"
+            "        self, reset_running_requests: bool = False, reset_connector: bool = False\n"
+            "    ) -> bool:\n"
+            "        return self.scheduler.reset_prefix_cache(\n"
+            "            reset_running_requests, reset_connector\n"
+            "        )\n",
         ],
         methods,
         "core.py agent KV methods",
