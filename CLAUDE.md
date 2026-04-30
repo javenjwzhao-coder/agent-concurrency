@@ -10,17 +10,19 @@ This project runs on **Ascend NPU** hardware. The inference backend is
 vLLM/vllm-ascend 0.13.0 into the project `.venv` and reuses that install on
 later starts. It installs the compatible local Ascend runtime stack
 (`torch==2.8.0`, `torch-npu==2.8.0.post2`, `triton-ascend==3.2.0`) before
-building `vllm-ascend` from the v0.13.0 source tree for
-`SOC_VERSION=ascend910_9391` by default, with the checkout cached under
-`.vllm-ascend-src/`. It installs the CANN Python build dependencies (`sympy`,
-`numpy<2.0.0`, and related utilities) into `.venv` and exposes that
-site-packages path to the custom-op compiler during the source build. Custom-op
-compilation defaults to `MAX_JOBS=16`; override `VLLM_ASCEND_MAX_JOBS` if the
-build host needs a different cap. The script also patches the cached source
-checkout so CANN 8.5.1 host object files installed under `objects-*` are copied
-to the top-level directory expected by `recompile_binary.py`. Runtime
-dependencies are installed under constraints that keep that Ascend stack pinned
-while filtering CUDA packages and vLLM's upstream torch pins. When
+following the official source-install flow: it clones vLLM v0.13.0 under
+`.vllm-src/`, installs it with `VLLM_TARGET_DEVICE=empty`, then clones
+vllm-ascend v0.13.0 under `.vllm-ascend-src/`, initializes submodules, and
+installs it editable for `SOC_VERSION=ascend910_9391` by default. It installs
+the CANN Python build dependencies (`sympy`, `numpy<2.0.0`, and related
+utilities) into `.venv` and exposes that site-packages path to the custom-op
+compiler during the source build. Custom-op compilation defaults to
+`MAX_JOBS=16`; override `VLLM_ASCEND_MAX_JOBS` if the build host needs a
+different cap. The script also patches the cached source checkout so CANN 8.5.1
+host object files installed under `objects-*` are copied to the top-level
+directory expected by `recompile_binary.py`. Runtime dependencies are installed
+under constraints that keep that Ascend stack pinned while filtering CUDA
+packages and vLLM's upstream torch pins. When
 investigating internals or applying patches, target the installed
 vllm-ascend/vLLM package and keep version-specific anchors in mind.
 

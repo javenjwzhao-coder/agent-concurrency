@@ -77,16 +77,23 @@ start_native() {
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
     VENV="$REPO_DIR/.venv"
     VLLM_ASCEND_VERSION="${VLLM_ASCEND_VERSION:-0.13.0}"
+    VLLM_VERSION="${VLLM_VERSION:-$VLLM_ASCEND_VERSION}"
     TORCH_VERSION="${VLLM_ASCEND_TORCH_VERSION:-2.8.0}"
     TORCH_NPU_VERSION="${VLLM_ASCEND_TORCH_NPU_VERSION:-2.8.0.post2}"
     TORCHVISION_VERSION="${VLLM_ASCEND_TORCHVISION_VERSION:-0.23.0}"
     TORCHAUDIO_VERSION="${VLLM_ASCEND_TORCHAUDIO_VERSION:-2.8.0}"
     TRITON_ASCEND_VERSION="${VLLM_ASCEND_TRITON_ASCEND_VERSION:-3.2.0}"
     VLLM_ASCEND_SOC_VERSION="${VLLM_ASCEND_SOC_VERSION:-ascend910_9391}"
+    VLLM_INSTALL_METHOD="${VLLM_ASCEND_INSTALL_METHOD:-source}"
+    VLLM_GIT_REF="${VLLM_GIT_REF:-v${VLLM_VERSION}}"
+    VLLM_GIT_URL="${VLLM_GIT_URL:-https://github.com/vllm-project/vllm.git}"
+    VLLM_SOURCE_DIR="${VLLM_SOURCE_DIR:-$REPO_DIR/.vllm-src/${VLLM_GIT_REF}}"
     VLLM_ASCEND_GIT_REF="${VLLM_ASCEND_GIT_REF:-v${VLLM_ASCEND_VERSION}}"
+    VLLM_ASCEND_GIT_URL="${VLLM_ASCEND_GIT_URL:-https://github.com/vllm-project/vllm-ascend.git}"
     VLLM_ASCEND_MAX_JOBS="${VLLM_ASCEND_MAX_JOBS:-16}"
     VLLM_ASCEND_SOURCE_DIR="${VLLM_ASCEND_SOURCE_DIR:-$REPO_DIR/.vllm-ascend-src/${VLLM_ASCEND_GIT_REF}-${VLLM_ASCEND_SOC_VERSION}}"
     VLLM_ASCEND_SOC_MARKER="$VENV/.vllm-ascend-soc-version"
+    export PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple}"
 
     # ── 1. Create project venv via uv (skipped if already exists) ────────────
     if [ ! -f "$VENV/bin/activate" ]; then
@@ -115,8 +122,12 @@ for p in sys.path:
 
     check_local_vllm_ascend() {
         VENV="$VENV" \
+        DESIRED_VLLM="$VLLM_VERSION" \
         DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
         DESIRED_VLLM_ASCEND_SOC="$VLLM_ASCEND_SOC_VERSION" \
+        VLLM_INSTALL_METHOD="$VLLM_INSTALL_METHOD" \
+        VLLM_SOURCE_DIR="$VLLM_SOURCE_DIR" \
+        VLLM_ASCEND_SOURCE_DIR="$VLLM_ASCEND_SOURCE_DIR" \
         VLLM_ASCEND_SOC_MARKER="$VLLM_ASCEND_SOC_MARKER" \
         "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
@@ -125,10 +136,14 @@ import os
 import pathlib
 import sys
 
-desired = os.environ["DESIRED_VLLM_ASCEND"]
+desired_vllm = os.environ["DESIRED_VLLM"]
+desired_ascend = os.environ["DESIRED_VLLM_ASCEND"]
 desired_soc = os.environ["DESIRED_VLLM_ASCEND_SOC"]
+install_method = os.environ["VLLM_INSTALL_METHOD"]
 soc_marker = pathlib.Path(os.environ["VLLM_ASCEND_SOC_MARKER"])
 venv = pathlib.Path(os.environ["VENV"]).resolve()
+vllm_source = pathlib.Path(os.environ["VLLM_SOURCE_DIR"]).resolve()
+ascend_source = pathlib.Path(os.environ["VLLM_ASCEND_SOURCE_DIR"]).resolve()
 
 def dist_version(name):
     try:
@@ -156,30 +171,45 @@ def is_local(path):
     except ValueError:
         return False
 
+def is_under(path, root):
+    if path is None:
+        return False
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
 vllm_version = dist_version("vllm")
 ascend_version = dist_version("vllm-ascend")
 vllm_path = package_path("vllm")
 ascend_path = package_path("vllm_ascend")
 soc = soc_marker.read_text().strip() if soc_marker.exists() else None
+if install_method == "source":
+    vllm_path_ready = is_under(vllm_path, vllm_source)
+    ascend_path_ready = is_under(ascend_path, ascend_source)
+else:
+    vllm_path_ready = is_local(vllm_path)
+    ascend_path_ready = is_local(ascend_path)
 ready = (
-    vllm_version == desired
-    and ascend_version == desired
-    and is_local(vllm_path)
-    and is_local(ascend_path)
+    vllm_version == desired_vllm
+    and ascend_version == desired_ascend
+    and vllm_path_ready
+    and ascend_path_ready
     and soc == desired_soc
 )
 
 if ready:
     print(
         f"[INFO] Reusing local vllm=={vllm_version}, "
-        f"vllm-ascend=={ascend_version} ({soc})"
+        f"vllm-ascend=={ascend_version} ({soc}, {install_method})"
     )
 else:
     print(
         "[INFO] Local vllm-ascend install needed "
         f"(vllm={vllm_version!r} at {vllm_path}, "
         f"vllm-ascend={ascend_version!r} at {ascend_path}, "
-        f"soc={soc!r})"
+        f"soc={soc!r}, method={install_method!r})"
     )
 sys.exit(0 if ready else 1)
 PY
@@ -268,6 +298,36 @@ sys.exit(0 if ready else 1)
 PY
     }
 
+    clone_git_source() {
+        local name="$1"
+        local url="$2"
+        local ref="$3"
+        local dest="$4"
+
+        if [ -d "$dest/.git" ]; then
+            echo "[INFO] Reusing $name source checkout at $dest"
+            return 0
+        fi
+
+        if [ -d "$dest" ] && [ -z "$(find "$dest" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+            rmdir "$dest"
+        fi
+
+        if [ -e "$dest" ]; then
+            echo "[ERROR] $name source path exists but is not a git checkout: $dest" >&2
+            echo "[ERROR] Remove it or set ${name}_SOURCE_DIR to a clean checkout, then rerun." >&2
+            exit 1
+        fi
+
+        echo "[INFO] Cloning $name $ref source from $url ..."
+        mkdir -p "$(dirname "$dest")"
+        if ! git clone --depth 1 --branch "$ref" "$url" "$dest"; then
+            echo "[ERROR] Failed to clone $name from $url" >&2
+            echo "[ERROR] If GitHub is blocked, pre-populate $dest or set ${name}_GIT_URL to an accessible mirror." >&2
+            exit 1
+        fi
+    }
+
     if check_local_ascend_stack; then
         :
     else
@@ -308,31 +368,58 @@ PY
     if check_local_vllm_ascend; then
         :
     else
-        echo "[INFO] Installing vllm==${VLLM_ASCEND_VERSION} and building vllm-ascend==${VLLM_ASCEND_VERSION} (${VLLM_ASCEND_SOC_VERSION}) into $VENV ..."
+        echo "[INFO] Installing vllm==${VLLM_VERSION} and vllm-ascend==${VLLM_ASCEND_VERSION} (${VLLM_ASCEND_SOC_VERSION}, ${VLLM_INSTALL_METHOD}) into $VENV ..."
         rm -rf \
           "$VENV_SITE"/vllm \
           "$VENV_SITE"/vllm_ascend \
           "$VENV_SITE"/vllm-*.dist-info \
+          "$VENV_SITE"/vllm-*.egg-info \
           "$VENV_SITE"/vllm_ascend-*.dist-info \
           "$VENV_SITE"/vllm_ascend-*.egg-info \
+          "$VENV_SITE"/__editable__.*vllm-* \
+          "$VENV_SITE"/__editable__.*vllm.* \
           "$VENV_SITE"/__editable__.*vllm_ascend* \
           "$VLLM_ASCEND_SOC_MARKER"
-        if command -v uv >/dev/null 2>&1; then
-            uv pip install --python "$VENV/bin/python" --upgrade --no-deps \
-              "vllm==${VLLM_ASCEND_VERSION}"
+
+        if [ "$VLLM_INSTALL_METHOD" = "wheel" ]; then
+            echo "[INFO] Installing official pre-built wheels from pip index: $PIP_INDEX_URL"
+            if command -v uv >/dev/null 2>&1; then
+                uv pip install --python "$VENV/bin/python" --upgrade \
+                  "vllm==${VLLM_VERSION}"
+                uv pip install --python "$VENV/bin/python" --upgrade \
+                  "vllm-ascend==${VLLM_ASCEND_VERSION}"
+            else
+                "$VENV/bin/python" -m pip install --upgrade \
+                  "vllm==${VLLM_VERSION}"
+                "$VENV/bin/python" -m pip install --upgrade \
+                  "vllm-ascend==${VLLM_ASCEND_VERSION}"
+            fi
+        elif [ "$VLLM_INSTALL_METHOD" = "source" ]; then
+            "$VENV/bin/python" -m pip install --upgrade \
+              attrs "numpy<2.0.0" decorator sympy cffi pyyaml pathlib2 psutil \
+              protobuf scipy requests absl-py typing_extensions \
+              cmake ninja packaging pybind11 setuptools setuptools-scm wheel
+
+            clone_git_source "VLLM" "$VLLM_GIT_URL" "$VLLM_GIT_REF" "$VLLM_SOURCE_DIR"
+            clone_git_source "VLLM_ASCEND" "$VLLM_ASCEND_GIT_URL" "$VLLM_ASCEND_GIT_REF" "$VLLM_ASCEND_SOURCE_DIR"
+
+            echo "[INFO] Updating vllm-ascend submodules for Atlas A3 custom operators ..."
+            git -C "$VLLM_ASCEND_SOURCE_DIR" submodule update --init --recursive
+
+            VLLM_BUILD_PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
+            echo "[INFO] Building/installing vLLM from source with VLLM_TARGET_DEVICE=empty ..."
+            PATH="$VENV/bin:$PATH" \
+            PYTHONPATH="$VLLM_BUILD_PYTHONPATH" \
+            VLLM_TARGET_DEVICE=empty \
+            "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps -e \
+              "$VLLM_SOURCE_DIR"
         else
-            "$VENV/bin/python" -m pip install --upgrade --no-deps \
-              "vllm==${VLLM_ASCEND_VERSION}"
+            echo "[ERROR] Unsupported VLLM_ASCEND_INSTALL_METHOD=$VLLM_INSTALL_METHOD (expected source or wheel)" >&2
+            exit 1
         fi
-        if [ ! -d "$VLLM_ASCEND_SOURCE_DIR/.git" ]; then
-            echo "[INFO] Cloning vllm-ascend ${VLLM_ASCEND_GIT_REF} source for ${VLLM_ASCEND_SOC_VERSION} ..."
-            mkdir -p "$(dirname "$VLLM_ASCEND_SOURCE_DIR")"
-            git clone --depth 1 --branch "$VLLM_ASCEND_GIT_REF" \
-              https://github.com/vllm-project/vllm-ascend.git \
-              "$VLLM_ASCEND_SOURCE_DIR"
-        fi
-        git -C "$VLLM_ASCEND_SOURCE_DIR" submodule update --init --recursive
-        VLLM_ASCEND_SOURCE_DIR="$VLLM_ASCEND_SOURCE_DIR" "$VENV/bin/python" - <<'PY'
+
+        if [ "$VLLM_INSTALL_METHOD" = "source" ]; then
+            VLLM_ASCEND_SOURCE_DIR="$VLLM_ASCEND_SOURCE_DIR" "$VENV/bin/python" - <<'PY'
 import os
 import pathlib
 
@@ -375,25 +462,22 @@ add_dependencies(vllm_ascend_kernels vllm_ascend_flatten_host_objs)
 else:
     print(f"[INFO] Reusing existing CANN host object layout patch in {cmake_lists}")
 PY
-        VLLM_ASCEND_BUILD_PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
-        rm -rf \
-          "$VLLM_ASCEND_SOURCE_DIR"/build \
-          "$VLLM_ASCEND_SOURCE_DIR"/csrc/build \
-          "$VLLM_ASCEND_SOURCE_DIR"/vllm_ascend/_cann_ops_custom
-        "$VENV/bin/python" -m pip install --upgrade \
-          attrs "numpy<2.0.0" decorator sympy cffi pyyaml pathlib2 psutil \
-          protobuf scipy requests absl-py typing_extensions \
-          cmake ninja packaging pybind11 setuptools setuptools-scm wheel
-        echo "[INFO] Building/installing vllm-ascend for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} (MAX_JOBS=${VLLM_ASCEND_MAX_JOBS}) ..."
-        export CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS"
-        export MAX_JOBS="$VLLM_ASCEND_MAX_JOBS"
-        CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS" \
-        MAX_JOBS="$VLLM_ASCEND_MAX_JOBS" \
-        PATH="$VENV/bin:$PATH" \
-        PYTHONPATH="$VLLM_ASCEND_BUILD_PYTHONPATH" \
-        SOC_VERSION="$VLLM_ASCEND_SOC_VERSION" \
-        "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps \
-          "$VLLM_ASCEND_SOURCE_DIR"
+            VLLM_ASCEND_BUILD_PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
+            rm -rf \
+              "$VLLM_ASCEND_SOURCE_DIR"/build \
+              "$VLLM_ASCEND_SOURCE_DIR"/csrc/build \
+              "$VLLM_ASCEND_SOURCE_DIR"/vllm_ascend/_cann_ops_custom
+            echo "[INFO] Building/installing vllm-ascend from source for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} (MAX_JOBS=${VLLM_ASCEND_MAX_JOBS}) ..."
+            export CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS"
+            export MAX_JOBS="$VLLM_ASCEND_MAX_JOBS"
+            CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS" \
+            MAX_JOBS="$VLLM_ASCEND_MAX_JOBS" \
+            PATH="$VENV/bin:$PATH" \
+            PYTHONPATH="$VLLM_ASCEND_BUILD_PYTHONPATH" \
+            SOC_VERSION="$VLLM_ASCEND_SOC_VERSION" \
+            "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps -e \
+              "$VLLM_ASCEND_SOURCE_DIR"
+        fi
         printf '%s\n' "$VLLM_ASCEND_SOC_VERSION" > "$VLLM_ASCEND_SOC_MARKER"
         if ! check_local_vllm_ascend; then
             echo "[ERROR] vllm-ascend install verification failed after install" >&2
