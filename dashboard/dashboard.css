@@ -168,16 +168,43 @@ main {
   background: #0b1120;
 }
 
-/* ── KV % graph line (amber-gold) ────────────────────────────────────────── */
+/* ── KV % graph lines ────────────────────────────────────────────────────── */
 
-.vis-graph-group0 .vis-line  { stroke: #f59e0b !important; stroke-width: 2px; }
-.vis-graph-group0 .vis-fill  { fill: #f59e0b; opacity: 0.10 !important; }
-.vis-graph-group0 .vis-point { fill: #f59e0b; stroke: #c47a07; }
+.kv-line-used,
+.vis-graph-group0 {
+  stroke: #f59e0b !important;
+  stroke-width: 2px !important;
+  fill: none !important;
+}
+
+.kv-line-used.vis-fill,
+.vis-graph-group0.vis-fill {
+  fill: #f59e0b !important;
+  fill-opacity: 0.10 !important;
+  opacity: 0.10 !important;
+  stroke: none !important;
+}
+
+.kv-line-used.vis-point,
+.vis-graph-group0.vis-point {
+  fill: #f59e0b !important;
+  stroke: #c47a07 !important;
+}
 
 /* Offload threshold line: used% where free KV reaches admission.threshold_gb. */
-.vis-graph-group1 .vis-line  { stroke: #ff003d !important; stroke-width: 2px; }
-.vis-graph-group1 .vis-fill  { fill: transparent !important; opacity: 0 !important; }
-.vis-graph-group1 .vis-point { display: none !important; }
+.kv-line-threshold,
+.vis-graph-group1 {
+  stroke: #ff003d !important;
+  stroke-width: 2px !important;
+  fill: none !important;
+}
+
+.kv-line-threshold.vis-fill,
+.vis-graph-group1.vis-fill,
+.kv-line-threshold.vis-point,
+.vis-graph-group1.vis-point {
+  display: none !important;
+}
 
 #kvChart .vis-y-axis .vis-label,
 #kvChart .vis-y-axis .vis-major,

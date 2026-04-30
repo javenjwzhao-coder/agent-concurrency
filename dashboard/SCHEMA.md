@@ -58,7 +58,7 @@ ticks it already rendered.
     "s_t":     0.31,                           // float — current avg KV usage of active agents
     "s_prev":  0.29,                           // float|null — previous tick's avg
     "w":       18.03,                          // float|null — headroom = C / min(s_t, s_prev)
-    "threshold_gb": 0.1,                       // float — pressure threshold
+    "threshold_gb": 3.2,                       // float — configured pressure threshold
     "fallback_long_tool_call_s": 30.0,         // float — first-run predictor fallback age
     "first_saturation_seen": false,            // bool — initial launch ramp is disabled after first SAT
     "initial_admit_interval_s": 2.0,           // float — fresh-admit interval before first SAT

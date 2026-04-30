@@ -122,9 +122,37 @@
 
     state.kvPoints = new vis.DataSet();
     state.kvGroups = new vis.DataSet([
-      { id: "kv",        content: "KV used %",        className: "kv-line-used" },
-      { id: "threshold", content: "offload threshold", className: "kv-line-threshold",
-        options: { shaded: false, drawPoints: false, interpolation: false } },
+      {
+        id: "kv",
+        content: "KV used %",
+        className: "kv-line-used",
+        style: "stroke:#f59e0b;stroke-width:2px;fill:none;",
+        options: {
+          shaded: {
+            enabled: true,
+            orientation: "bottom",
+            style: "fill:#f59e0b;fill-opacity:0.10;stroke:none;",
+          },
+          drawPoints: {
+            enabled: true,
+            size: 3,
+            style: "circle",
+            styles: "fill:#f59e0b;stroke:#c47a07;stroke-width:1px;",
+          },
+          interpolation: { enabled: false },
+        },
+      },
+      {
+        id: "threshold",
+        content: "offload threshold",
+        className: "kv-line-threshold",
+        style: "stroke:#ff003d;stroke-width:2px;fill:none;",
+        options: {
+          shaded: { enabled: false },
+          drawPoints: { enabled: false },
+          interpolation: { enabled: false },
+        },
+      },
     ]);
     const kvOpts = {
       style: "line",
@@ -496,11 +524,14 @@
 
   function totalKvGb(record) {
     const vllm = record.vllm || {};
+    const adm = record.admission || {};
     const directTotal = finiteNumber(vllm.kv_total_gb);
     if (directTotal !== null && directTotal > 0) return directTotal;
 
     const used = finiteNumber(vllm.kv_used_gb);
-    const free = finiteNumber(vllm.kv_free_gb);
+    // admission.C is live free KV, not the offload threshold. Use it only to
+    // infer total KV capacity when vLLM exposes pct+free but not total memory.
+    const free = finiteNumber(vllm.kv_free_gb) ?? finiteNumber(adm.C);
     if (used !== null && free !== null && used + free > 0) return used + free;
 
     const pct = finiteNumber(vllm.kv_cache_used_pct);
@@ -511,10 +542,10 @@
 
   function offloadThresholdPct(record) {
     const adm = record.admission || {};
-    const freeThresholdGb = finiteNumber(adm.threshold_gb);
+    const offloadThresholdGb = finiteNumber(adm.threshold_gb);
     const total = totalKvGb(record);
-    if (freeThresholdGb === null || total === null || total <= 0) return null;
-    return Math.max(0, Math.min(100, 100 * (1 - freeThresholdGb / total)));
+    if (offloadThresholdGb === null || total === null || total <= 0) return null;
+    return Math.max(0, Math.min(100, 100 * (1 - offloadThresholdGb / total)));
   }
 
   // ── tick application ───────────────────────────────────────────────────
