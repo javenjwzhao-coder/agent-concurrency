@@ -120,6 +120,27 @@ for p in sys.path:
 " > "$VENV_SITE/shared_venv.pth"
     echo "[INFO] Linked shared venv packages ($(wc -l < "$VENV_SITE/shared_venv.pth") paths) for non-vllm deps"
 
+    if [ "$VLLM_INSTALL_METHOD" = "source" ]; then
+        VLLM_SOURCE_DIR="$VLLM_SOURCE_DIR" \
+        VLLM_ASCEND_SOURCE_DIR="$VLLM_ASCEND_SOURCE_DIR" \
+        VENV_SITE="$VENV_SITE" \
+        "$VENV/bin/python" - <<'PY'
+import os
+import pathlib
+
+paths = [
+    str(pathlib.Path(os.environ["VLLM_SOURCE_DIR"]).resolve()),
+    str(pathlib.Path(os.environ["VLLM_ASCEND_SOURCE_DIR"]).resolve()),
+]
+pth = pathlib.Path(os.environ["VENV_SITE"]) / "00_vllm_source_paths.pth"
+pth.write_text(
+    "import sys; "
+    f"paths = {paths!r}; "
+    "[sys.path.insert(0, p) for p in reversed(paths) if p and p not in sys.path]\n"
+)
+PY
+    fi
+
     check_local_vllm_ascend() {
         VENV="$VENV" \
         DESIRED_VLLM="$VLLM_VERSION" \
@@ -188,12 +209,20 @@ soc = soc_marker.read_text().strip() if soc_marker.exists() else None
 if install_method == "source":
     vllm_path_ready = is_under(vllm_path, vllm_source)
     ascend_path_ready = is_under(ascend_path, ascend_source)
+    vllm_version_ready = vllm_version is not None and (
+        vllm_version == desired_vllm
+        or vllm_version.startswith(desired_vllm + "+")
+        or vllm_version.startswith(desired_vllm + ".dev")
+    )
+    ascend_version_ready = ascend_version is not None
 else:
     vllm_path_ready = is_local(vllm_path)
     ascend_path_ready = is_local(ascend_path)
+    vllm_version_ready = vllm_version == desired_vllm
+    ascend_version_ready = ascend_version == desired_ascend
 ready = (
-    vllm_version == desired_vllm
-    and ascend_version == desired_ascend
+    vllm_version_ready
+    and ascend_version_ready
     and vllm_path_ready
     and ascend_path_ready
     and soc == desired_soc
