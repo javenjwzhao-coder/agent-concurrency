@@ -253,6 +253,18 @@ while IFS='=' read -r key value; do
     declare "$key=$value"
 done <<< "$CONFIG_LINES"
 
+derive_sidecar_url() {
+    local url="${1%/}"
+    if [[ "$url" == */v1 ]]; then
+        url="${url%/v1}"
+    fi
+    printf '%s\n' "$url"
+}
+
+if [[ -z "${SIDECAR_VLLM_URL:-}" && -n "${LLM_BASE_URL:-}" ]]; then
+    SIDECAR_VLLM_URL="$(derive_sidecar_url "$LLM_BASE_URL")"
+fi
+
 # ─────────────────────────── validation ──────────────────────────────────────
 
 ERRORS=()
@@ -427,11 +439,13 @@ echo "    max_iterations:     ${MAX_ITERATIONS:-80}"
 echo ""
 echo -e "  ${CYAN}Launch${RESET}"
 echo "    randomise:          ${LAUNCH_RANDOMISE:-false}"
-echo "    max_agents_per_wave:${MAX_AGENTS_PER_WAVE:-4}"
-echo "    min_wave_delay_s:   ${MIN_WAVE_DELAY_S:-2.0}"
-echo "    max_wave_delay_s:   ${MAX_WAVE_DELAY_S:-15.0}"
-echo "    seed:               ${LAUNCH_SEED:-null}"
 echo "    max_concurrent:     ${MAX_CONCURRENT:-8}"
+if [[ "${LAUNCH_RANDOMISE:-false}" == "true" ]]; then
+    echo "    max_agents_per_wave: ${MAX_AGENTS_PER_WAVE:-4}"
+    echo "    min_wave_delay_s:   ${MIN_WAVE_DELAY_S:-2.0}"
+    echo "    max_wave_delay_s:   ${MAX_WAVE_DELAY_S:-15.0}"
+    echo "    seed:               ${LAUNCH_SEED:-null}"
+fi
 echo ""
 echo -e "  ${CYAN}Testing${RESET}"
 echo "    enabled:            ${TESTING_ENABLED:-false}"
@@ -439,7 +453,7 @@ echo "    timeout_sec:        ${TEST_TIMEOUT_SEC:-1800}"
 echo ""
 echo -e "  ${CYAN}Prediction${RESET}"
 echo "    enabled:            ${PREDICTION_ENABLED:-false}"
-echo "    model:              ${PREDICTION_MODEL:-ridge}"
+echo "    model:              ${PREDICTION_MODEL:-hgb}"
 echo "    test_fraction:      ${PREDICTION_TEST_FRAC:-0.2}"
 echo "    save_model:         ${PREDICTION_SAVE_MODEL:-}"
 echo "    long_threshold_s:   ${PREDICTION_LONG_THRESHOLD_S:-2.0}"

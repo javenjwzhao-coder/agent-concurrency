@@ -1,204 +1,49 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# ABC-Bench Instrumented Run Configuration
-# ─────────────────────────────────────────────────────────────────────────────
+# Minimal ABC-Bench run configuration.
 #
-# Usage:
-#   python run_with_config.py --config abc_bench_config.yaml
-#   python run_with_config.py --config abc_bench_config.yaml --dry-run
-#
-# Environment variable overrides:
-#   Any value can reference an env var with ${VAR_NAME} syntax.
-#   Example:  api_key: "${LLM_API_KEY}"
-#
-# CLI overrides:
-#   Any top-level key can be overridden from the command line:
-#     python run_with_config.py --config abc_bench_config.yaml \
-#         --override max_tasks=3 --override launch.seed=99
-# ─────────────────────────────────────────────────────────────────────────────
+# Omitted values use the defaults in run_abc-bench.sh and
+# src/run_abc_bench_instrumented.py. Use --override key.path=value for
+# one-off tweaks without adding rarely changed fields back to this file.
 
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  LLM Endpoint                                                           ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 llm:
-  # LiteLLM-format model name.  The "openai/" prefix tells LiteLLM to use
-  # the OpenAI-compatible chat completions API.
   model: "openai/qwen3-32b"
-
-  # vLLM (or any OpenAI-compatible) base URL.
   base_url: "http://127.0.0.1:8027/v1"
-
-  # API key.
   api_key: "sk-local-ascend"
 
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Dataset & Task Selection                                                ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 dataset:
-  # Path to the ABC-Bench root (containing a `tasks/` subdirectory) or
-  # directly to the `tasks/` directory itself.
   root: "/root/jwzhao/tasks/"
-
-  # Glob pattern applied under `tasks/` to select which tasks to run.
-  task_glob: "task_*"
-
-  # Maximum number of tasks to run (tasks are sorted alphabetically and
-  # truncated to this count).
   max_tasks: 50
 
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Directories                                                             ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 paths:
-  # Mutable working copies of task repos are created here.
-  # Each agent gets its own copy so concurrent agents don't collide.
   workspace_root: "/root/jwzhao/abc_runs"
-
-  # All output artifacts go here: per-agent trace CSVs, summaries,
-  # LLM metrics, test results, and the aggregated run_summary.json.
   results_root: "/root/jwzhao/abc_results"
 
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Agent Execution                                                         ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-agent:
-  # Maximum OpenHands agent iterations (tool-call rounds) per task.
-  # Higher values let the agent try more approaches but cost more tokens.
-  max_iterations: 80
-
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Multi-Agent Launch Strategy                                             ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 launch:
-  # When true, tasks are partitioned into random-sized waves launched at
-  # staggered intervals.  When false, tasks run sequentially one at a time.
-  randomise: false
-
-  # Maximum number of agents started in a single wave.
-  max_agents_per_wave: 2
-
-  # Range (seconds) for the random delay between consecutive waves.
-  min_wave_delay_s: 2.0
-  max_wave_delay_s: 10.0
-
-  # RNG seed for reproducible wave schedules.  Set to null for true
-  # randomness.
-  seed: 42
-
-  # Thread-pool size for concurrent agent execution.
-  # Set this ≤ the number of NPU cards to avoid over-subscribing vLLM.
   max_concurrent: 15
 
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Post-Run Testing                                                        ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 testing:
-  # Whether to run each task's ./run-tests.sh after the agent finishes.
   enabled: true
 
-  # Timeout in seconds for the test script.  Docker-based tests may need
-  # a generous limit.
-  timeout_sec: 1800
-
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Prediction Model (Step 2)                                               ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-# Optional: run build_tool_predictor.py automatically after the agents finish.
-# Tool-call traces are always collected by the runner; this controls model
-# training only. Set enabled: false to collect traces without building a model.
 prediction:
   enabled: true
-
-  # Model type: "hgb" (default, weighted gradient boosting), "ridge", or "rf".
-  model: "hgb"
-
-  # Train/test split fraction.
-  test_fraction: 0.2
-
-  # Save the trained model for later inference.
+  long_call_threshold_s: 2.0
   save_model: "./duration_model.joblib"
 
-  # RNG seed for the train/test split.
-  seed: 42
-
-  # Tool calls with duration < this threshold (in seconds) are treated as
-  # short: their training target is set to 0 and predictions below this
-  # value are clamped to 0 at inference. Calls >= threshold get a real
-  # predicted duration.
-  long_call_threshold_s: 2.0
-
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Embedded Sidecar (KV Cache Monitor)                                     ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-# Set enabled: true to start the sidecar daemon thread alongside the runner.
-# Geometry values must match the served model (see config/vllm_config.yaml).
 sidecar:
   enabled: true
-
-  # JSONL output file.  null → <results_root>/sidecar.log
-  log_file: null
-
-  # vLLM base URL (no /v1 suffix).
-  vllm_url: "http://127.0.0.1:8027"
-
-  # Poll interval in seconds.
   interval: 1
 
-  # Model geometry — must match vllm_config.yaml sidecar section.
-  num_layers: 64        # num_hidden_layers
-  num_kv_heads: 8       # num_key_value_heads (GQA)
-  head_dim: 128         # head dimension
-  block_size: 128       # must match --block-size passed to vllm serve
-  dtype: "bfloat16"     # must match native.dtype in vllm_config.yaml
-  # Total KV-cache blocks as set by --num-gpu-blocks-override in vllm_config.yaml.
-  # This overrides any value reported by vllm-ascend's Prometheus metrics, which
-  # may reflect the physical NPU allocation rather than the scheduler-level limit.
+  # Must match the served model and vLLM KV-cache configuration.
+  num_layers: 64
+  num_kv_heads: 8
+  head_dim: 128
+  block_size: 128
   total_gpu_blocks: 1000
 
-  # Optional live dashboard. When http_port > 0 the sidecar starts an
-  # HTTP/SSE server on (http_host, http_port) and the dashboard at
-  # http://<host>:<port>/ renders agent phases, KV usage %, and admission
-  # events in real time. See dashboard/SCHEMA.md for the JSON contract.
+  # Set to 0 or remove to disable the live dashboard.
   http_port: 8765
-  http_host: "127.0.0.1"
 
-  # Optional dynamic admission/eviction policy. Disabled preserves the current
-  # monitor-only sidecar behavior.
   admission_control:
     enabled: true
     threshold_gb: 3.2
-    # Before the first SAT, admit at most one fresh task per interval.
-    # After the first SAT, normal sidecar capacity policy drains the queue.
     initial_admit_interval_s: 1.0
-    short_tool_call_threshold_s: 2.0
-    # First-run fallback: if the predictor is missing/unavailable, tool calls
-    # older than this many seconds become eligible for pressure offload.
     fallback_long_tool_call_s: 5.0
-    # null → defaults to prediction.save_model in run_abc-bench.sh.
-    predictor_model: null
-    # null → <sidecar.vllm_url>/agent_kv_cache/offload
-    offload_endpoint: null
-    # null → <sidecar.vllm_url>/agent_kv_cache/restore
-    restore_endpoint: null
-    # null → <sidecar.vllm_url>/agent_kv_cache/evict
-    # Backward-compatible alias for offload_endpoint.
-    eviction_endpoint: null
-    eviction_timeout_s: 2.0
-
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Logging                                                                 ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-logging:
-  # Python logging level: DEBUG, INFO, WARNING, ERROR.
-  level: "INFO"
-
-  # Optional log file.  Set to null to log only to stderr.
-  file: null

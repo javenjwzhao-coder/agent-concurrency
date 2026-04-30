@@ -172,18 +172,18 @@ In `config/abc-bench_config.yaml`:
 ```yaml
 sidecar:
   enabled: true
-  vllm_url: "http://127.0.0.1:8027"
   interval: 1
   num_layers: 64
   num_kv_heads: 8
   head_dim: 128
   block_size: 128
-  dtype: "bfloat16"
   total_gpu_blocks: 1000
 ```
 
 This starts the embedded sidecar and writes JSONL records containing vLLM
-metrics, live agent state, and admission diagnostics when enabled.
+metrics, live agent state, and admission diagnostics when enabled. If
+`sidecar.vllm_url` is omitted, the wrapper derives it from `llm.base_url` by
+removing the trailing `/v1`.
 
 ### 4. Enable dynamic admission control
 
@@ -191,16 +191,15 @@ metrics, live agent state, and admission diagnostics when enabled.
 sidecar:
   admission_control:
     enabled: true
-    threshold_gb: 0.1
-   initial_admit_interval_s: 2.0
-   short_tool_call_threshold_s: 2.0
-    fallback_long_tool_call_s: 30.0
-    predictor_model: null        # defaults to prediction.save_model
-    offload_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/offload
-    restore_endpoint: null       # defaults to <sidecar.vllm_url>/agent_kv_cache/restore
-    eviction_endpoint: null      # backward-compatible alias for offload_endpoint
-    eviction_timeout_s: 2.0
+    threshold_gb: 3.2
+    initial_admit_interval_s: 1.0
+    fallback_long_tool_call_s: 5.0
 ```
+
+The omitted predictor, endpoint, timeout, and short-tool-call settings use the
+wrapper defaults. In particular, `predictor_model` defaults to
+`prediction.save_model`, and offload/restore endpoints default under
+`sidecar.vllm_url`.
 
 Then run:
 

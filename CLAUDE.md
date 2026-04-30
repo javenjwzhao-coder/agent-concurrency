@@ -254,22 +254,15 @@ Important admission-control knobs:
 sidecar:
   admission_control:
     enabled: true
-    threshold_gb: 0.1
-    initial_admit_interval_s: 2.0
-    short_tool_call_threshold_s: 2.0
-    fallback_long_tool_call_s: 30.0
-    predictor_model: null
-    offload_endpoint: null
-    restore_endpoint: null
-    eviction_endpoint: null
-    eviction_timeout_s: 2.0
+    threshold_gb: 3.2
+    initial_admit_interval_s: 1.0
+    fallback_long_tool_call_s: 5.0
 ```
 
-`predictor_model: null` defaults to `prediction.save_model` in the wrapper.
-`offload_endpoint: null` defaults to
-`<sidecar.vllm_url>/agent_kv_cache/offload`. `restore_endpoint: null`
-defaults to `<sidecar.vllm_url>/agent_kv_cache/restore`. `eviction_endpoint`
-is kept as a backward-compatible alias for offload.
+Omitted admission values use wrapper defaults. `predictor_model` defaults to
+`prediction.save_model`, offload/restore endpoints default under
+`sidecar.vllm_url`, and `sidecar.vllm_url` is derived from `llm.base_url` when
+it is not set explicitly.
 
 ## Output Artifacts
 
