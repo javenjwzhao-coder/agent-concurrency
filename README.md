@@ -98,14 +98,18 @@ python src/vllm_patches/apply_patches.py \
   --vllm-dir /path/to/site-packages/vllm
 ```
 
-The project targets vllm-ascend with vLLM 0.13.0 on the NPU machine. The
-starter script installs that pair into the project `.venv` once with
-`--no-deps`, installs the compatible local Ascend torch stack
-(`torch==2.8.0`, `torch-npu==2.8.0.post2`), then installs the runtime
-dependencies advertised by the wheels under constraints that keep that torch
-stack pinned while filtering CUDA packages and vLLM's upstream torch pins. The
-patcher keeps anchors compatible with nearby 0.11.x-0.13.x layouts where
-practical.
+The project targets vllm-ascend 0.13.0 with vLLM 0.13.0 on the NPU machine.
+The starter script installs `vllm==0.13.0` into the project `.venv` with
+`--no-deps`, installs the local Ascend runtime stack (`torch==2.8.0`,
+`torch-npu==2.8.0.post2`, `triton-ascend==3.2.0`), then builds
+`vllm-ascend` from the v0.13.0 source tree for `SOC_VERSION=ascend910_9391`
+by default. The source checkout is cached under `.vllm-ascend-src/`, and a
+`.venv/.vllm-ascend-soc-version` marker lets later starts reuse the A3 build.
+Override `VLLM_ASCEND_SOC_VERSION` if the target Ascend chip changes. Runtime
+dependencies advertised by the installed packages are then installed under
+constraints that keep the Ascend torch/Triton stack pinned while filtering CUDA
+packages and vLLM's upstream torch pins. The patcher keeps anchors compatible
+with nearby 0.11.x-0.13.x layouts where practical.
 
 ## Quick Start
 

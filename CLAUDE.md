@@ -7,13 +7,15 @@ repository.
 
 This project runs on **Ascend NPU** hardware. The inference backend is
 **vllm-ascend**, not plain upstream vLLM. `start_vllm.sh` installs
-vLLM/vllm-ascend 0.13.0 into the project `.venv` with `--no-deps` and reuses
-that install on later starts. It also installs the compatible local Ascend
-torch stack (`torch==2.8.0`, `torch-npu==2.8.0.post2`) and wheel metadata
-runtime dependencies under constraints that keep that torch stack pinned while
-filtering CUDA packages and vLLM's upstream torch pins. When investigating
-internals or applying patches, target the installed vllm-ascend/vLLM package
-and keep version-specific anchors in mind.
+vLLM/vllm-ascend 0.13.0 into the project `.venv` and reuses that install on
+later starts. It installs the compatible local Ascend runtime stack
+(`torch==2.8.0`, `torch-npu==2.8.0.post2`, `triton-ascend==3.2.0`) before
+building `vllm-ascend` from the v0.13.0 source tree for
+`SOC_VERSION=ascend910_9391` by default, with the checkout cached under
+`.vllm-ascend-src/`. Runtime dependencies are installed under constraints that
+keep that Ascend stack pinned while filtering CUDA packages and vLLM's upstream
+torch pins. When investigating internals or applying patches, target the
+installed vllm-ascend/vLLM package and keep version-specific anchors in mind.
 
 ## Project Purpose
 

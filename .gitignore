@@ -1,4 +1,5 @@
 .venv/
+.vllm-ascend-src/
 __pycache__/
 *.pyc
 *.pyo

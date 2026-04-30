@@ -81,6 +81,11 @@ start_native() {
     TORCH_NPU_VERSION="${VLLM_ASCEND_TORCH_NPU_VERSION:-2.8.0.post2}"
     TORCHVISION_VERSION="${VLLM_ASCEND_TORCHVISION_VERSION:-0.23.0}"
     TORCHAUDIO_VERSION="${VLLM_ASCEND_TORCHAUDIO_VERSION:-2.8.0}"
+    TRITON_ASCEND_VERSION="${VLLM_ASCEND_TRITON_ASCEND_VERSION:-3.2.0}"
+    VLLM_ASCEND_SOC_VERSION="${VLLM_ASCEND_SOC_VERSION:-ascend910_9391}"
+    VLLM_ASCEND_GIT_REF="${VLLM_ASCEND_GIT_REF:-v${VLLM_ASCEND_VERSION}}"
+    VLLM_ASCEND_SOURCE_DIR="${VLLM_ASCEND_SOURCE_DIR:-$REPO_DIR/.vllm-ascend-src/${VLLM_ASCEND_GIT_REF}-${VLLM_ASCEND_SOC_VERSION}}"
+    VLLM_ASCEND_SOC_MARKER="$VENV/.vllm-ascend-soc-version"
 
     # ── 1. Create project venv via uv (skipped if already exists) ────────────
     if [ ! -f "$VENV/bin/activate" ]; then
@@ -88,7 +93,7 @@ start_native() {
         uv venv "$VENV" --python "$SHARED_PY" --system-site-packages
     fi
 
-    # ── 2. Link shared non-vLLM deps, then install local vllm-ascend once ────
+    # ── 2. Link shared deps, then install local Ascend/vLLM packages once ────
     PYTHON_VER=$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     VENV_SITE="$VENV/lib/python${PYTHON_VER}/site-packages"
     VENV_VLLM="$VENV_SITE/vllm"
@@ -108,7 +113,11 @@ for p in sys.path:
     echo "[INFO] Linked shared venv packages ($(wc -l < "$VENV_SITE/shared_venv.pth") paths) for non-vllm deps"
 
     check_local_vllm_ascend() {
-        VENV="$VENV" DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" "$VENV/bin/python" - <<'PY'
+        VENV="$VENV" \
+        DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
+        DESIRED_VLLM_ASCEND_SOC="$VLLM_ASCEND_SOC_VERSION" \
+        VLLM_ASCEND_SOC_MARKER="$VLLM_ASCEND_SOC_MARKER" \
+        "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import importlib.util
 import os
@@ -116,6 +125,8 @@ import pathlib
 import sys
 
 desired = os.environ["DESIRED_VLLM_ASCEND"]
+desired_soc = os.environ["DESIRED_VLLM_ASCEND_SOC"]
+soc_marker = pathlib.Path(os.environ["VLLM_ASCEND_SOC_MARKER"])
 venv = pathlib.Path(os.environ["VENV"]).resolve()
 
 def dist_version(name):
@@ -148,57 +159,38 @@ vllm_version = dist_version("vllm")
 ascend_version = dist_version("vllm-ascend")
 vllm_path = package_path("vllm")
 ascend_path = package_path("vllm_ascend")
+soc = soc_marker.read_text().strip() if soc_marker.exists() else None
 ready = (
     vllm_version == desired
     and ascend_version == desired
     and is_local(vllm_path)
     and is_local(ascend_path)
+    and soc == desired_soc
 )
 
 if ready:
-    print(f"[INFO] Reusing local vllm=={vllm_version}, vllm-ascend=={ascend_version}")
+    print(
+        f"[INFO] Reusing local vllm=={vllm_version}, "
+        f"vllm-ascend=={ascend_version} ({soc})"
+    )
 else:
     print(
         "[INFO] Local vllm-ascend install needed "
         f"(vllm={vllm_version!r} at {vllm_path}, "
-        f"vllm-ascend={ascend_version!r} at {ascend_path})"
+        f"vllm-ascend={ascend_version!r} at {ascend_path}, "
+        f"soc={soc!r})"
     )
 sys.exit(0 if ready else 1)
 PY
     }
 
-    if check_local_vllm_ascend; then
-        :
-    else
-        echo "[INFO] Installing vllm==${VLLM_ASCEND_VERSION} and vllm-ascend==${VLLM_ASCEND_VERSION} into $VENV ..."
-        rm -rf \
-          "$VENV_SITE"/vllm \
-          "$VENV_SITE"/vllm_ascend \
-          "$VENV_SITE"/vllm-*.dist-info \
-          "$VENV_SITE"/vllm_ascend-*.dist-info \
-          "$VENV_SITE"/vllm_ascend-*.egg-info
-        # Keep torch/torch_npu and other Ascend runtime deps from the shared
-        # environment. vLLM's PyPI metadata pins upstream CUDA torch versions
-        # that can conflict with vllm-ascend's Ascend torch stack.
-        if command -v uv >/dev/null 2>&1; then
-            uv pip install --python "$VENV/bin/python" --upgrade --no-deps \
-              "vllm==${VLLM_ASCEND_VERSION}" \
-              "vllm-ascend==${VLLM_ASCEND_VERSION}"
-        else
-            "$VENV/bin/python" -m pip install --upgrade --no-deps \
-              "vllm==${VLLM_ASCEND_VERSION}" \
-              "vllm-ascend==${VLLM_ASCEND_VERSION}"
-        fi
-        if ! check_local_vllm_ascend; then
-            echo "[ERROR] vllm-ascend install verification failed after install" >&2
-            exit 1
-        fi
-    fi
-
-    check_local_torch_stack() {
+    check_local_ascend_stack() {
         VENV="$VENV" \
         DESIRED_TORCH="$TORCH_VERSION" \
         DESIRED_TORCH_NPU="$TORCH_NPU_VERSION" \
+        DESIRED_TORCHVISION="$TORCHVISION_VERSION" \
+        DESIRED_TORCHAUDIO="$TORCHAUDIO_VERSION" \
+        DESIRED_TRITON_ASCEND="$TRITON_ASCEND_VERSION" \
         "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import importlib.util
@@ -210,15 +202,27 @@ venv = pathlib.Path(os.environ["VENV"]).resolve()
 desired = {
     "torch": os.environ["DESIRED_TORCH"],
     "torch-npu": os.environ["DESIRED_TORCH_NPU"],
+    "torchvision": os.environ["DESIRED_TORCHVISION"],
+    "torchaudio": os.environ["DESIRED_TORCHAUDIO"],
+    "triton-ascend": os.environ["DESIRED_TRITON_ASCEND"],
 }
 modules = {
     "torch": "torch",
     "torch-npu": "torch_npu",
+    "torchvision": "torchvision",
+    "torchaudio": "torchaudio",
+    "triton-ascend": "triton",
 }
 
 def dist_version(name):
     try:
         return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+def dist_path(name):
+    try:
+        return pathlib.Path(metadata.distribution(name).locate_file("")).resolve()
     except metadata.PackageNotFoundError:
         return None
 
@@ -250,33 +254,101 @@ for dist_name, want in desired.items():
     state.append(f"{dist_name}={version!r} at {path}")
     ready = ready and version == want and is_local(path)
 
+triton_dist_path = dist_path("triton")
+if is_local(triton_dist_path):
+    state.append(f"local standard triton={dist_version('triton')!r} at {triton_dist_path}")
+    ready = False
+
+try:
+    has_triton_target_info = (
+        importlib.util.find_spec("triton.language.target_info") is not None)
+except ModuleNotFoundError:
+    has_triton_target_info = False
+if not has_triton_target_info:
+    state.append("triton.language.target_info missing")
+    ready = False
+
 if ready:
-    print("[INFO] Reusing local Ascend torch stack: " + ", ".join(state))
+    print("[INFO] Reusing local Ascend runtime stack: " + ", ".join(state))
 else:
-    print("[INFO] Local Ascend torch stack install needed (" + ", ".join(state) + ")")
+    print("[INFO] Local Ascend runtime stack install needed (" + ", ".join(state) + ")")
 sys.exit(0 if ready else 1)
 PY
     }
 
-    if check_local_torch_stack; then
+    if check_local_ascend_stack; then
         :
     else
-        echo "[INFO] Installing Ascend torch stack into $VENV ..."
+        echo "[INFO] Installing Ascend runtime stack into $VENV ..."
+        rm -rf \
+          "$VENV_SITE"/torch \
+          "$VENV_SITE"/torch-*.dist-info \
+          "$VENV_SITE"/torch_npu \
+          "$VENV_SITE"/torch_npu-*.dist-info \
+          "$VENV_SITE"/torchvision \
+          "$VENV_SITE"/torchvision-*.dist-info \
+          "$VENV_SITE"/torchaudio \
+          "$VENV_SITE"/torchaudio-*.dist-info \
+          "$VENV_SITE"/triton \
+          "$VENV_SITE"/triton-*.dist-info \
+          "$VENV_SITE"/triton_ascend-*.dist-info
         if command -v uv >/dev/null 2>&1; then
             uv pip install --python "$VENV/bin/python" --upgrade \
               "torch==${TORCH_VERSION}" \
               "torch-npu==${TORCH_NPU_VERSION}" \
               "torchvision==${TORCHVISION_VERSION}" \
-              "torchaudio==${TORCHAUDIO_VERSION}"
+              "torchaudio==${TORCHAUDIO_VERSION}" \
+              "triton-ascend==${TRITON_ASCEND_VERSION}"
         else
             "$VENV/bin/python" -m pip install --upgrade \
               "torch==${TORCH_VERSION}" \
               "torch-npu==${TORCH_NPU_VERSION}" \
               "torchvision==${TORCHVISION_VERSION}" \
-              "torchaudio==${TORCHAUDIO_VERSION}"
+              "torchaudio==${TORCHAUDIO_VERSION}" \
+              "triton-ascend==${TRITON_ASCEND_VERSION}"
         fi
-        if ! check_local_torch_stack; then
-            echo "[ERROR] Ascend torch stack verification failed after install" >&2
+        if ! check_local_ascend_stack; then
+            echo "[ERROR] Ascend runtime stack verification failed after install" >&2
+            exit 1
+        fi
+    fi
+
+    if check_local_vllm_ascend; then
+        :
+    else
+        echo "[INFO] Installing vllm==${VLLM_ASCEND_VERSION} and building vllm-ascend==${VLLM_ASCEND_VERSION} (${VLLM_ASCEND_SOC_VERSION}) into $VENV ..."
+        rm -rf \
+          "$VENV_SITE"/vllm \
+          "$VENV_SITE"/vllm_ascend \
+          "$VENV_SITE"/vllm-*.dist-info \
+          "$VENV_SITE"/vllm_ascend-*.dist-info \
+          "$VENV_SITE"/vllm_ascend-*.egg-info \
+          "$VENV_SITE"/__editable__.*vllm_ascend* \
+          "$VLLM_ASCEND_SOC_MARKER"
+        if command -v uv >/dev/null 2>&1; then
+            uv pip install --python "$VENV/bin/python" --upgrade --no-deps \
+              "vllm==${VLLM_ASCEND_VERSION}"
+        else
+            "$VENV/bin/python" -m pip install --upgrade --no-deps \
+              "vllm==${VLLM_ASCEND_VERSION}"
+        fi
+        if [ ! -d "$VLLM_ASCEND_SOURCE_DIR/.git" ]; then
+            echo "[INFO] Cloning vllm-ascend ${VLLM_ASCEND_GIT_REF} source for ${VLLM_ASCEND_SOC_VERSION} ..."
+            mkdir -p "$(dirname "$VLLM_ASCEND_SOURCE_DIR")"
+            git clone --depth 1 --branch "$VLLM_ASCEND_GIT_REF" \
+              https://github.com/vllm-project/vllm-ascend.git \
+              "$VLLM_ASCEND_SOURCE_DIR"
+        fi
+        git -C "$VLLM_ASCEND_SOURCE_DIR" submodule update --init --recursive
+        "$VENV/bin/python" -m pip install --upgrade \
+          cmake ninja packaging pybind11 setuptools setuptools-scm wheel
+        echo "[INFO] Building/installing vllm-ascend for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} ..."
+        SOC_VERSION="$VLLM_ASCEND_SOC_VERSION" \
+        "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps \
+          "$VLLM_ASCEND_SOURCE_DIR"
+        printf '%s\n' "$VLLM_ASCEND_SOC_VERSION" > "$VLLM_ASCEND_SOC_MARKER"
+        if ! check_local_vllm_ascend; then
+            echo "[ERROR] vllm-ascend install verification failed after install" >&2
             exit 1
         fi
     fi
@@ -288,6 +360,7 @@ torch==${TORCH_VERSION}
 torch-npu==${TORCH_NPU_VERSION}
 torchvision==${TORCHVISION_VERSION}
 torchaudio==${TORCHAUDIO_VERSION}
+triton-ascend==${TRITON_ASCEND_VERSION}
 EOF
     VENV_RUNTIME_REQS="$VLLM_RUNTIME_REQS" "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
@@ -374,7 +447,7 @@ PY
         fi
     fi
 
-    unset -f check_local_torch_stack
+    unset -f check_local_ascend_stack
     unset -f check_local_vllm_ascend
 
     # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
