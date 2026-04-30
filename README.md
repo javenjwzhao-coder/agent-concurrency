@@ -98,8 +98,10 @@ python src/vllm_patches/apply_patches.py \
   --vllm-dir /path/to/site-packages/vllm
 ```
 
-The project targets vllm-ascend with vLLM 0.11.x on the NPU machine, while the
-patcher keeps anchors compatible with nearby 0.13.x layouts where practical.
+The project targets vllm-ascend with vLLM 0.13.0 on the NPU machine. The
+starter script installs that pair into the project `.venv` once and then
+reuses it, while the patcher keeps anchors compatible with nearby 0.11.x-0.13.x
+layouts where practical.
 
 ## Quick Start
 

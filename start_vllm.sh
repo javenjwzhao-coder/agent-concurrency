@@ -54,9 +54,9 @@ wait_for_ready() {
 
 # =============================================================================
 # NATIVE LAUNCH (no Docker)
-# Creates a project-local uv venv that inherits from the shared venv but keeps
-# a patched private copy of the full vLLM package in its own site-packages.
-# The shared /opt/vllm/venv is never modified.
+# Creates a project-local uv venv that inherits non-vLLM dependencies from the
+# shared venv, then installs and patches vllm-ascend locally. The shared
+# /opt/vllm/venv is never modified.
 # =============================================================================
 start_native() {
     local TOOLKIT=$(cfg native.ascend_toolkit_path)
@@ -76,6 +76,7 @@ start_native() {
 
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
     VENV="$REPO_DIR/.venv"
+    VLLM_ASCEND_VERSION="${VLLM_ASCEND_VERSION:-0.13.0}"
 
     # ── 1. Create project venv via uv (skipped if already exists) ────────────
     if [ ! -f "$VENV/bin/activate" ]; then
@@ -83,29 +84,17 @@ start_native() {
         uv venv "$VENV" --python "$SHARED_PY" --system-site-packages
     fi
 
-    # ── 2. Mirror the full vLLM package into project venv site-packages ──────
+    # ── 2. Link shared non-vLLM deps, then install local vllm-ascend once ────
     PYTHON_VER=$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    # Resolve vllm's actual location via Python import — handles editable/empty installs
-    # where files are NOT under the venv's own site-packages/vllm/ tree.
-    SHARED_OAI=$("$SHARED_PY" -c \
-        "import os, vllm.entrypoints.openai as m; print(os.path.dirname(m.__file__))" \
-        2>/dev/null) || {
-        echo "[ERROR] Cannot locate vllm.entrypoints.openai via $SHARED_PY"
-        echo "        Is vllm installed in the shared venv? (checked: $SHARED_PY)"
-        exit 1
-    }
-    SHARED_VLLM="$(dirname "$(dirname "$SHARED_OAI")")"
     VENV_SITE="$VENV/lib/python${PYTHON_VER}/site-packages"
     VENV_VLLM="$VENV_SITE/vllm"
-    mkdir -p "$VENV_VLLM"
-    cp -a "$SHARED_VLLM/." "$VENV_VLLM/"
-    echo "[INFO] Mirrored shared vLLM package into project venv"
     # Make all packages importable from the shared venv (torch, transformers,
     # torch_npu, etc.) by snapshotting the shared Python's full sys.path into a
-    # .pth file.  Python's site module appends .pth entries AFTER the project
-    # venv's own site-packages, so our patched vllm copy still takes priority.
+    # .pth file. Python's site module appends .pth entries AFTER the project
+    # venv's own site-packages, so locally installed vllm/vllm-ascend wins.
     # Using sys.path directly (rather than guessing site-packages location)
     # handles editable installs and Ascend-specific path layouts correctly.
+    mkdir -p "$VENV_SITE"
     "$SHARED_PY" -c "
 import sys
 for p in sys.path:
@@ -113,6 +102,93 @@ for p in sys.path:
         print(p)
 " > "$VENV_SITE/shared_venv.pth"
     echo "[INFO] Linked shared venv packages ($(wc -l < "$VENV_SITE/shared_venv.pth") paths) for non-vllm deps"
+
+    check_local_vllm_ascend() {
+        VENV="$VENV" DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" "$VENV/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import os
+import pathlib
+import sys
+
+desired = os.environ["DESIRED_VLLM_ASCEND"]
+venv = pathlib.Path(os.environ["VENV"]).resolve()
+
+def dist_version(name):
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+def package_path(module_name):
+    spec = importlib.util.find_spec(module_name)
+    if spec is None:
+        return None
+    if spec.origin:
+        return pathlib.Path(spec.origin).resolve()
+    locations = spec.submodule_search_locations
+    if locations:
+        return pathlib.Path(next(iter(locations))).resolve()
+    return None
+
+def is_local(path):
+    if path is None:
+        return False
+    try:
+        path.relative_to(venv)
+        return True
+    except ValueError:
+        return False
+
+vllm_version = dist_version("vllm")
+ascend_version = dist_version("vllm-ascend")
+vllm_path = package_path("vllm")
+ascend_path = package_path("vllm_ascend")
+ready = (
+    vllm_version == desired
+    and ascend_version == desired
+    and is_local(vllm_path)
+    and is_local(ascend_path)
+)
+
+if ready:
+    print(f"[INFO] Reusing local vllm=={vllm_version}, vllm-ascend=={ascend_version}")
+else:
+    print(
+        "[INFO] Local vllm-ascend install needed "
+        f"(vllm={vllm_version!r} at {vllm_path}, "
+        f"vllm-ascend={ascend_version!r} at {ascend_path})"
+    )
+sys.exit(0 if ready else 1)
+PY
+    }
+
+    if check_local_vllm_ascend; then
+        :
+    else
+        echo "[INFO] Installing vllm==${VLLM_ASCEND_VERSION} and vllm-ascend==${VLLM_ASCEND_VERSION} into $VENV ..."
+        rm -rf \
+          "$VENV_SITE"/vllm \
+          "$VENV_SITE"/vllm_ascend \
+          "$VENV_SITE"/vllm-*.dist-info \
+          "$VENV_SITE"/vllm_ascend-*.dist-info \
+          "$VENV_SITE"/vllm_ascend-*.egg-info
+        if command -v uv >/dev/null 2>&1; then
+            uv pip install --python "$VENV/bin/python" --upgrade \
+              "vllm==${VLLM_ASCEND_VERSION}" \
+              "vllm-ascend==${VLLM_ASCEND_VERSION}"
+        else
+            "$VENV/bin/python" -m pip install --upgrade \
+              "vllm==${VLLM_ASCEND_VERSION}" \
+              "vllm-ascend==${VLLM_ASCEND_VERSION}"
+        fi
+        if ! check_local_vllm_ascend; then
+            echo "[ERROR] vllm-ascend install verification failed after install" >&2
+            exit 1
+        fi
+    fi
+
+    unset -f check_local_vllm_ascend
 
     # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
     echo "[INFO] Applying patches to project venv..."
@@ -147,7 +223,7 @@ PY
         source "$ATB"
         set -u
         source "$VENV/bin/activate"
-        VLLM_CLI="$(dirname "$SHARED_PY")/vllm"
+        VLLM_CLI="$VENV/bin/vllm"
         if [ ! -f "$VLLM_CLI" ]; then
             echo "[ERROR] Cannot find vLLM CLI script at $VLLM_CLI"
             exit 1

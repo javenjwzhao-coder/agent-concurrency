@@ -6,10 +6,11 @@ repository.
 ## Platform
 
 This project runs on **Ascend NPU** hardware. The inference backend is
-**vllm-ascend**, not plain upstream vLLM. The NPU machine currently uses vLLM
-0.11.0 through vllm-ascend. When investigating internals or applying patches,
-target the installed vllm-ascend/vLLM package and keep version-specific anchors
-in mind.
+**vllm-ascend**, not plain upstream vLLM. `start_vllm.sh` installs
+vLLM/vllm-ascend 0.13.0 into the project `.venv` and reuses that install on
+later starts; the shared `/opt/vllm/venv` only supplies non-vLLM dependencies.
+When investigating internals or applying patches, target the installed
+vllm-ascend/vLLM package and keep version-specific anchors in mind.
 
 ## Project Purpose
 
