@@ -110,11 +110,13 @@ the source build, the script installs the CANN Python build dependencies
 (`sympy`, `numpy<2.0.0`, and related utilities) into `.venv` and exposes that
 site-packages path to the custom-op compiler. Custom-op compilation defaults to
 `MAX_JOBS=16`; override `VLLM_ASCEND_MAX_JOBS` if the build host needs a
-different cap. Runtime dependencies advertised by the installed packages are
-then installed under constraints that keep the Ascend torch/Triton/CANN stack
-pinned while filtering CUDA packages and vLLM's upstream torch pins. The
-patcher keeps anchors compatible with nearby 0.11.x-0.13.x layouts where
-practical.
+different cap. It also patches the cached source checkout so CANN 8.5.1 host
+object files installed under `objects-*` are copied to the top-level directory
+expected by `recompile_binary.py`. Runtime dependencies advertised by the
+installed packages are then installed under constraints that keep the Ascend
+torch/Triton/CANN stack pinned while filtering CUDA packages and vLLM's
+upstream torch pins. The patcher keeps anchors compatible with nearby
+0.11.x-0.13.x layouts where practical.
 
 ## Quick Start
 

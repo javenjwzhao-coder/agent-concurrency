@@ -332,6 +332,49 @@ PY
               "$VLLM_ASCEND_SOURCE_DIR"
         fi
         git -C "$VLLM_ASCEND_SOURCE_DIR" submodule update --init --recursive
+        VLLM_ASCEND_SOURCE_DIR="$VLLM_ASCEND_SOURCE_DIR" "$VENV/bin/python" - <<'PY'
+import os
+import pathlib
+
+cmake_lists = pathlib.Path(os.environ["VLLM_ASCEND_SOURCE_DIR"]) / "CMakeLists.txt"
+text = cmake_lists.read_text()
+marker = "vllm_ascend_flatten_host_objs"
+if marker not in text:
+    anchor = """ascendc_library(vllm_ascend_kernels SHARED
+    ${VLLM_ASCEND_CUSTOM_OP}
+)
+"""
+    patch = anchor + """
+# CANN 8.5.1 installs host object-library outputs under objects-Release/.
+# recompile_binary.py scans only this top-level host dir, so copy the generated
+# .o files back before the final ascendc library link step.
+set(VLLM_ASCEND_HOST_OBJ_DIR "${CMAKE_CURRENT_BINARY_DIR}/vllm_ascend_kernels_host_dir")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/flatten_vllm_ascend_host_objs.cmake" "
+set(host_dir \\"${VLLM_ASCEND_HOST_OBJ_DIR}\\")
+file(GLOB direct_host_objs \\"\\${host_dir}/*.o\\")
+if(NOT direct_host_objs)
+  file(GLOB_RECURSE host_objs \\"\\${host_dir}/objects-*/*.o\\")
+  if(NOT host_objs)
+    message(WARNING \\"No host object files found to flatten under \\${host_dir}\\")
+  endif()
+  foreach(host_obj IN LISTS host_objs)
+    file(COPY \\"\\${host_obj}\\" DESTINATION \\"\\${host_dir}\\")
+  endforeach()
+endif()
+")
+add_custom_target(vllm_ascend_flatten_host_objs
+    COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/flatten_vllm_ascend_host_objs.cmake"
+    DEPENDS vllm_ascend_kernels_host
+)
+add_dependencies(vllm_ascend_kernels vllm_ascend_flatten_host_objs)
+"""
+    if anchor not in text:
+        raise SystemExit(f"Could not patch {cmake_lists}: ascendc_library anchor not found")
+    cmake_lists.write_text(text.replace(anchor, patch, 1))
+    print(f"[INFO] Patched {cmake_lists} for CANN host object layout")
+else:
+    print(f"[INFO] Reusing existing CANN host object layout patch in {cmake_lists}")
+PY
         VLLM_ASCEND_BUILD_PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
         rm -rf \
           "$VLLM_ASCEND_SOURCE_DIR"/build \
@@ -342,6 +385,8 @@ PY
           protobuf scipy requests absl-py typing_extensions \
           cmake ninja packaging pybind11 setuptools setuptools-scm wheel
         echo "[INFO] Building/installing vllm-ascend for SOC_VERSION=${VLLM_ASCEND_SOC_VERSION} (MAX_JOBS=${VLLM_ASCEND_MAX_JOBS}) ..."
+        export CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS"
+        export MAX_JOBS="$VLLM_ASCEND_MAX_JOBS"
         CMAKE_BUILD_PARALLEL_LEVEL="$VLLM_ASCEND_MAX_JOBS" \
         MAX_JOBS="$VLLM_ASCEND_MAX_JOBS" \
         PATH="$VENV/bin:$PATH" \

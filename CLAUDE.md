@@ -16,11 +16,13 @@ building `vllm-ascend` from the v0.13.0 source tree for
 `numpy<2.0.0`, and related utilities) into `.venv` and exposes that
 site-packages path to the custom-op compiler during the source build. Custom-op
 compilation defaults to `MAX_JOBS=16`; override `VLLM_ASCEND_MAX_JOBS` if the
-build host needs a different cap. Runtime dependencies are installed under
-constraints that keep that Ascend stack pinned while filtering CUDA packages
-and vLLM's upstream torch pins. When investigating internals or applying
-patches, target the installed vllm-ascend/vLLM package and keep
-version-specific anchors in mind.
+build host needs a different cap. The script also patches the cached source
+checkout so CANN 8.5.1 host object files installed under `objects-*` are copied
+to the top-level directory expected by `recompile_binary.py`. Runtime
+dependencies are installed under constraints that keep that Ascend stack pinned
+while filtering CUDA packages and vLLM's upstream torch pins. When
+investigating internals or applying patches, target the installed
+vllm-ascend/vLLM package and keep version-specific anchors in mind.
 
 ## Project Purpose
 
