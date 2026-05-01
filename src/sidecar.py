@@ -106,10 +106,12 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
         used_blocks   – actively allocated blocks
         free_blocks   – blocks in the free pool
         cached_blocks – prefix-cached blocks still in VRAM
+        scheduler_preemptions_total – cumulative vLLM scheduler preemptions
         vllm_names    – all vllm: metric names seen (for diagnostics)
     """
     m: dict = {}
     seen: list[str] = []
+    preempt_samples: dict[str, float] = {}
 
     def _set_usage(val: float) -> None:
         m.setdefault("usage_pct", val)
@@ -126,6 +128,15 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
     def _set_cached(val: float) -> None:
         m.setdefault("cached_blocks", int(val))
 
+    def _is_preempt_metric(name: str) -> bool:
+        lower = name.lower()
+        if not lower.startswith("vllm:") or "preempt" not in lower:
+            return False
+        return not lower.endswith(("_bucket", "_sum", "_created"))
+
+    def _add_preempt_sample(name: str, val: float) -> None:
+        preempt_samples[name] = preempt_samples.get(name, 0.0) + val
+
     if _HAS_PROM_CLIENT:
         for family in _prom_parse(text):
             for sample in family.samples:
@@ -141,6 +152,8 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                             "vllm:npu_cache_usage_perc",
                             "vllm:kv_cache_usage_perc"):
                     _set_usage(val)
+                elif _is_preempt_metric(name):
+                    _add_preempt_sample(name, val)
                 elif name in ("vllm:num_gpu_blocks", "vllm:num_npu_blocks"):
                     _set_total(val)
                 elif name in ("vllm:num_gpu_blocks_used",
@@ -184,6 +197,8 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                         "vllm:npu_cache_usage_perc",
                         "vllm:kv_cache_usage_perc"):
                 _set_usage(val)
+            elif _is_preempt_metric(name):
+                _add_preempt_sample(name, val)
             elif name in ("vllm:num_gpu_blocks", "vllm:num_npu_blocks"):
                 _set_total(val)
             elif name in ("vllm:num_gpu_blocks_used", "vllm:gpu_blocks_used",
@@ -230,6 +245,11 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
         total = m.get("total_blocks")
         if pct is not None and total:
             m["used_blocks"] = round(total * pct)
+
+    if preempt_samples:
+        # Some vLLM builds expose aliases for the same scheduler counter. Sum
+        # label partitions within each metric name, then keep the largest alias.
+        m["scheduler_preemptions_total"] = int(max(preempt_samples.values()))
 
     m["vllm_names"] = seen
     return m
@@ -1208,6 +1228,7 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
         free_gb: Optional[float] = (
             round(free_blks * bytes_per_blk / 1e9, 3) if free_blks is not None else None
         )
+        preemptions = kv.get("scheduler_preemptions_total")
         return {
             "kv_cache_used_pct":    round(used_pct * 100, 2) if used_pct is not None else None,
             "num_gpu_blocks_total": int(total_blks) if total_blks is not None else None,
@@ -1216,6 +1237,7 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
             "kv_total_gb":          total_gb,
             "kv_used_gb":           used_gb,
             "kv_free_gb":           free_gb,
+            "scheduler_preemptions_total": int(preemptions) if preemptions is not None else None,
         }
     except Exception as exc:
         return {"error": str(exc)}

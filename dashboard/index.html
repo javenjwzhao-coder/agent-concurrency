@@ -30,6 +30,7 @@
       <span id="pressureBadge" class="badge badge-pressure" style="display:none">C: n/a / W: n/a</span>
       <span id="queueCount" class="badge badge-queue" style="display:none">queue: 0</span>
       <span id="doneCount" class="badge badge-done" style="display:none">done: 0</span>
+      <span id="vllmPreemptCount" class="badge badge-vllm" style="display:none">vllm preempt: 0</span>
       <span id="tickInfo"></span>
     </div>
     <div class="legend">
@@ -40,11 +41,11 @@
       <span class="chip phase-evicted_waiting">offloaded</span>
       <span class="chip phase-done">done</span>
       <span class="legend-title">Event</span>
-      <span class="chip event-offload">OFFLOAD</span>
-      <span class="chip event-offload-fail">OFFLOAD_FAIL</span>
-      <span class="chip event-admit">ADMIT</span>
-      <span class="chip event-readmit">READMIT</span>
-      <span class="chip event-sat">SAT</span>
+      <span class="chip event-offload">OFFLOAD <span id="eventCountOffload" class="event-count">0</span></span>
+      <span class="chip event-offload-fail">OFFLOAD_FAIL <span id="eventCountOffloadFail" class="event-count">0</span></span>
+      <span class="chip event-admit">ADMIT <span id="eventCountAdmit" class="event-count">0</span></span>
+      <span class="chip event-readmit">READMIT <span id="eventCountReadmit" class="event-count">0</span></span>
+      <span class="chip event-sat">SAT <span id="eventCountSat" class="event-count">0</span></span>
       <span class="legend-title">KV %</span>
       <span class="chip kv-line">vllm kv used</span>
       <span class="chip kv-threshold-line">offload threshold</span>

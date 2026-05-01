@@ -13,6 +13,10 @@ html, body {
   color: #e2e8f4;
 }
 
+:root {
+  --agent-label-panel-width: 220px;
+}
+
 body { display: flex; flex-direction: column; }
 
 /* ── header ─────────────────────────────────────────────────────────────── */
@@ -148,6 +152,7 @@ button:hover {
 .badge-pressure-active  { background: #3a0612; color: #fecdd3; border-color: #e11d48; }
 .badge-queue            { background: #1a1a2e; color: #a78bfa; border-color: #4c1d95; }
 .badge-done             { background: #1a1f2e; color: #94a3b8; border-color: #334155; }
+.badge-vllm             { background: #061f2e; color: #67e8f9; border-color: #0e7490; }
 
 /* ── main layout ─────────────────────────────────────────────────────────── */
 
@@ -257,41 +262,62 @@ main {
 /* ── event marker chips in legend ────────────────────────────────────────── */
 /* Colors match the vertical event lines exactly */
 
-.event-offload      { background: #f87171; color: #1a0000; }
-.event-offload-fail { background: #fb7185; color: #1a0006; border: 1px dashed #fecdd3; }
-.event-admit        { background: #4ade80; color: #001a0a; }
-.event-readmit      { background: #c084fc; color: #1a0033; }
+.event-offload      { background: #ef4444; color: #1a0000; }
+.event-offload-fail { background: #fb923c; color: #1a0b00; border: 1px dashed #fed7aa; }
+.event-admit        { background: #22c55e; color: #001a0a; }
+.event-readmit      { background: #38bdf8; color: #00131d; }
 .event-sat          { background: #fde047; color: #3a2e00; }
 
-/* ── custom-time event lines (continuous across kvChart + timeline) ──────── */
-/*
- * Each event calls addCustomTime() on BOTH charts with identical left-panel
- * widths (forced below), so the line lands at the same horizontal pixel in
- * each chart — appearing as one unbroken vertical line.
- */
-
-.vis-custom-time {
-  pointer-events: none !important;  /* prevents vis.js drag; hover via container mousemove */
-  width: 3px !important;
-  opacity: 0.9;
-  z-index: 10;
+.event-count {
+  display: inline-block;
+  min-width: 1.6em;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+  text-align: center;
 }
 
-/* Hide the triangle drag handle */
-.vis-custom-time .vis-custom-time-marker { display: none !important; }
+/* ── event line overlay (continuous across kvChart + timeline) ───────────── */
 
-.vis-custom-time.ct-offload { background-color: #f87171 !important; }   /* bright red    */
-.vis-custom-time.ct-offload-fail {
+#kvChart,
+#timeline {
+  position: relative;
+}
+
+.event-line-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 30;
+}
+
+.event-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  opacity: 0.96;
+  pointer-events: none;
+}
+
+.event-line-offload { background: #ef4444; box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.32); }
+.event-line-offload-fail {
   background: repeating-linear-gradient(
-    to bottom, #fb7185 0 5px, transparent 5px 10px
-  ) !important;                                                          /* dashed rose   */
+    to bottom, #fb923c 0 5px, transparent 5px 10px
+  );
+  box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.32);
 }
-.vis-custom-time.ct-admit   { background-color: #4ade80 !important; }   /* bright green  */
-.vis-custom-time.ct-readmit { background-color: #c084fc !important; }   /* bright purple */
-.vis-custom-time.ct-sat {
+.event-line-admit   { background: #22c55e; box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.32); }
+.event-line-readmit { background: #38bdf8; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.32); }
+.event-line-sat {
   background: repeating-linear-gradient(
     to bottom, #fde047 0 6px, transparent 6px 12px
-  ) !important;                                                          /* dashed yellow */
+  );
+  box-shadow: 0 0 0 1px rgba(253, 224, 71, 0.28);
 }
 
 /* ── Left-panel alignment ────────────────────────────────────────────────── */
@@ -299,13 +325,13 @@ main {
  * The Timeline's left panel (group labels) and the Graph2d's left panel
  * (Y-axis) have different natural widths, so their time axes start at
  * different horizontal pixels.  Forcing them to the same fixed width makes
- * the time axes — and therefore the custom-time event lines — pixel-perfect.
+ * the time axes — and therefore the event overlay lines — pixel-perfect.
  */
 #timeline .vis-panel.vis-left,
 #kvChart  .vis-panel.vis-left {
-  width: 220px !important;
-  min-width: 220px !important;
-  max-width: 220px !important;
+  width: var(--agent-label-panel-width) !important;
+  min-width: var(--agent-label-panel-width) !important;
+  max-width: var(--agent-label-panel-width) !important;
 }
 
 /* ── tooltip ─────────────────────────────────────────────────────────────── */
@@ -373,8 +399,8 @@ main {
   font-weight: 500;
   padding: 0 8px;
   display: block;
-  overflow: hidden;
+  overflow: visible;
   white-space: nowrap;
-  text-overflow: ellipsis;
-  max-width: 204px; /* 220px panel − 8px padding × 2 */
+  text-overflow: clip;
+  max-width: none;
 }

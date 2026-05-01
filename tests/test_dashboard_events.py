@@ -24,7 +24,10 @@ def test_dashboard_renders_success_and_failed_offload_markers():
 
     assert "OFFLOAD_FAIL" in html
     assert "event-offload-fail" in css
-    assert "ct-offload-fail" in css
+    assert "event-line-offload-fail" in css
+    assert "eventCountOffload" in html
+    assert "eventCountOffloadFail" in html
+    assert "event-count" in css
 
 
 def test_dashboard_exposes_controller_pressure_badge():
@@ -38,3 +41,56 @@ def test_dashboard_exposes_controller_pressure_badge():
     assert "w_after_offload: ${fmtW(s.wAfterOffload)}" in js
     assert "controller offloads only when C <= threshold" in js
     assert "badge-pressure-active" in css
+
+
+def test_dashboard_exposes_vllm_preempt_badge_and_event_line_overlay():
+    js = _read("dashboard/dashboard.js")
+    html = _read("dashboard/index.html")
+    css = _read("dashboard/dashboard.css")
+
+    assert "vllmPreemptCount" in html
+    assert "vllmPreemptCount" in js
+    assert "vllm preempt: ${fmtCount(s.vllmPreemptions)}" in js
+    assert "scheduler_preemptions_total" in js
+    assert "badge-vllm" in css
+
+    assert "event-line-layer" in js
+    assert "eventLineEntries" in js
+    assert "EVENT_LINE_HIT_PX" in js
+    assert "incrementEventCount(type)" in js
+    assert "resetEventCounts()" in js
+
+
+def test_dashboard_event_colors_are_distinct_and_consistent():
+    css = _read("dashboard/dashboard.css")
+
+    assert ".event-offload      { background: #ef4444" in css
+    assert ".event-readmit      { background: #38bdf8" in css
+    assert ".event-line-offload { background: #ef4444" in css
+    assert ".event-line-readmit { background: #38bdf8" in css
+    assert ".event-line-sat" in css
+    assert "to bottom, #fde047 0 6px" in css
+
+
+def test_dashboard_expands_agent_label_panel_for_full_ids():
+    js = _read("dashboard/dashboard.js")
+    css = _read("dashboard/dashboard.css")
+
+    assert "updateAgentLabelPanelWidth(initialLabel)" in js
+    assert "--agent-label-panel-width" in js
+    assert "--agent-label-panel-width: 220px" in css
+    assert "width: var(--agent-label-panel-width)" in css
+    assert "text-overflow: clip" in css
+    assert "max-width: none" in css
+
+
+def test_dashboard_agent_labels_show_elapsed_then_fixed_e2e_time():
+    js = _read("dashboard/dashboard.js")
+    schema = _read("dashboard/SCHEMA.md")
+
+    assert "(elapsed: ${formatDurationSeconds(recordMs - startMs)} secs)" in js
+    assert "(E2E: ${formatDurationSeconds(finishedMs - startMs)} secs)" in js
+    assert "agent.finished_at" in js
+    assert 'agent.state === "done"' in js
+    assert "started_at" in schema
+    assert "finished_at" in schema

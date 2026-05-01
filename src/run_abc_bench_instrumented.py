@@ -217,11 +217,14 @@ class AgentPhaseTracker:
 
     def run_start(self):
         """Called just before conversation.send_message()."""
+        start_dt = now_utc()
         with _live_lock:
             _LIVE_AGENTS[self.agent_id] = {
                 "task_id": self.task_id,
                 "state": "waiting",
-                "state_since": iso_utc(now_utc()),
+                "state_since": iso_utc(start_dt),
+                "started_at": iso_utc(start_dt),
+                "finished_at": None,
                 "kv_blocks": None,
                 "kv_gb": None,
                 "last_kv_updated": None,
@@ -229,7 +232,6 @@ class AgentPhaseTracker:
                 "admission_state": "admitted",
             }
         with self._lock:
-            start_dt = now_utc()
             # Record the waiting gap between scheduled time and actual start.
             wait_dur = (start_dt - self.scheduled_dt).total_seconds()
             if wait_dur > 0.01:
@@ -240,12 +242,13 @@ class AgentPhaseTracker:
 
     def run_end(self, outcome: str = "run_complete", detail: str = "agent finished"):
         """Called after conversation.run() returns."""
+        end_dt = now_utc()
         with _live_lock:
             if self.agent_id in _LIVE_AGENTS:
                 _LIVE_AGENTS[self.agent_id]["state"] = "done"
-                _LIVE_AGENTS[self.agent_id]["state_since"] = iso_utc(now_utc())
+                _LIVE_AGENTS[self.agent_id]["state_since"] = iso_utc(end_dt)
+                _LIVE_AGENTS[self.agent_id]["finished_at"] = iso_utc(end_dt)
         with self._lock:
-            end_dt = now_utc()
             finalized = self.tool_collector.finalize_unfinished(
                 end_dt,
                 outcome="unfinished" if outcome == "run_complete" else outcome,

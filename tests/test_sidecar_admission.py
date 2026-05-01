@@ -110,6 +110,28 @@ def test_poll_vllm_reports_free_capacity_when_metric_is_derived():
     assert info["kv_free_gb"] == 6.0
 
 
+def test_poll_vllm_reports_scheduler_preemption_count():
+    class _Response:
+        text = "\n".join([
+            "vllm:num_gpu_blocks 10",
+            "vllm:num_gpu_blocks_used 4",
+            'vllm:num_preemptions_total{worker="0"} 2',
+            'vllm:num_preemptions_total{worker="1"} 3',
+            "vllm:num_preemptions_created 123",
+        ])
+
+        def raise_for_status(self):
+            return None
+
+    class _Session:
+        def get(self, url, timeout):
+            return _Response()
+
+    info = poll_vllm(_Session(), "http://vllm.invalid", BYTES_PER_GB)
+
+    assert info["scheduler_preemptions_total"] == 5
+
+
 def test_saturation_guard_blocks_admission_when_headroom_below_one():
     admitted: list[str] = []
     controller = DynamicAdmissionController(

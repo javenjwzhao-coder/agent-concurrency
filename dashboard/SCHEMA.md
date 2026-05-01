@@ -34,7 +34,8 @@ ticks it already rendered.
     "kv_cache_used_pct": 54.9,                 // float | null  → drives the KV % line chart
     "num_gpu_blocks_total": 1000,              // int   | null
     "num_gpu_blocks_used":  450,               // int   | null
-    "num_gpu_blocks_free":  550                // int   | null
+    "num_gpu_blocks_free":  550,               // int   | null
+    "scheduler_preemptions_total": 0           // int   | null — vLLM scheduler preemptions
     // "error": "<string>" if /metrics fetch failed this tick
   },
 
@@ -43,6 +44,8 @@ ticks it already rendered.
       "task_id": "task_3",                     // str
       "state":   "reasoning",                  // "waiting"|"reasoning"|"tool_call"|"evicted_waiting"|"done"
       "state_since": "2026-04-29T14:29:55.000+00:00",  // ISO-8601 — phase entry timestamp
+      "started_at": "2026-04-29T14:29:54.000+00:00",   // optional ISO-8601 — run start
+      "finished_at": null,                     // optional ISO-8601|null — fixed when state becomes done
       "kv_gb":   0.34,                         // float | null
       "kv_blocks": 1024,                       // int   | null
       "admission_state": "admitted",           // "admitted"|"evicted_pending_tool"|"evicted_ready"
@@ -135,15 +138,17 @@ ticks it already rendered.
 | Visual                               | Source                                                              |
 |--------------------------------------|---------------------------------------------------------------------|
 | One row per agent                    | keys of `agents` (first-seen order, never reshuffled)               |
+| Agent row label                      | `agent_id (elapsed: N secs)`, then `agent_id (E2E: N secs)` after `state=done`; uses `started_at`/`finished_at` when present |
 | Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active) |
 | Phase color                          | reasoning=blue, tool_call=green, waiting=gray, evicted_waiting=orange (rendered as "offloaded"), done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
 | Offload threshold line               | `100 * (1 - admission.threshold_gb / vllm.kv_total_gb)` per tick    |
 | Free-KV pressure badge               | `admission.C`, `admission.threshold_gb`, and `admission.pressure`   |
+| vLLM preempt badge                   | `vllm.scheduler_preemptions_total` from vLLM `/metrics`             |
 | OFFLOAD marker (red)                 | `admission.evictions[*]` where `evicted == true` (KV pushed to CPU) |
-| OFFLOAD_FAIL marker (dashed rose)    | `admission.evictions[*]` where `evicted == false` (attempt rejected) |
+| OFFLOAD_FAIL marker (dashed orange)  | `admission.evictions[*]` where `evicted == false` (attempt rejected) |
 | ADMIT marker (green)                 | `admission.admissions[*]` where `admitted && !previously_evicted`   |
-| READMIT marker (purple)              | `admission.admissions[*]` where `admitted && previously_evicted`    |
+| READMIT marker (cyan)                | `admission.admissions[*]` where `admitted && previously_evicted`    |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low effective headroom blocks queued agents) |
 | Event tooltip                        | `{ts, tick, C, threshold_gb, pressure, w, s_t, s_prev}` plus event-specific fields |
 | Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick           |

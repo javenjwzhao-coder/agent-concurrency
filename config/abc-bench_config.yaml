@@ -44,5 +44,5 @@ sidecar:
     threshold_gb: 3.2
     initial_admit_interval_s: 1.0
     max_fresh_admits_per_tick: 1
-    max_active_agents: 32
+    max_active_agents: 20
     fallback_long_tool_call_s: 5.0

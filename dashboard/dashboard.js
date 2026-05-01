@@ -25,6 +25,17 @@
 
   const VIEWPORT_PAST_MS  = 60_000;
   const VIEWPORT_AHEAD_MS = 5_000;
+  const EVENT_LINE_OFFSET_PX = 5;
+  const EVENT_LINE_HIT_PX = 4;
+  const AGENT_LABEL_PANEL_MIN_PX = 220;
+  const AGENT_LABEL_PANEL_PADDING_PX = 28;
+  const EVENT_COUNT_IDS = {
+    offload: "eventCountOffload",
+    "offload-fail": "eventCountOffloadFail",
+    admit: "eventCountAdmit",
+    readmit: "eventCountReadmit",
+    sat: "eventCountSat",
+  };
 
   const state = {
     timeline: null,
@@ -35,10 +46,12 @@
     kvGroups: null,
     agents: new Map(),
     agentOrder: [],
+    agentLabelPanelWidth: AGENT_LABEL_PANEL_MIN_PX,
     eventCounter: 0,
     itemCounter: 0,
-    customTimeIds: [],   // IDs added via addCustomTime on both charts
-    eventPoints: [],     // [{ts: epochMs, type, label, text}] for proximity tooltip
+    eventLineRenderPending: false,
+    eventPoints: [],     // [{id, ts: epochMs, type, label, text}] for event lines + tooltips
+    eventCounts: {},
     tickHistory: [],     // [{ts: epoch_ms, count: active_agent_count}]
     latestTick: -1,
     latestTs: null,
@@ -181,14 +194,18 @@
       state.kvChart.setWindow(props.start, props.end, { animation: false });
       if (props.byUser) setPaused(true);
       updateBadges(props.end.getTime());
+      scheduleEventLineRender();
     });
     state.kvChart.on("rangechange", (props) => {
       state.timeline.setWindow(props.start, props.end, { animation: false });
       if (props.byUser) setPaused(true);
       updateBadges(props.end.getTime());
+      scheduleEventLineRender();
     });
 
+    setupEventLineLayers();
     setupProximityTooltips();
+    window.addEventListener("resize", scheduleEventLineRender);
   }
 
   // ── header count badges ────────────────────────────────────────────────
@@ -206,9 +223,11 @@
   //   C, threshold, pressure — free KV GB, configured offload threshold,
   //                            and whether the controller is in pressure
   //   queue     — fresh + evicted_ready waiting to be admitted
+  //   vllmPreemptions — cumulative vLLM scheduler preemptions from /metrics
 
   function snapshotCounts(record) {
     const agents = record.agents || {};
+    const vllm = record.vllm || {};
     let reasoning = 0, tool_call = 0, waiting = 0, offloaded = 0, done = 0;
     let launched = 0;
     for (const id of Object.keys(agents)) {
@@ -242,6 +261,7 @@
       wAfterOffload,
       effectiveW,
       pressure,
+      vllmPreemptions: vllmSchedulerPreemptions(vllm),
     };
   }
 
@@ -289,6 +309,9 @@
       "fresh + evicted_ready agents waiting to be admitted");
     setBadge("doneCount", `done: ${s.done} / ${s.launched}`,
       "completed agents / total launched");
+    setBadge("vllmPreemptCount", `vllm preempt: ${fmtCount(s.vllmPreemptions)}`,
+      "cumulative scheduler preemptions reported by vLLM /metrics\n" +
+      "separate from sidecar offload/admission decisions");
   }
 
   function autoScroll(nowDate) {
@@ -309,18 +332,25 @@
 
   // ── per-agent phase rendering ──────────────────────────────────────────
 
-  function ensureAgentGroup(agentId, taskId) {
+  function ensureAgentGroup(agentId, agent, recordTs) {
     if (state.agents.has(agentId)) return state.agents.get(agentId);
     const groupId = `agent::${agentId}`;
+    const startMs = agentStartMs(agent, recordTs);
+    const recordMs = parseTimeMs(recordTs) ?? Date.now();
+    const initialLabel = agentRuntimeLabel(agentId, startMs, null, recordMs);
     state.agentOrder.push(agentId);
+    updateAgentLabelPanelWidth(initialLabel);
     state.groups.add({
       id: groupId,
-      content: agentId,
-      title: taskId ? `task: ${taskId}` : agentId,
+      content: initialLabel,
+      title: agentGroupTitle(agentId, agent, startMs, null),
       order: state.agentOrder.length,
     });
     const entry = {
       groupId,
+      startedAtMs: startMs,
+      finishedAtMs: null,
+      labelText: initialLabel,
       activeItemId: null,
       activeStart: null,
       activePhase: null,
@@ -330,8 +360,92 @@
     return entry;
   }
 
+  function updateAgentRuntimeLabel(entry, agentId, agent, recordTs) {
+    const recordMs = parseTimeMs(recordTs) ?? Date.now();
+    const explicitStartMs = parseTimeMs(agent.started_at);
+    if (explicitStartMs !== null && explicitStartMs < entry.startedAtMs) {
+      entry.startedAtMs = explicitStartMs;
+    }
+    if (entry.finishedAtMs === null) {
+      const explicitFinishMs = parseTimeMs(agent.finished_at);
+      if (explicitFinishMs !== null) {
+        entry.finishedAtMs = explicitFinishMs;
+      } else if (agent.state === "done") {
+        entry.finishedAtMs = parseTimeMs(agent.state_since) ?? recordMs;
+      }
+    }
+    const label = agentRuntimeLabel(agentId, entry.startedAtMs, entry.finishedAtMs, recordMs);
+    if (label === entry.labelText) return;
+    entry.labelText = label;
+    updateAgentLabelPanelWidth(label);
+    state.groups.update({
+      id: entry.groupId,
+      content: label,
+      title: agentGroupTitle(agentId, agent, entry.startedAtMs, entry.finishedAtMs),
+    });
+  }
+
+  function agentStartMs(agent, recordTs) {
+    const recordMs = parseTimeMs(recordTs);
+    return parseTimeMs(agent.started_at)
+      ?? parseTimeMs(agent.state_since)
+      ?? recordMs
+      ?? Date.now();
+  }
+
+  function agentRuntimeLabel(agentId, startMs, finishedMs, recordMs) {
+    if (finishedMs !== null) {
+      return `${agentId} (E2E: ${formatDurationSeconds(finishedMs - startMs)} secs)`;
+    }
+    return `${agentId} (elapsed: ${formatDurationSeconds(recordMs - startMs)} secs)`;
+  }
+
+  function agentGroupTitle(agentId, agent, startMs, finishedMs) {
+    const lines = [agentId];
+    if (agent.task_id) lines.push(`task: ${agent.task_id}`);
+    lines.push(`started: ${new Date(startMs).toISOString()}`);
+    if (finishedMs !== null) {
+      lines.push(`finished: ${new Date(finishedMs).toISOString()}`);
+      lines.push(`E2E: ${formatDurationSeconds(finishedMs - startMs)} secs`);
+    }
+    return lines.join("\n");
+  }
+
+  function updateAgentLabelPanelWidth(agentId) {
+    const nextWidth = Math.max(
+      AGENT_LABEL_PANEL_MIN_PX,
+      Math.ceil(measureAgentLabel(agentId) + AGENT_LABEL_PANEL_PADDING_PX),
+    );
+    if (nextWidth <= state.agentLabelPanelWidth) return;
+    state.agentLabelPanelWidth = nextWidth;
+    document.documentElement.style.setProperty(
+      "--agent-label-panel-width",
+      state.agentLabelPanelWidth + "px",
+    );
+    scheduleEventLineRender();
+  }
+
+  function resetAgentLabelPanelWidth() {
+    state.agentLabelPanelWidth = AGENT_LABEL_PANEL_MIN_PX;
+    document.documentElement.style.setProperty(
+      "--agent-label-panel-width",
+      state.agentLabelPanelWidth + "px",
+    );
+  }
+
+  function measureAgentLabel(text) {
+    if (!measureAgentLabel.canvas) {
+      measureAgentLabel.canvas = document.createElement("canvas");
+    }
+    const ctx = measureAgentLabel.canvas.getContext("2d");
+    if (!ctx) return String(text).length * 8;
+    ctx.font = '500 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+    return ctx.measureText(String(text)).width;
+  }
+
   function applyAgentTick(agentId, agent, recordTs) {
-    const entry = ensureAgentGroup(agentId, agent.task_id);
+    const entry = ensureAgentGroup(agentId, agent, recordTs);
+    updateAgentRuntimeLabel(entry, agentId, agent, recordTs);
     const phase = agent.state || "waiting";
     const phaseStart = agent.state_since || recordTs;
     entry.lastKvGb = (agent.kv_gb !== undefined) ? agent.kv_gb : entry.lastKvGb;
@@ -455,57 +569,139 @@
     ].join("\n");
   }
 
-  // pointer-events:none on .vis-custom-time prevents both dragging and hover.
-  // Tooltips are shown via container-level proximity detection (setupProximityTooltips).
-  function addCustomTimeStyled(chart, container, chartSuffix, time, id, type) {
-    const fullId = id + "::" + chartSuffix;
-    try {
-      chart.addCustomTime(time, fullId);
-    } catch (err) {
-      console.error("addCustomTime failed", fullId, err);
-      return fullId;
+  function setupEventLineLayers() {
+    getEventLineLayer($("#kvChart"));
+    getEventLineLayer($("#timeline"));
+  }
+
+  function getEventLineLayer(container) {
+    let layer = container.querySelector(".event-line-layer");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.className = "event-line-layer";
+      container.appendChild(layer);
     }
-    const els = container.querySelectorAll(".vis-custom-time");
-    const el = els[els.length - 1];
-    if (el) el.classList.add("ct-" + type);
-    return fullId;
+    return layer;
+  }
+
+  function scheduleEventLineRender() {
+    if (state.eventLineRenderPending) return;
+    state.eventLineRenderPending = true;
+    requestAnimationFrame(() => {
+      state.eventLineRenderPending = false;
+      renderEventLines();
+    });
+  }
+
+  function renderEventLines() {
+    for (const [container, chart] of [
+      [$("#timeline"), state.timeline],
+      [$("#kvChart"),  state.kvChart],
+    ]) {
+      const layer = getEventLineLayer(container);
+      layer.textContent = "";
+      for (const hit of eventLineEntries(container, chart)) {
+        const line = document.createElement("div");
+        line.className = `event-line event-line-${hit.ep.type}`;
+        line.style.left = hit.x + "px";
+        line.dataset.eventId = hit.ep.id;
+        line.dataset.eventType = hit.ep.type;
+        layer.appendChild(line);
+      }
+    }
+  }
+
+  function clearEventLineLayers() {
+    for (const container of [$("#timeline"), $("#kvChart")]) {
+      const layer = container && container.querySelector(".event-line-layer");
+      if (layer) layer.textContent = "";
+    }
+  }
+
+  function resetEventCounts() {
+    state.eventCounts = {};
+    for (const type of Object.keys(EVENT_COUNT_IDS)) {
+      state.eventCounts[type] = 0;
+      updateEventCount(type);
+    }
+  }
+
+  function incrementEventCount(type) {
+    state.eventCounts[type] = (state.eventCounts[type] || 0) + 1;
+    updateEventCount(type);
+  }
+
+  function updateEventCount(type) {
+    const el = $("#" + EVENT_COUNT_IDS[type]);
+    if (el) el.textContent = String(state.eventCounts[type] || 0);
   }
 
   function addEvent(ts, type, label, extraText, sharedBase) {
     const id = `evt::${++state.eventCounter}`;
     const start = new Date(ts);
-    const tlId = addCustomTimeStyled(state.timeline, $("#timeline"), "tl", start, id, type);
-    const kvId = addCustomTimeStyled(state.kvChart,  $("#kvChart"),  "kv", start, id, type);
-    state.customTimeIds.push(tlId, kvId);
     // Store label, event-specific extra, and shared base separately so same-tick
     // events can be grouped into one tooltip without repeating the base fields.
-    state.eventPoints.push({ ts: start.getTime(), type, label, extraText, sharedBase });
+    state.eventPoints.push({ id, ts: start.getTime(), type, label, extraText, sharedBase });
+    incrementEventCount(type);
+    scheduleEventLineRender();
   }
 
   // ── proximity tooltip (fires from container mousemove) ─────────────────
 
-  // Returns all eventPoints within THRESHOLD_PX of clientX, sorted by distance.
-  function findEventsAtPixel(clientX, container, chart) {
-    if (!state.eventPoints.length) return [];
+  function eventAxisLayout(container, chart) {
+    if (!state.eventPoints.length) return null;
     const win = chart.getWindow();
     const startMs = win.start.getTime();
     const endMs   = win.end.getTime();
-    if (endMs <= startMs) return [];
-    const cRect = container.getBoundingClientRect();
+    if (endMs <= startMs) return null;
     const leftEl = container.querySelector(".vis-panel.vis-left");
-    const leftW  = leftEl ? leftEl.getBoundingClientRect().width : 220;
-    const chartW = cRect.width - leftW;
-    if (chartW <= 0) return [];
-    const THRESHOLD_PX = 7;
-    const hits = [];
+    const leftW  = leftEl ? leftEl.getBoundingClientRect().width : state.agentLabelPanelWidth;
+    const chartW = container.clientWidth - leftW;
+    if (chartW <= 0) return null;
+    return { startMs, endMs, leftW, chartW };
+  }
+
+  function eventLineEntries(container, chart) {
+    const layout = eventAxisLayout(container, chart);
+    if (!layout) return [];
+    const groups = new Map();
     for (const ep of state.eventPoints) {
-      const frac = (ep.ts - startMs) / (endMs - startMs);
-      const evClientX = cRect.left + leftW + frac * chartW;
+      const frac = (ep.ts - layout.startMs) / (layout.endMs - layout.startMs);
+      if (frac < -0.02 || frac > 1.02) continue;
+      const key = String(ep.ts);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ ep, frac });
+    }
+    const entries = [];
+    for (const group of groups.values()) {
+      const count = group.length;
+      for (let i = 0; i < count; i++) {
+        const offset = count === 1
+          ? 0
+          : (i - (count - 1) / 2) * EVENT_LINE_OFFSET_PX;
+        const x = layout.leftW + group[i].frac * layout.chartW + offset;
+        entries.push({ ep: group[i].ep, x });
+      }
+    }
+    return entries;
+  }
+
+  // Returns the closest rendered event line(s) to clientX.
+  function findEventsAtPixel(clientX, container, chart) {
+    if (!state.eventPoints.length) return [];
+    const cRect = container.getBoundingClientRect();
+    const hits = [];
+    for (const entry of eventLineEntries(container, chart)) {
+      const evClientX = cRect.left + entry.x;
       const dist = Math.abs(clientX - evClientX);
-      if (dist <= THRESHOLD_PX) hits.push({ ep, dist });
+      if (dist <= EVENT_LINE_HIT_PX) hits.push({ ep: entry.ep, dist });
     }
     hits.sort((a, b) => a.dist - b.dist);
-    return hits.map(h => h.ep);
+    if (!hits.length) return [];
+    const best = hits[0].dist;
+    return hits
+      .filter(h => Math.abs(h.dist - best) < 1)
+      .map(h => h.ep);
   }
 
   // Build tooltip text for one or more events (same tick events share base info).
@@ -587,6 +783,21 @@
     const total = totalKvGb(record);
     if (offloadThresholdGb === null || total === null || total <= 0) return null;
     return Math.max(0, Math.min(100, 100 * (1 - offloadThresholdGb / total)));
+  }
+
+  function vllmSchedulerPreemptions(vllm) {
+    const candidates = [
+      vllm.scheduler_preemptions_total,
+      vllm.num_scheduler_preemptions_total,
+      vllm.num_preemptions_total,
+      vllm.preemptions_total,
+      vllm.preemption_count_total,
+    ];
+    for (const value of candidates) {
+      const n = finiteNumber(value);
+      if (n !== null) return Math.max(0, Math.floor(n));
+    }
+    return null;
   }
 
   // ── tick application ───────────────────────────────────────────────────
@@ -675,11 +886,9 @@
       state.eventSource.close();
       state.eventSource = null;
     }
-    for (const id of state.customTimeIds) {
-      try { state.timeline.removeCustomTime(id); } catch (e) { /* already gone */ }
-      try { state.kvChart.removeCustomTime(id); }  catch (e) { /* already gone */ }
-    }
-    state.customTimeIds = [];
+    clearEventLineLayers();
+    resetEventCounts();
+    resetAgentLabelPanelWidth();
     state.items.clear();
     state.groups.clear();
     state.kvPoints.clear();
@@ -692,7 +901,15 @@
     state.replayBounds = null;
     state.tickHistory = [];
     state.eventPoints = [];
-    for (const id of ["liveCount", "offloadedCount", "heapCount", "pressureBadge", "queueCount", "doneCount"]) {
+    for (const id of [
+      "liveCount",
+      "offloadedCount",
+      "heapCount",
+      "pressureBadge",
+      "queueCount",
+      "doneCount",
+      "vllmPreemptCount",
+    ]) {
       const el = $("#" + id);
       if (el) el.style.display = "none";
     }
@@ -779,6 +996,10 @@
     return v === null || v === undefined ? "n/a" : Number(v).toFixed(2);
   }
 
+  function fmtCount(v) {
+    return v === null || v === undefined ? "n/a" : String(v);
+  }
+
   function pressureLabel(adm) {
     if (adm && adm.pressure === true) return "yes";
     const C = finiteNumber(adm && adm.C);
@@ -790,6 +1011,17 @@
   function formatHMS(d) {
     const pad = (n) => String(n).padStart(2, "0");
     return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function parseTimeMs(value) {
+    if (!value) return null;
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  function formatDurationSeconds(ms) {
+    const sec = Math.max(0, Math.round(ms / 1000));
+    return String(sec);
   }
 
   function escapeHtml(s) {
