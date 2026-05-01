@@ -14,9 +14,9 @@ The key invariant is:
 ```mermaid
 flowchart LR
     tasks[ABC-Bench tasks]
-    runner[Instrumented OpenHands runner<br/>run_abc_bench_instrumented.py]
-    sidecar[Sidecar admission controller<br/>sidecar.py]
-    api[vLLM agent KV routes<br/>/offload /release /restore]
+    runner[Instrumented OpenHands runner<br/>event hooks and live state]
+    sidecar[Sidecar admission controller<br/>policy loop]
+    api[vLLM agent KV routes<br/>offload, release, restore]
     engine[Patched vLLM engine/core/scheduler]
     conn[AgentAwareOffloadingConnector]
     worker[Connector worker<br/>async transfer]
@@ -66,17 +66,17 @@ Key quantities:
 flowchart TD
     tick[Sidecar tick]
     metrics[Poll vLLM metrics<br/>free blocks, total blocks, preemptions]
-    live[Read live agents<br/>phase, kv_blocks, kv_gb, queues]
-    compute[Compute C, s_t, s_prev, w]
-    pressure{free KV <=<br/>threshold_percent?}
-    heap[Build offload heap<br/>idle_long agents only]
-    score[Score = kv_gb * predicted_remaining_s]
-    offload[POST /agent_kv_cache/offload<br/>best candidate]
-    exact[Poll exact free-block delta<br/>up to exact_freed_gb_timeout_s]
-    recompute[Recompute effective w<br/>as w_after_offload]
-    gate{w_after_offload or w<br/>> w_threshold?}
+    live[Read live agents<br/>phase, KV blocks, KV GB, queues]
+    compute[Compute C, current average, previous average, headroom]
+    pressure{free KV at or below<br/>pressure threshold?}
+    heap[Build offload heap<br/>long idle agents only]
+    score[Score by KV size<br/>times remaining tool time]
+    offload[POST offload endpoint<br/>best candidate]
+    exact[Poll exact free-block delta<br/>up to configured timeout]
+    recompute[Recompute effective headroom<br/>after offload]
+    gate{headroom above<br/>admission threshold?}
     cap{active slots available?}
-    admit[Admit work<br/>offloaded_ready first, then fresh]
+    admit[Admit work<br/>readmit lane first, then fresh]
     block[Keep queued<br/>emit headroom/pressure/cap reasons]
 
     tick --> metrics
@@ -109,23 +109,23 @@ Tool-call policy starts at `ActionEvent`, not at pressure time. The runner calls
 ```mermaid
 flowchart TD
     action[OpenHands ActionEvent<br/>tool call starts]
-    close[Runner closes reasoning phase<br/>opens tool_call phase]
+    close[Runner closes reasoning phase<br/>opens tool call phase]
     snapshot[Runner captures live snapshot<br/>tool metadata + KV state]
-    classify[Sidecar on_tool_call_start]
+    classify[Sidecar classifies tool call]
     predict{Predictor returns<br/>remaining seconds?}
-    short{predicted < short_tool_call_threshold_s?}
-    release_short[Release held KV immediately<br/>reason: short_tool_call]
-    idle_short[Mark idle_short<br/>not offloadable]
-    idle_long[Mark idle_long<br/>eligible for pressure heap]
-    fallback{elapsed >= fallback_long_tool_call_s?}
-    unavailable[Mark predictor_unavailable<br/>not offloadable yet]
+    short{below short-call threshold?}
+    releaseShort[Release held KV immediately<br/>short tool-call reason]
+    idleShort[Mark short idle<br/>not offloadable]
+    idleLong[Mark long idle<br/>eligible for pressure heap]
+    fallback{elapsed above<br/>fallback long threshold?}
+    unavailable[Mark predictor unavailable<br/>not offloadable yet]
 
     action --> close --> snapshot --> classify --> predict
     predict -- yes --> short
-    short -- yes --> release_short --> idle_short
-    short -- no --> idle_long
+    short -- yes --> releaseShort --> idleShort
+    short -- no --> idleLong
     predict -- no --> fallback
-    fallback -- yes --> idle_long
+    fallback -- yes --> idleLong
     fallback -- no --> unavailable
 ```
 
@@ -136,9 +136,9 @@ flowchart TD
     obs[ObservationEvent or rejection]
     record[Record tool duration<br/>clear live tool metadata]
     offloaded{Was agent offloaded?}
-    wait[wait_if_offloaded<br/>block before next LLM call]
-    restore[Sidecar readmits<br/>POST /agent_kv_cache/restore]
-    release[Release held KV<br/>reason: tool_complete]
+    wait[Wait if offloaded<br/>block before next LLM call]
+    restore[Sidecar readmits<br/>POST restore endpoint]
+    release[Release held KV<br/>tool complete reason]
     reason[Open reasoning phase]
 
     obs --> record --> offloaded
@@ -164,20 +164,20 @@ sequenceDiagram
     participant CPU as CPU Offload Manager
     participant SC as Sidecar
 
-    S->>C: request_finished(request, block_ids)
-    C->>C: snapshot block_ids + block_hashes
+    S->>C: request finished with block ids
+    C->>C: snapshot block ids and block hashes
     C-->>S: delay free = true
     Note over S,C: Request KV is held; blocks never enter the free queue.
 
-    SC->>C: POST /agent_kv_cache/offload(agent_id)
+    SC->>C: POST offload endpoint for agent
     C->>C: mark agent pending offload
-    S->>C: build_connector_meta()
+    S->>C: build connector metadata
     C->>W: synthetic store job from held snapshot
-    W->>CPU: transfer_async(GPU KV -> CPU)
+    W->>CPU: async transfer of GPU KV to CPU
     CPU-->>W: store complete
-    W-->>C: finished_sending synthetic id + real request id
+    W-->>C: finished sending synthetic id and real request id
     C->>C: drop hold and clear pending job
-    C-->>S: real request finished_sending
+    C-->>S: real request finished sending
     S->>S: free real request blocks normally
 ```
 
@@ -185,17 +185,17 @@ Release without offload uses the same safety boundary:
 
 ```mermaid
 sequenceDiagram
-    participant R as Runner/Sidecar
-    participant API as /agent_kv_cache/release
+    participant R as Runner or Sidecar
+    participant API as release endpoint
     participant C as AgentAwareOffloadingScheduler
     participant S as vLLM Scheduler
 
-    R->>API: release(agent_id, reason)
-    API->>C: release_agent_kv(agent_id, reason)
+    R->>API: release request for agent
+    API->>C: call release agent KV
     C->>C: skip requests with pending async store
     C->>C: drop safe held snapshots
-    C-->>S: released_request_ids
-    S->>S: _free_blocks(request)
+    C-->>S: released request ids
+    S->>S: free request blocks
 ```
 
 No real implementation path relies on `only_ref_cnt_zero`. The safe invariant is
@@ -209,7 +209,7 @@ stateDiagram-v2
     FreshQueue --> Admitted: launch
     Admitted --> Reasoning: LLM request
     Reasoning --> ToolCall: ActionEvent
-    Reasoning --> Done: final/error
+    Reasoning --> Done: final or error
 
     ToolCall --> IdleShort: predicted short
     IdleShort --> Reasoning: release + tool result
@@ -221,7 +221,7 @@ stateDiagram-v2
     OffloadedPendingTool --> OffloadedReady: ObservationEvent
     OffloadedReady --> Admitted: readmit + restore
 
-    ToolCall --> Done: error/cancel
+    ToolCall --> Done: error or cancel
     Done --> [*]
 ```
 
@@ -265,12 +265,12 @@ flowchart TD
     attempt[Offload attempt]
     accepted{Endpoint accepted?}
     exact{Exact free-block delta<br/>observed before timeout?}
-    pending[pending_async<br/>accepted but async free not visible yet]
-    exactok[vllm_free_blocks_delta<br/>freed_gb is exact]
-    fail[offload_attempt_failed]
-    timeout[offload_request_timeout]
+    pending[pending async<br/>accepted but async free not visible yet]
+    exactok[exact free-block delta<br/>freed GB is exact]
+    fail[offload attempt failed]
+    timeout[offload request timeout]
     noheld[no held KV blocks for agent]
-    release[release path<br/>short/tool_complete/final/error]
+    release[release path<br/>short, tool complete, final, or error]
     ttl[TTL cleanup<br/>stale hold release]
 
     attempt --> accepted
