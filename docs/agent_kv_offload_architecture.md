@@ -157,45 +157,39 @@ path at `request_finished()` for agent-tagged requests, then releases only after
 an explicit release or after async offload completes.
 
 ```mermaid
-sequenceDiagram
-    participant S as vLLM Scheduler
-    participant C as AgentAwareOffloadingScheduler
-    participant W as AgentAwareOffloadingWorker
-    participant CPU as CPU Offload Manager
-    participant SC as Sidecar
+flowchart TD
+    finish[vLLM scheduler sees finished agent request]
+    snapshot[Connector snapshots block ids and block hashes]
+    hold[Connector returns delay free]
+    reserved[Request KV stays held and never enters free queue]
+    choose[Sidecar chooses agent for pressure offload]
+    pending[Connector marks agent pending offload]
+    meta[Next scheduler pass builds connector metadata]
+    job[Connector creates synthetic store job from held snapshot]
+    copy[Worker copies GPU KV blocks to CPU offload manager]
+    done[Worker reports synthetic job and real request complete]
+    release[Connector drops hold and forwards real request completion]
+    free[vLLM frees real request blocks normally]
 
-    S->>C: request finished with block ids
-    C->>C: snapshot block ids and block hashes
-    C-->>S: delay free = true
-    Note over S,C: Request KV is held; blocks never enter the free queue.
-
-    SC->>C: POST offload endpoint for agent
-    C->>C: mark agent pending offload
-    S->>C: build connector metadata
-    C->>W: synthetic store job from held snapshot
-    W->>CPU: async transfer of GPU KV to CPU
-    CPU-->>W: store complete
-    W-->>C: finished sending synthetic id and real request id
-    C->>C: drop hold and clear pending job
-    C-->>S: real request finished sending
-    S->>S: free real request blocks normally
+    finish --> snapshot --> hold --> reserved
+    reserved --> choose --> pending --> meta --> job --> copy --> done --> release --> free
 ```
 
 Release without offload uses the same safety boundary:
 
 ```mermaid
-sequenceDiagram
-    participant R as Runner or Sidecar
-    participant API as release endpoint
-    participant C as AgentAwareOffloadingScheduler
-    participant S as vLLM Scheduler
+flowchart TD
+    releaseRequest[Runner or sidecar calls release endpoint]
+    connector[Connector receives release request]
+    check{Request has pending async store?}
+    keep[Keep hold until store completion]
+    drop[Drop safe held snapshots]
+    ids[Return released request ids]
+    freeBlocks[vLLM scheduler frees request blocks]
 
-    R->>API: release request for agent
-    API->>C: call release agent KV
-    C->>C: skip requests with pending async store
-    C->>C: drop safe held snapshots
-    C-->>S: released request ids
-    S->>S: free request blocks
+    releaseRequest --> connector --> check
+    check -- yes --> keep
+    check -- no --> drop --> ids --> freeBlocks
 ```
 
 No real implementation path relies on `only_ref_cnt_zero`. The safe invariant is
