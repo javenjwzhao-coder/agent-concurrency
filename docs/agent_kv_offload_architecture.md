@@ -12,28 +12,40 @@ The key invariant is:
 ## 1. System Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     tasks[ABC-Bench tasks]
-    runner[Instrumented OpenHands runner<br/>event hooks and live state]
-    sidecar[Sidecar admission controller<br/>policy loop]
-    api[vLLM agent KV routes<br/>offload, release, restore]
-    engine[Patched vLLM engine/core/scheduler]
-    conn[AgentAwareOffloadingConnector]
-    worker[Connector worker<br/>async transfer]
-    cpu[CPU offload manager]
-    gpu[NPU/GPU KV cache]
-    dash[Dashboard + JSONL/SSE telemetry]
-    pred[Tool duration predictor]
+
+    subgraph RunnerLayer[Runner layer]
+        runner[Instrumented OpenHands runner<br/>event hooks and live state]
+        pred[Tool duration predictor]
+    end
+
+    subgraph PolicyLayer[Policy and telemetry layer]
+        sidecar[Sidecar admission controller<br/>policy loop]
+        dash[Dashboard plus JSONL and SSE telemetry]
+    end
+
+    subgraph VllmLayer[vLLM control layer]
+        api[vLLM agent KV routes<br/>offload, release, restore]
+        engine[Patched vLLM engine, core, scheduler]
+    end
+
+    subgraph ConnectorLayer[KV safety and transfer layer]
+        conn[AgentAwareOffloadingConnector]
+        gpu[NPU or GPU KV cache<br/>held request blocks]
+        worker[Connector worker<br/>async transfer]
+        cpu[CPU offload manager]
+    end
 
     tasks -->|launch queued agents| runner
-    runner -->|live agent state + Action/Observation hooks| sidecar
+    runner -->|live agent state and event hooks| sidecar
     pred -->|predicted remaining tool seconds| sidecar
-    sidecar -->|admission/offload decisions| runner
-    sidecar -->|POST agent KV control| api
+    sidecar -->|admission decisions| runner
     sidecar -->|tick reports| dash
-    api -->|forward through vLLM client/core| engine
+    sidecar -->|POST agent KV control| api
+    api -->|forward through vLLM client and core| engine
     engine --> conn
-    conn -->|hold/release/restore state| gpu
+    conn -->|hold, release, restore state| gpu
     conn -->|store metadata| worker
     worker -->|GPU KV blocks| cpu
 ```
