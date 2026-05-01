@@ -446,6 +446,8 @@
       `s_t:    ${fmt(adm.s_t)}`,
       `s_prev: ${fmt(adm.s_prev)}`,
       `w:      ${fmt(adm.w)}`,
+      `active: ${fmt(adm.active_agents)} / ${fmt(adm.max_active_agents)}`,
+      `active_slots: ${fmt(adm.active_agent_slots)}`,
       `queue:  fresh=${fmt(adm.queue && adm.queue.fresh)} ` +
         `ready=${fmt(adm.queue && adm.queue.evicted_ready)} ` +
         `pending_tool=${fmt(adm.queue && adm.queue.evicted_pending_tool)}`,

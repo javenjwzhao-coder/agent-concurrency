@@ -1097,6 +1097,9 @@ def parse_args() -> argparse.Namespace:
                     help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-max-fresh-admits-per-tick", type=int, default=1,
                     help="Maximum fresh queued agents the sidecar may launch per poll tick.")
+    sc.add_argument("--sidecar-max-active-agents", type=int, default=0,
+                    help="Maximum active admitted agents at once "
+                         "(0 disables this cap).")
     sc.add_argument("--sidecar-short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration stay resident.")
     sc.add_argument("--sidecar-fallback-long-tool-call-s", type=float, default=30.0,
@@ -1175,6 +1178,7 @@ def main() -> int:
                 threshold_gb=args.sidecar_admission_threshold_gb,
                 initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
                 max_fresh_admits_per_tick=args.sidecar_max_fresh_admits_per_tick,
+                max_active_agents=args.sidecar_max_active_agents,
                 short_tool_call_threshold_s=args.sidecar_short_tool_call_threshold_s,
                 fallback_long_tool_call_s=args.sidecar_fallback_long_tool_call_s,
                 offload_endpoint=(

@@ -197,17 +197,21 @@ cannot be admitted.
 Policy order:
 
 1. If `w < 1`, admit no new fresh agents.
-2. Before the first real SAT, admit at most one fresh queued task per
+2. If `max_active_agents` is positive and the number of active admitted agents
+   (`reasoning`, `tool_call`, or `waiting`) has reached that cap, admit no
+   fresh or previously evicted agents.
+3. Before the first real SAT, admit at most one fresh queued task per
    `initial_admit_interval_s`. After first SAT, fresh admissions use normal
    sidecar capacity math. READMITs bypass this launch ramp.
-3. At tool-call start, predict remaining duration. Predicted-short calls
+4. At tool-call start, predict remaining duration. Predicted-short calls
    (`< short_tool_call_threshold_s`) stay resident and are excluded from
    pressure offload. Predicted-long calls remain eligible for the heap. If no
    predictor is available yet, tool calls older than
    `fallback_long_tool_call_s` are treated as long idle candidates.
-4. If `C <= threshold_gb`, offload highest-scoring eligible long idle
+5. If `C <= threshold_gb`, offload highest-scoring eligible long idle
    `tool_call` agents through the agent-aware OffloadingConnector.
-5. If `C > threshold_gb` and `w >= 1`, admit from the waiting queue.
+6. If `C > threshold_gb`, `w >= 1`, and the active-agent cap has room, admit
+   from the waiting queue.
 
 The waiting queue has two lanes: previously evicted agents first, then fresh
 agents FIFO.
@@ -256,6 +260,7 @@ sidecar:
     enabled: true
     threshold_gb: 3.2
     initial_admit_interval_s: 1.0
+    max_active_agents: 32
     fallback_long_tool_call_s: 5.0
 ```
 

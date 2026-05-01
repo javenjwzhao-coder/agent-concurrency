@@ -217,6 +217,7 @@ flat_keys = [
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
     ("SIDECAR_INITIAL_ADMIT_INTERVAL_S", "sidecar.admission_control.initial_admit_interval_s"),
     ("SIDECAR_MAX_FRESH_ADMITS_PER_TICK", "sidecar.admission_control.max_fresh_admits_per_tick"),
+    ("SIDECAR_MAX_ACTIVE_AGENTS", "sidecar.admission_control.max_active_agents"),
     ("SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S", "sidecar.admission_control.short_tool_call_threshold_s"),
     ("SIDECAR_FALLBACK_LONG_TOOL_CALL_S", "sidecar.admission_control.fallback_long_tool_call_s"),
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
@@ -368,6 +369,7 @@ build_runner_cmd() {
                 --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
                 --sidecar-initial-admit-interval-s "${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
                 --sidecar-max-fresh-admits-per-tick "${SIDECAR_MAX_FRESH_ADMITS_PER_TICK:-1}"
+                --sidecar-max-active-agents "${SIDECAR_MAX_ACTIVE_AGENTS:-0}"
                 --sidecar-short-tool-call-threshold-s "${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
                 --sidecar-fallback-long-tool-call-s "${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
                 --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
@@ -473,6 +475,7 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
         echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
         echo "    initial_admit_s:    ${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
         echo "    fresh_admits/tick:  ${SIDECAR_MAX_FRESH_ADMITS_PER_TICK:-1}"
+        echo "    max_active_agents:  ${SIDECAR_MAX_ACTIVE_AGENTS:-0}"
         echo "    short_tool_call_s:  ${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
         echo "    fallback_long_s:    ${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"

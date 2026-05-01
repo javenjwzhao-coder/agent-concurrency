@@ -64,6 +64,9 @@ ticks it already rendered.
     "first_saturation_seen": false,            // bool — initial launch ramp is disabled after first SAT
     "initial_admit_interval_s": 2.0,           // float — fresh-admit interval before first SAT
     "max_fresh_admits_per_tick": 1,            // int — fresh queued agents admitted per sidecar tick
+    "max_active_agents": 32,                   // int — active-agent cap, 0 means unlimited
+    "active_agents": 16,                       // int — agents in reasoning|tool_call|waiting
+    "active_agent_slots": 16,                  // int|null — remaining cap slots, null when uncapped
     "next_initial_admit_in_s": null,           // float|null — seconds until next ramped fresh admit
     "active_agent_samples": 4,                 // int
     "pressure": true,                          // bool — controller pressure gate, C <= threshold_gb
@@ -108,6 +111,8 @@ ticks it already rendered.
       "headroom_low",                          // emitted whenever w < 1.0
       "saturation_guard",                      // emitted when effective w < 1.0 blocks runnable queue
       "admission_blocked_by_pressure",         // emitted when queued work stays pending due to effective w pressure
+      "active_agent_cap",                      // emitted when max_active_agents constrains admissions
+      "admission_blocked_by_active_agent_cap", // emitted when no active-agent slots are available
       "initial_admit_ramp_wait"                // emitted when pre-SAT fresh launch ramp delays admission
     ]
   }

@@ -340,6 +340,7 @@ class DynamicAdmissionController:
         threshold_gb: float = 0.1,
         initial_admit_interval_s: float = 2.0,
         max_fresh_admits_per_tick: int = 1,
+        max_active_agents: int = 0,
         short_tool_call_threshold_s: float = 2.0,
         fallback_long_tool_call_s: float = 30.0,
         offload_endpoint: Optional[str] = None,
@@ -360,6 +361,7 @@ class DynamicAdmissionController:
         self.threshold_gb = max(0.0, float(threshold_gb))
         self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
         self.max_fresh_admits_per_tick = max(1, int(max_fresh_admits_per_tick))
+        self.max_active_agents = max(0, int(max_active_agents))
         self.short_tool_call_threshold_s = max(0.0, float(short_tool_call_threshold_s))
         self.fallback_long_tool_call_s = max(0.0, float(fallback_long_tool_call_s))
         self.offload_endpoint = str(offload_endpoint or eviction_endpoint or "")
@@ -572,6 +574,7 @@ class DynamicAdmissionController:
         with self._lock:
             free_gb = self._kv_free_gb(vllm_info, bytes_per_blk)
             avg_gb, avg_count = self._average_active_kv_gb(agents, bytes_per_blk)
+            active_agents = self._active_agent_count(agents)
             prev_avg_gb = self._prev_avg_gb
             w = self._headroom(free_gb, avg_gb, prev_avg_gb)
             report: dict[str, Any] = {
@@ -591,6 +594,9 @@ class DynamicAdmissionController:
                 "first_saturation_seen": self._first_saturation_seen,
                 "initial_admit_interval_s": self.initial_admit_interval_s,
                 "max_fresh_admits_per_tick": self.max_fresh_admits_per_tick,
+                "max_active_agents": self.max_active_agents,
+                "active_agents": active_agents,
+                "active_agent_slots": self._active_agent_slots(active_agents),
                 "next_initial_admit_in_s": None,
                 "queue": self.pending_counts(),
                 "heap_candidates": [],
@@ -655,6 +661,15 @@ class DynamicAdmissionController:
                 report["w_after_offload"] = self._round(effective_w)
 
             admit_limit = self._admission_limit(effective_w)
+            active_slots = self._active_agent_slots(active_agents)
+            if active_slots is not None:
+                admit_limit = min(admit_limit, active_slots)
+                report["active_agent_slots"] = active_slots
+                if active_slots < runnable_queue:
+                    report["reasons"].append("active_agent_cap")
+                if active_slots <= 0 and runnable_queue > 0:
+                    report["reasons"].append("admission_blocked_by_active_agent_cap")
+
             if (
                 admit_limit <= 0
                 and effective_w is not None
@@ -718,6 +733,17 @@ class DynamicAdmissionController:
         if not samples:
             return None, 0
         return sum(samples) / len(samples), len(samples)
+
+    def _active_agent_count(self, agents: dict[str, dict[str, Any]]) -> int:
+        return sum(
+            1 for agent in agents.values()
+            if agent.get("state") in self.ACTIVE_STATES
+        )
+
+    def _active_agent_slots(self, active_agents: int) -> Optional[int]:
+        if self.max_active_agents <= 0:
+            return None
+        return max(0, self.max_active_agents - active_agents)
 
     def _headroom(
         self,
@@ -1311,6 +1337,8 @@ def parse_args() -> argparse.Namespace:
                     help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--max-fresh-admits-per-tick", type=int, default=1,
                     help="Maximum fresh queued agents the sidecar may launch per poll tick.")
+    ac.add_argument("--max-active-agents", type=int, default=0,
+                    help="Maximum active admitted agents at once (0 disables this cap).")
     ac.add_argument("--short-tool-call-threshold-s", type=float, default=2.0,
                     help="Predicted tool calls below this duration stay resident.")
     ac.add_argument("--fallback-long-tool-call-s", type=float, default=30.0,
@@ -1357,6 +1385,7 @@ def main() -> int:
             threshold_gb=args.admission_threshold_gb,
             initial_admit_interval_s=args.initial_admit_interval_s,
             max_fresh_admits_per_tick=args.max_fresh_admits_per_tick,
+            max_active_agents=args.max_active_agents,
             short_tool_call_threshold_s=args.short_tool_call_threshold_s,
             fallback_long_tool_call_s=args.fallback_long_tool_call_s,
             offload_endpoint=(

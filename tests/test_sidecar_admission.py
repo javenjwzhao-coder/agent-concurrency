@@ -367,6 +367,75 @@ def test_fresh_admit_tick_cap_can_be_tuned():
     assert controller.pending_counts()["fresh"] == 1
 
 
+def test_max_active_agents_blocks_fresh_admission_when_full():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=0.0,
+        max_active_agents=2,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    controller.enqueue_fresh(AgentLaunchSpec("fresh"))
+
+    agents = {
+        "reasoning": {"state": "reasoning", "kv_blocks": 1},
+        "tool": {"state": "tool_call", "kv_blocks": 1},
+    }
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["active_agents"] == 2
+    assert report["max_active_agents"] == 2
+    assert report["active_agent_slots"] == 0
+    assert report["admissions"] == []
+    assert "active_agent_cap" in report["reasons"]
+    assert "admission_blocked_by_active_agent_cap" in report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
+
+
+def test_max_active_agents_limits_admissions_to_available_slots():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        initial_admit_interval_s=0.0,
+        max_fresh_admits_per_tick=4,
+        max_active_agents=3,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    agents = {
+        "reasoning": {"state": "reasoning", "kv_blocks": 1},
+        "waiting": {"state": "waiting", "kv_blocks": 1},
+    }
+    controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    for idx in range(3):
+        controller.enqueue_fresh(AgentLaunchSpec(f"fresh-{idx}"))
+
+    report = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["active_agents"] == 2
+    assert report["active_agent_slots"] == 1
+    assert [a["agent_id"] for a in report["admissions"]] == ["fresh-0"]
+    assert admitted == ["fresh-0"]
+    assert controller.pending_counts()["fresh"] == 2
+
+
 def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
     state_updates: dict[str, dict] = {}
     offloaded: list[str] = []

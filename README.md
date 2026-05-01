@@ -53,18 +53,23 @@ Policy:
 1. **Saturation guard**: if effective headroom is below one, admit no queued
    agents this tick. Effective headroom is `w`, recomputed after any pressure
    offload as `w_after_offload` when offload frees KV capacity.
-2. **Fresh launch pacing**: fresh tasks stay in the sidecar queue and are
+2. **Active-agent cap**: if `max_active_agents` is positive, the sidecar
+   admits no fresh or previously evicted agents once the number of active
+   admitted agents (`reasoning`, `tool_call`, or `waiting`) reaches that cap.
+   Pending agents remain in the sidecar queue until a slot opens. A value of
+   `0` disables this cap.
+3. **Fresh launch pacing**: fresh tasks stay in the sidecar queue and are
    launched by the sidecar. Before the first real SAT, the sidecar admits at
    most one fresh queued task per
    `initial_admit_interval_s`. After SAT, `max_fresh_admits_per_tick` still
    caps fresh launches, defaulting to one per sidecar tick. READMITs are not
    delayed by the fresh-task ramp.
-3. **Tool-call KV policy**: when a tool call starts, predict its remaining
+4. **Tool-call KV policy**: when a tool call starts, predict its remaining
    duration. Calls below `short_tool_call_threshold_s` stay resident and are
    excluded from pressure offload. Longer calls are eligible for the pressure
    heap. If the predictor is unavailable on a first run, tool calls older than
    `fallback_long_tool_call_s` are treated as long idle candidates.
-4. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
+5. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
    `tool_call` agents by descending score:
 
    ```
@@ -75,8 +80,9 @@ Policy:
    prediction in this score. Short predicted calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
-5. **Admission**: when effective `w >= 1`, launch queued agents. `threshold_gb`
-   is not an admission gate; it only decides when pressure offload should run.
+6. **Admission**: when effective `w >= 1` and the active-agent cap has room,
+   launch queued agents. `threshold_gb` is not an admission gate; it only
+   decides when pressure offload should run.
    Previously evicted agents use a priority lane ahead of fresh agents. Fresh
    agents are admitted one at a time by default; the configured run path has
    no separate batch-submission knob.
@@ -202,6 +208,7 @@ sidecar:
     threshold_gb: 3.2
     initial_admit_interval_s: 1.0
     max_fresh_admits_per_tick: 1
+    max_active_agents: 32
     fallback_long_tool_call_s: 5.0
 ```
 
