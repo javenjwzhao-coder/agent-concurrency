@@ -445,6 +445,11 @@ def is_under(path, root):
     except ValueError:
         return False
 
+def is_release_or_local_build(version, desired):
+    return version == desired or (
+        version is not None and version.startswith(desired + "+")
+    )
+
 vllm_version = dist_version("vllm")
 ascend_version = dist_version("vllm-ascend")
 vllm_path = package_path("vllm")
@@ -453,8 +458,8 @@ soc = soc_marker.read_text().strip() if soc_marker.exists() else None
 if install_method == "source":
     vllm_path_ready = is_under(vllm_path, vllm_source)
     ascend_path_ready = is_under(ascend_path, ascend_source)
-    vllm_version_ready = vllm_version == desired_vllm
-    ascend_version_ready = ascend_version == desired_ascend
+    vllm_version_ready = is_release_or_local_build(vllm_version, desired_vllm)
+    ascend_version_ready = is_release_or_local_build(ascend_version, desired_ascend)
 else:
     vllm_path_ready = is_local(vllm_path)
     ascend_path_ready = is_local(ascend_path)
@@ -911,13 +916,16 @@ desired_ascend = __import__("os").environ["DESIRED_VLLM_ASCEND"]
 version = metadata.version("vllm")
 ascend_version = metadata.version("vllm-ascend")
 
+def is_release_or_local_build(actual, expected):
+    return actual == expected or actual.startswith(expected + "+")
+
 for path in (vllm_file, api_server_file, protocol_file, serving_chat_file):
     if not path.is_relative_to(target):
         raise AssertionError(f"Imported vLLM path {path} is not under patched target {target}")
 
-if version != desired:
+if not is_release_or_local_build(version, desired):
     raise AssertionError(f"Imported vLLM version {version!r} does not match target {desired!r}")
-if ascend_version != desired_ascend:
+if not is_release_or_local_build(ascend_version, desired_ascend):
     raise AssertionError(
         f"Imported vllm-ascend version {ascend_version!r} does not match "
         f"target {desired_ascend!r}"
