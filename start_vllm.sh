@@ -453,12 +453,8 @@ soc = soc_marker.read_text().strip() if soc_marker.exists() else None
 if install_method == "source":
     vllm_path_ready = is_under(vllm_path, vllm_source)
     ascend_path_ready = is_under(ascend_path, ascend_source)
-    vllm_version_ready = vllm_version is not None and (
-        vllm_version == desired_vllm
-        or vllm_version.startswith(desired_vllm + "+")
-        or vllm_version.startswith(desired_vllm + ".dev")
-    )
-    ascend_version_ready = ascend_version is not None
+    vllm_version_ready = vllm_version == desired_vllm
+    ascend_version_ready = ascend_version == desired_ascend
 else:
     vllm_path_ready = is_local(vllm_path)
     ascend_path_ready = is_local(ascend_path)
@@ -571,6 +567,30 @@ sys.exit(0 if ready else 1)
 PY
     }
 
+    verify_git_source_ref() {
+        local name="$1"
+        local ref="$2"
+        local dest="$3"
+        local head ref_commit
+
+        if ! head=$(git -C "$dest" rev-parse HEAD 2>/dev/null); then
+            echo "[ERROR] Could not inspect $name source checkout at $dest" >&2
+            exit 1
+        fi
+        if ! ref_commit=$(git -C "$dest" rev-parse "${ref}^{commit}" 2>/dev/null); then
+            echo "[ERROR] $name source checkout at $dest does not contain requested release ref $ref" >&2
+            echo "[ERROR] Fetch tags into that checkout, remove it so the script can reclone, or set ${name}_GIT_REF explicitly." >&2
+            exit 1
+        fi
+        if [ "$head" != "$ref_commit" ]; then
+            echo "[ERROR] $name source checkout at $dest is not at requested release ref $ref" >&2
+            echo "[ERROR] Current HEAD: ${head:0:12}; $ref: ${ref_commit:0:12}" >&2
+            echo "[ERROR] Remove $dest so the script can reclone the release, or set ${name}_SOURCE_DIR to a clean $ref checkout." >&2
+            exit 1
+        fi
+        echo "[INFO] Verified $name source checkout at $dest ($ref -> ${head:0:12})"
+    }
+
     clone_git_source() {
         local name="$1"
         local url="$2"
@@ -578,7 +598,7 @@ PY
         local dest="$4"
 
         if [ -d "$dest/.git" ]; then
-            echo "[INFO] Reusing $name source checkout at $dest"
+            verify_git_source_ref "$name" "$ref" "$dest"
             return 0
         fi
 
@@ -599,6 +619,7 @@ PY
             echo "[ERROR] If GitHub is blocked, pre-populate $dest or set ${name}_GIT_URL to an accessible mirror." >&2
             exit 1
         fi
+        verify_git_source_ref "$name" "$ref" "$dest"
     }
 
     if check_local_ascend_stack; then
@@ -683,6 +704,8 @@ PY
             echo "[INFO] Building/installing vLLM from source with VLLM_TARGET_DEVICE=empty ..."
             PATH="$VENV/bin:$PATH" \
             PYTHONPATH="$VLLM_BUILD_PYTHONPATH" \
+            SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION" \
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$VLLM_VERSION" \
             VLLM_TARGET_DEVICE=empty \
             "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps -e \
               "$VLLM_SOURCE_DIR"
@@ -747,6 +770,8 @@ PY
             MAX_JOBS="$VLLM_ASCEND_MAX_JOBS" \
             PATH="$VENV/bin:$PATH" \
             PYTHONPATH="$VLLM_ASCEND_BUILD_PYTHONPATH" \
+            SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_ASCEND_VERSION" \
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
             SOC_VERSION="$VLLM_ASCEND_SOC_VERSION" \
             "$VENV/bin/python" -m pip install -v --no-build-isolation --no-deps -e \
               "$VLLM_ASCEND_SOURCE_DIR"
@@ -865,6 +890,7 @@ PY
     echo "[INFO] Verifying patched vLLM import path..."
     VLLM_PATCH_DIR="$VLLM_PATCH_DIR" \
     DESIRED_VLLM="$VLLM_VERSION" \
+    DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import importlib
@@ -881,14 +907,21 @@ api_server_file = pathlib.Path(api_server.__file__).resolve()
 protocol_file = pathlib.Path(protocol.__file__).resolve()
 serving_chat_file = pathlib.Path(serving_chat.__file__).resolve()
 desired = __import__("os").environ["DESIRED_VLLM"]
+desired_ascend = __import__("os").environ["DESIRED_VLLM_ASCEND"]
 version = metadata.version("vllm")
+ascend_version = metadata.version("vllm-ascend")
 
 for path in (vllm_file, api_server_file, protocol_file, serving_chat_file):
     if not path.is_relative_to(target):
         raise AssertionError(f"Imported vLLM path {path} is not under patched target {target}")
 
-if not (version == desired or version.startswith(desired + "+") or version.startswith(desired + ".dev")):
+if version != desired:
     raise AssertionError(f"Imported vLLM version {version!r} does not match target {desired!r}")
+if ascend_version != desired_ascend:
+    raise AssertionError(
+        f"Imported vllm-ascend version {ascend_version!r} does not match "
+        f"target {desired_ascend!r}"
+    )
 
 assert "kv_blocks_used" in protocol.UsageInfo.model_fields
 assert "kv_blocks_size_gb" in protocol.UsageInfo.model_fields
@@ -910,6 +943,7 @@ if missing_routes:
     )
 
 print(f"[INFO] vllm version -> {version}")
+print(f"[INFO] vllm-ascend version -> {ascend_version}")
 print(f"[INFO] vllm package -> {vllm_file}")
 print(f"[INFO] api_server.py -> {api_server_file}")
 print(f"[INFO] protocol.py -> {protocol_file}")
