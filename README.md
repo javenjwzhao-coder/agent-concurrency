@@ -4,7 +4,7 @@ This repository is a research and systems framework for running many coding
 agents against ABC-Bench while keeping a vllm-ascend serving backend healthy on
 Ascend NPUs. It is no longer just a tool-call duration predictor. The predictor
 is one signal inside a larger feedback loop that monitors KV-cache growth,
-admits new agents, and proactively evicts idle agents before the serving layer
+admits new agents, and proactively offloads idle agents before the serving layer
 runs out of cache.
 
 The core idea is **growth-aware concurrency**: agent workloads do not consume
@@ -21,7 +21,7 @@ ABC-Bench tasks
   -> per-agent live state + tool-call traces
   -> optional tool remaining-time predictor
   -> sidecar dynamic admission controller
-  -> vllm-ascend KV eviction endpoint
+  -> vllm-ascend KV offload endpoint
   -> more agents admitted when KV headroom allows
 ```
 
@@ -30,8 +30,8 @@ Main components:
 | Component | Role |
 |-----------|------|
 | `src/run_abc_bench_instrumented.py` | Runs ABC-Bench agents, records tool traces, publishes live phase/KV state, and lets the sidecar gate launches when admission control is enabled. |
-| `src/sidecar.py` | Polls vLLM metrics and live agent state, computes KV headroom, scores idle agents, evicts under pressure, and admits queued agents. |
-| `src/build_tool_predictor.py` | Trains or loads a model that predicts remaining tool-call time, used to score which idle agent is best to evict. |
+| `src/sidecar.py` | Polls vLLM metrics and live agent state, computes KV headroom, scores idle agents, offloads under pressure, and admits queued agents. |
+| `src/build_tool_predictor.py` | Trains or loads a model that predicts remaining tool-call time, used to score which idle agent is best to offload. |
 | `src/collect_tool_trace.py` | Standalone collector for detailed ActionEvent -> ObservationEvent tool traces. |
 | `src/vllm_patches/apply_patches.py` | Patches vLLM/vllm-ascend 0.13.0 to report per-agent KV usage and install the agent-aware offloading connector. |
 | `run_abc-bench.sh` | YAML-driven wrapper that expands config, validates settings, starts the runner, sidecar, and optional predictor build. |
@@ -54,7 +54,7 @@ Policy:
    agents this tick. Effective headroom is `w`, recomputed after any pressure
    offload as `w_after_offload` when offload frees KV capacity.
 2. **Active-agent cap**: if `max_active_agents` is positive, the sidecar
-   admits no fresh or previously evicted agents once the number of active
+   admits no fresh or previously offloaded agents once the number of active
    admitted agents (`reasoning`, `tool_call`, or `waiting`) reaches that cap.
    Pending agents remain in the sidecar queue until a slot opens. A value of
    `0` disables this cap.
@@ -73,17 +73,21 @@ Policy:
    `tool_call` agents by descending score:
 
    ```
-   eviction_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
+   offload_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
    ```
 
    When fallback mode is active, elapsed tool-call seconds replace the missing
    prediction in this score. Short predicted calls are excluded. Offloaded agents continue their current tool call. After the tool returns,
    their runner thread blocks before the next LLM call until the sidecar
    re-admits them.
+   Successful offload records report `freed_gb` only from an exact vLLM
+   free-block delta (`free_blocks_after - free_blocks_before`) or from an
+   explicit endpoint value; the sidecar does not substitute the candidate's
+   estimated KV size.
 6. **Admission**: when effective `w >= 1` and the active-agent cap has room,
    launch queued agents. `threshold_gb` is not an admission gate; it only
    decides when pressure offload should run.
-   Previously evicted agents use a priority lane ahead of fresh agents. Fresh
+   Previously offloaded agents use a priority lane ahead of fresh agents. Fresh
    agents are admitted one at a time by default; the configured run path has
    no separate batch-submission knob.
 
@@ -97,8 +101,7 @@ The vLLM patch provides two capabilities needed for the control loop:
 1. Telemetry: OpenAI responses include `kv_blocks_used` and
    `kv_blocks_size_gb` when the request carries `agent_id`.
 2. Control: `POST /agent_kv_cache/offload` marks an agent for connector-backed
-   CPU offload, `POST /agent_kv_cache/restore` notifies readmission, and
-   `POST /agent_kv_cache/evict` remains a backward-compatible alias.
+   CPU offload, and `POST /agent_kv_cache/restore` notifies readmission.
 
 The patch installs `AgentAwareOffloadingConnector`, a small subclass/wrapper of
 vLLM's `OffloadingConnector`. It tracks `agent_id -> request_id -> block_ids`,
@@ -178,7 +181,7 @@ python src/build_tool_predictor.py \
   --save-model ./duration_model.joblib
 ```
 
-The saved model can be used by the sidecar for idle-agent eviction scoring.
+The saved model can be used by the sidecar for idle-agent offload scoring.
 
 ### 3. Enable the sidecar
 
@@ -274,7 +277,7 @@ Aggregate:
 
 - vLLM runs through vllm-ascend on Ascend NPUs.
 - `agent_id` is propagated through `litellm_extra_body`.
-- Per-agent KV response fields are telemetry. Actual eviction must happen
+- Per-agent KV response fields are telemetry. Actual offload must happen
   inside vLLM's scheduler/block pool.
 - Dynamic admission is opt-in to preserve baseline benchmark behavior.
 - Tool-call prediction estimates remaining wall-clock tool time, not full task

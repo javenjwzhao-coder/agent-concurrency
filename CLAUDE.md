@@ -39,7 +39,7 @@ larger runtime control loop:
 3. Train or load a tool remaining-time predictor.
 4. Run a sidecar that polls vLLM and live agent state.
 5. Dynamically admit new agents when KV headroom allows.
-6. Proactively evict idle tool-call agents when KV pressure rises.
+6. Proactively offload idle tool-call agents when KV pressure rises.
 
 The goal is to maximize useful agent concurrency without exhausting KV cache on
 vllm-ascend.
@@ -53,13 +53,13 @@ Agent workloads have bursty KV growth:
   KV blocks may remain resident.
 - Fresh agents should be admitted only when recent average KV growth suggests
   there is safe headroom.
-- Idle tool-call agents are the best eviction candidates because their current
+- Idle tool-call agents are the best offload candidates because their current
   tool can keep running while their next model call is deferred.
 
 The sidecar implements this policy. The predictor helps rank idle agents by:
 
 ```text
-eviction_score = kv_usage_gb * predicted_remaining_tool_seconds
+offload_score = kv_usage_gb * predicted_remaining_tool_seconds
 ```
 
 ## Dependencies
@@ -128,7 +128,7 @@ Start vLLM backend on Ascend:
 bash start_vllm.sh
 ```
 
-Patch vllm-ascend/vLLM for per-agent KV telemetry and eviction:
+Patch vllm-ascend/vLLM for per-agent KV telemetry and offload:
 
 ```bash
 python src/vllm_patches/apply_patches.py \
@@ -170,7 +170,7 @@ tool-call traces:
 
 On `ActionEvent`, the live state includes tool metadata such as tool name,
 serialized args, payload bytes, phase sequence, and start time. On
-`ObservationEvent`, an evicted agent blocks before re-entering `reasoning`
+`ObservationEvent`, an offloaded agent blocks before re-entering `reasoning`
 until the sidecar re-admits it.
 
 ### Sidecar
@@ -191,7 +191,7 @@ w = C / min(s_t, s_prev)
 ```
 
 `headroom_low` means `w < 1`. `saturation_guard` is emitted only when
-`w < 1` and there is runnable queued work (`fresh` or `evicted_ready`) that
+`w < 1` and there is runnable queued work (`fresh` or `offloaded_ready`) that
 cannot be admitted.
 
 Policy order:
@@ -199,7 +199,7 @@ Policy order:
 1. If `w < 1`, admit no new fresh agents.
 2. If `max_active_agents` is positive and the number of active admitted agents
    (`reasoning`, `tool_call`, or `waiting`) has reached that cap, admit no
-   fresh or previously evicted agents.
+   fresh or previously offloaded agents.
 3. Before the first real SAT, admit at most one fresh queued task per
    `initial_admit_interval_s`. After first SAT, fresh admissions use normal
    sidecar capacity math. READMITs bypass this launch ramp.
@@ -213,7 +213,11 @@ Policy order:
 6. If `C > threshold_gb`, `w >= 1`, and the active-agent cap has room, admit
    from the waiting queue.
 
-The waiting queue has two lanes: previously evicted agents first, then fresh
+Successful offload records report freed memory from the exact vLLM free-block
+delta (`free_blocks_after - free_blocks_before`) or an explicit endpoint value.
+The sidecar does not replace missing `freed_gb` with candidate KV estimates.
+
+The waiting queue has two lanes: previously offloaded agents first, then fresh
 agents FIFO.
 
 ### vllm-ascend Patch
@@ -228,14 +232,13 @@ Telemetry:
 
 Control:
 
-- Adds `POST /agent_kv_cache/offload`, `POST /agent_kv_cache/restore`, and
-  keeps `POST /agent_kv_cache/evict` as an offload alias.
+- Adds `POST /agent_kv_cache/offload` and `POST /agent_kv_cache/restore`.
 - Installs `AgentAwareOffloadingConnector` under vLLM's KV connector package.
 - Reuses vLLM's `OffloadingConnector` async worker and the configured
   vllm-ascend `NPUOffloadingSpec`.
 - Tracks `agent_id -> request_id -> block_ids` in the connector scheduler.
 
-Do not try to evict from sidecar using only `kv_blocks_size_gb`; those fields
+Do not try to offload from sidecar using only `kv_blocks_size_gb`; those fields
 are telemetry. Safe mutation requires connector/scheduler block ownership.
 
 ## Key Configuration
@@ -246,7 +249,7 @@ are telemetry. Safe mutation requires connector/scheduler block ownership.
   - `launch.*`: baseline launch wave behavior and thread-pool size.
   - `prediction.*`: optional predictor training.
   - `sidecar.*`: embedded sidecar and KV geometry.
-  - `sidecar.admission_control.*`: dynamic admission and eviction.
+  - `sidecar.admission_control.*`: dynamic admission and offload.
 
 - `config/vllm_config.yaml`
   - Ascend/vllm-ascend serving configuration.
@@ -287,7 +290,7 @@ Aggregate:
 - `sidecar.log` JSONL when sidecar is enabled
 
 Sidecar records include an `admission` object when dynamic admission is enabled,
-with KV capacity, averages, headroom, heap candidates, evictions, admissions,
+with KV capacity, averages, headroom, heap candidates, offloads, admissions,
 and error/disabled reasons.
 
 ## Live Dashboard
@@ -297,9 +300,9 @@ an HTTP/SSE server alongside the tick loop and serves the dashboard at
 `http://<host>:<port>/`. It renders, on a shared time axis:
 
 - One Gantt row per agent showing phase boxes (reasoning, tool_call, waiting,
-  evicted, done) extending in real time.
+  offloaded, done) extending in real time.
 - A KV-cache-used-% line chart from `vllm.kv_cache_used_pct`.
-- Vertical event markers for admission decisions: EVICT (red), ADMIT (green),
+- Vertical event markers for admission decisions: OFFLOAD (red), ADMIT (green),
   READMIT (purple), and SAT (dashed yellow, when `w < 1`).
 
 Two ways to view a finished run:
@@ -353,5 +356,5 @@ bash -n run_abc-bench.sh
 - Dynamic admission is opt-in to preserve baseline behavior.
 - Per-agent KV telemetry is approximate from the sidecar's perspective; exact
   block ownership lives inside vLLM.
-- Evicted agents finish their current tool call, then block before the next LLM
+- Offloaded agents finish their current tool call, then block before the next LLM
   call until re-admitted.

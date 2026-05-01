@@ -17,7 +17,12 @@ def test_dashboard_renders_success_and_failed_offload_markers():
 
     assert "OFFLOAD: ${ev.agent_id}" in js
     assert "OFFLOAD_FAIL: ${ev.agent_id}" in js
+    assert "adm.offloads || []" in js
     assert 'addEvent(ts, "offload-fail"' in js
+    assert "freed_gb: ${fmt(ev.freed_gb)}" in js
+    assert "freed_blocks: ${fmt(ev.freed_blocks)}" in js
+    assert "free_blocks: ${fmt(ev.free_blocks_before)} -> ${fmt(ev.free_blocks_after)}" in js
+    assert "freed_gb_source: ${fmt(ev.freed_gb_source)}" in js
     assert "status_code: ${fmt(ev.status_code)}" in js
     assert "reason: ${fmt(ev.reason)}" in js
     assert "threshold_gb: ${fmt(adm.threshold_gb)}" in js
@@ -59,6 +64,18 @@ def test_dashboard_exposes_vllm_preempt_badge_and_event_line_overlay():
     assert "EVENT_LINE_HIT_PX" in js
     assert "incrementEventCount(type)" in js
     assert "resetEventCounts()" in js
+
+
+def test_dashboard_uses_event_specific_admission_timestamps():
+    js = _read("dashboard/dashboard.js")
+    schema = _read("dashboard/SCHEMA.md")
+
+    assert 'eventTimestamp(ts, ad, ["admitted_at", "admitted_since", "ts"])' in js
+    assert "previously_offloaded: ${wasOffloaded}" in js
+    assert "admitted_at: ${fmt(ad.admitted_at)}" in js
+    assert "function eventTimestamp(recordTs, event, keys)" in js
+    assert "admissions[*].admitted_at" in schema
+    assert "falls back to tick `ts` if absent" in schema
 
 
 def test_dashboard_event_colors_are_distinct_and_consistent():

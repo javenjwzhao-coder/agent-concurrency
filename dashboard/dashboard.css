@@ -227,13 +227,13 @@ main {
  *   reasoning      → blue      (distinct from teal tool_call)
  *   tool_call      → teal/cyan (distinct from green ADMIT lines)
  *   waiting        → slate     (neutral)
- *   evicted_waiting→ amber     (distinct from red OFFLOAD lines)
+ *   offloaded_waiting→ amber   (distinct from red OFFLOAD lines)
  *   done           → near-black
  */
 .phase-reasoning       { background: #1d4ed8; }
 .phase-tool_call       { background: #0e7490; }
 .phase-waiting         { background: #64748b; }
-.phase-evicted_waiting { background: #d97706; }
+.phase-offloaded_waiting { background: #d97706; }
 .phase-done            { background: #111827; border: 1px dashed #4b5563; color: #6b7280; }
 
 /* ── vis-timeline phase range items ─────────────────────────────────────── */
@@ -241,7 +241,7 @@ main {
 .vis-item.phase-reasoning,
 .vis-item.phase-tool_call,
 .vis-item.phase-waiting,
-.vis-item.phase-evicted_waiting,
+.vis-item.phase-offloaded_waiting,
 .vis-item.phase-done {
   border: none;
   color: #f0f6ff;
@@ -252,7 +252,7 @@ main {
 .vis-item.phase-reasoning      { background-color: #1d4ed8; border-color: #1d4ed8; }
 .vis-item.phase-tool_call      { background-color: #0e7490; border-color: #0e7490; }
 .vis-item.phase-waiting        { background-color: #64748b; border-color: #64748b; }
-.vis-item.phase-evicted_waiting{ background-color: #d97706; border-color: #d97706; }
+.vis-item.phase-offloaded_waiting { background-color: #d97706; border-color: #d97706; }
 .vis-item.phase-done           { background-color: #111827; border: 1px dashed #4b5563 !important; color: #6b7280; }
 
 .vis-item.vis-selected {

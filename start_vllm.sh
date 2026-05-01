@@ -274,8 +274,7 @@ except Exception as exc:
 
 reason = str(payload.get("reason", ""))
 ok = (
-    payload.get("evicted") is True
-    or payload.get("offloaded") is True
+    payload.get("offloaded") is True
     or "no tracked KV blocks for agent" in reason
 )
 if not ok:
@@ -942,7 +941,6 @@ route_paths = {getattr(route, "path", "") for route in api_server.router.routes}
 missing_routes = {
     "/agent_kv_cache/offload",
     "/agent_kv_cache/restore",
-    "/agent_kv_cache/evict",
 } - route_paths
 if missing_routes:
     raise AssertionError(

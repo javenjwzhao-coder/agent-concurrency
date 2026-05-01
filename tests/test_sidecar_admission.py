@@ -68,9 +68,11 @@ def test_headroom_bootstrap_and_memoized_average():
     assert first["s_t"] == 1.5
     assert first["s_prev"] is None
     assert first["w"] is None
-    assert first["admissions"] == [
-        {"agent_id": "fresh-a", "previously_evicted": False, "admitted": True}
-    ]
+    assert len(first["admissions"]) == 1
+    assert first["admissions"][0]["agent_id"] == "fresh-a"
+    assert first["admissions"][0]["previously_offloaded"] is False
+    assert first["admissions"][0]["admitted"] is True
+    assert first["admissions"][0]["admitted_at"]
 
     controller.enqueue_fresh(AgentLaunchSpec("fresh-c"))
     second = controller.on_tick(
@@ -191,7 +193,7 @@ def test_low_headroom_without_runnable_queue_does_not_emit_saturation_guard():
     assert "saturation_guard" not in report["reasons"]
     assert "admission_blocked_by_headroom" not in report["reasons"]
     assert report["queue"]["fresh"] == 0
-    assert report["queue"]["evicted_ready"] == 0
+    assert report["queue"]["offloaded_ready"] == 0
 
 
 def test_pressure_threshold_alone_does_not_block_fresh_admission():
@@ -227,13 +229,13 @@ def test_pressure_threshold_alone_does_not_block_fresh_admission():
     assert controller.pending_counts()["fresh"] == 0
 
 
-def test_pressure_eviction_pops_highest_score_idle_agent():
-    evicted: list[str] = []
+def test_pressure_offload_pops_highest_score_idle_agent():
+    offloaded: list[str] = []
 
-    def evict(cand):
-        evicted.append(cand.agent_id)
+    def offload(cand):
+        offloaded.append(cand.agent_id)
         return {
-            "evicted": True,
+            "offloaded": True,
             "freed_blocks": int(cand.kv_gb),
             "freed_gb": cand.kv_gb,
             "reason": "ok",
@@ -243,7 +245,7 @@ def test_pressure_eviction_pops_highest_score_idle_agent():
         enabled=True,
         threshold_gb=0.1,
         predictor=FakePredictor({"agent-a": 10.0, "agent-b": 1.0}),
-        evict_callback=evict,
+        offload_callback=offload,
     )
     agents = {
         "agent-a": {
@@ -266,9 +268,87 @@ def test_pressure_eviction_pops_highest_score_idle_agent():
     )
 
     assert report["pressure"] is True
-    assert evicted == ["agent-a"]
-    assert report["evictions"][0]["agent_id"] == "agent-a"
-    assert report["evictions"][0]["e_s"] == 10.0
+    assert offloaded == ["agent-a"]
+    assert report["offloads"][0]["agent_id"] == "agent-a"
+    assert report["offloads"][0]["e_s"] == 10.0
+
+
+def test_successful_offload_without_exact_measurement_does_not_fake_freed_gb():
+    def offload(cand):
+        return {"offloaded": True, "reason": "queued"}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        predictor=FakePredictor({"agent": 5.0}),
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 2,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["offloads"][0]["offloaded"] is True
+    assert "freed_gb" not in report["offloads"][0]
+    assert report["offloads"][0]["freed_gb_source"] == "unavailable_exact"
+
+
+def test_successful_offload_reports_exact_freed_gb_from_vllm_free_blocks_delta():
+    def offload(cand):
+        return {"offloaded": True, "reason": "queued"}
+
+    class _Response:
+        text = "\n".join([
+            "vllm:num_gpu_blocks 10",
+            "vllm:num_gpu_blocks_used 8",
+        ])
+
+        def raise_for_status(self):
+            return None
+
+    class _Session:
+        def get(self, url, timeout):
+            return _Response()
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        predictor=FakePredictor({"agent": 5.0}),
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+        session=_Session(),
+        vllm_url="http://vllm.invalid",
+        exact_freed_gb_timeout_s=0.0,
+    )
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05, "num_gpu_blocks_free": 0},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 2,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["offloads"][0]["freed_blocks"] == 2
+    assert report["offloads"][0]["free_blocks_before"] == 0
+    assert report["offloads"][0]["free_blocks_after"] == 2
+    assert report["offloads"][0]["freed_gb"] == 2.0
+    assert report["offloads"][0]["freed_gb_source"] == "vllm_free_blocks_delta"
 
 
 def test_initial_admit_ramp_limits_fresh_admissions_before_first_sat():
@@ -458,14 +538,14 @@ def test_max_active_agents_limits_admissions_to_available_slots():
     assert controller.pending_counts()["fresh"] == 2
 
 
-def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
+def test_offloaded_ready_readmit_bypasses_initial_fresh_admit_ramp():
     state_updates: dict[str, dict] = {}
     offloaded: list[str] = []
     admitted: list[str] = []
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     def update(agent_id, patch):
         state_updates.setdefault(agent_id, {}).update(patch)
@@ -475,7 +555,7 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
         threshold_gb=0.1,
         initial_admit_interval_s=60.0,
         short_tool_call_threshold_s=2.0,
-        predictor=FakePredictor({"evicted-agent": 5.0}),
+        predictor=FakePredictor({"offloaded-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),
         offload_callback=offload,
         restore_callback=lambda agent_id: {"restored": True},
@@ -490,15 +570,15 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
         bytes_per_blk=BYTES_PER_GB,
     )
     controller.on_tool_call_start(
-        "evicted-agent",
-        {"agent_id": "evicted-agent", "state": "tool_call", "kv_blocks": 1},
+        "offloaded-agent",
+        {"agent_id": "offloaded-agent", "state": "tool_call", "kv_blocks": 1},
     )
     controller.on_tick(
         tick=1,
         vllm_info={"kv_free_gb": 0.05},
         agents={
-            "evicted-agent": {
-                "agent_id": "evicted-agent",
+            "offloaded-agent": {
+                "agent_id": "offloaded-agent",
                 "state": "tool_call",
                 "kv_blocks": 1,
                 "kv_policy": "idle_long",
@@ -509,11 +589,11 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
 
     resumed: list[bool] = []
     waiter = threading.Thread(
-        target=lambda: resumed.append(controller.wait_if_evicted("evicted-agent"))
+        target=lambda: resumed.append(controller.wait_if_offloaded("offloaded-agent"))
     )
     waiter.start()
     deadline = time.time() + 2
-    while controller.pending_counts()["evicted_ready"] == 0 and time.time() < deadline:
+    while controller.pending_counts()["offloaded_ready"] == 0 and time.time() < deadline:
         time.sleep(0.01)
 
     controller.enqueue_fresh(AgentLaunchSpec("fresh-agent"))
@@ -526,15 +606,16 @@ def test_evicted_ready_readmit_bypasses_initial_fresh_admit_ramp():
     )
 
     waiter.join(timeout=2)
-    assert offloaded == ["evicted-agent"]
+    assert offloaded == ["offloaded-agent"]
     assert resumed == [True]
-    assert report["admissions"][0]["agent_id"] == "evicted-agent"
-    assert report["admissions"][0]["previously_evicted"] is True
+    assert report["admissions"][0]["agent_id"] == "offloaded-agent"
+    assert report["admissions"][0]["previously_offloaded"] is True
+    assert report["admissions"][0]["admitted_at"]
     assert report["admissions"][0]["restore_result"]["restored"] is True
     assert "initial_admit_ramp_wait" in report["reasons"]
     assert admitted == []
     assert controller.pending_counts()["fresh"] == 1
-    assert state_updates["evicted-agent"]["admission_state"] == "admitted"
+    assert state_updates["offloaded-agent"]["admission_state"] == "admitted"
 
 
 def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
@@ -542,7 +623,7 @@ def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": True, "freed_gb": cand.kv_gb}
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     controller = DynamicAdmissionController(
         enabled=True,
@@ -577,7 +658,7 @@ def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
     )
 
     assert offloaded == []
-    assert report["evictions"] == []
+    assert report["offloads"] == []
     assert report["skipped_candidates"] == [
         {"agent_id": "short-agent", "reason": "idle_short"}
     ]
@@ -590,7 +671,7 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     def update(agent_id, patch):
         state_updates.setdefault(agent_id, {}).update(patch)
@@ -619,7 +700,7 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
     assert policy["policy"] == "idle_long"
     assert offloaded == []
     assert controller.pending_counts()["idle_long"] == 1
-    assert controller.pending_counts()["evicted_pending_tool"] == 0
+    assert controller.pending_counts()["offloaded_pending_tool"] == 0
     assert state_updates["long-agent"]["kv_policy"] == "idle_long"
     assert state_updates["long-agent"]["admission_state"] == "admitted"
 
@@ -637,7 +718,7 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    assert no_pressure["evictions"] == []
+    assert no_pressure["offloads"] == []
     assert offloaded == []
 
     pressure = controller.on_tick(
@@ -655,18 +736,18 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
     )
 
     assert offloaded == ["long-agent"]
-    assert pressure["evictions"][0]["agent_id"] == "long-agent"
-    assert controller.pending_counts()["evicted_pending_tool"] == 1
-    assert state_updates["long-agent"]["kv_evicted"] is True
-    assert state_updates["long-agent"]["admission_state"] == "evicted_pending_tool"
+    assert pressure["offloads"][0]["agent_id"] == "long-agent"
+    assert controller.pending_counts()["offloaded_pending_tool"] == 1
+    assert state_updates["long-agent"]["kv_offloaded"] is True
+    assert state_updates["long-agent"]["admission_state"] == "offloaded_pending_tool"
 
     resumed: list[bool] = []
     waiter = threading.Thread(
-        target=lambda: resumed.append(controller.wait_if_evicted("long-agent"))
+        target=lambda: resumed.append(controller.wait_if_offloaded("long-agent"))
     )
     waiter.start()
     deadline = time.time() + 2
-    while controller.pending_counts()["evicted_ready"] == 0 and time.time() < deadline:
+    while controller.pending_counts()["offloaded_ready"] == 0 and time.time() < deadline:
         time.sleep(0.01)
 
     report = controller.on_tick(
@@ -689,7 +770,7 @@ def test_pressure_offload_can_create_one_fresh_admission_slot():
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     controller = DynamicAdmissionController(
         enabled=True,
@@ -741,7 +822,7 @@ def test_next_long_tool_call_reclassifies_short_idle_then_pressure_offloads():
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     controller = DynamicAdmissionController(
         enabled=True,
@@ -783,7 +864,7 @@ def test_next_long_tool_call_reclassifies_short_idle_then_pressure_offloads():
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    assert report["evictions"][0]["agent_id"] == "agent"
+    assert report["offloads"][0]["agent_id"] == "agent"
     assert offloaded == ["agent"]
 
 
@@ -792,7 +873,7 @@ def test_failed_long_pressure_offload_keeps_agent_admitted():
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": False, "offloaded": False, "reason": "busy"}
+        return {"offloaded": False, "reason": "busy"}
 
     controller = DynamicAdmissionController(
         enabled=True,
@@ -822,15 +903,15 @@ def test_failed_long_pressure_offload_keeps_agent_admitted():
     )
 
     assert offloaded == ["agent"]
-    assert report["evictions"][0]["evicted"] is False
+    assert report["offloads"][0]["offloaded"] is False
     assert "offload_attempt_failed" in report["reasons"]
     assert controller.pending_counts()["idle_long"] == 1
-    assert controller.pending_counts()["evicted_pending_tool"] == 0
+    assert controller.pending_counts()["offloaded_pending_tool"] == 0
 
 
-def test_failed_pressure_offload_gets_default_reason_without_eviction_state():
+def test_failed_pressure_offload_gets_default_reason_without_offload_state():
     def offload(cand):
-        return {"evicted": False, "offloaded": False}
+        return {"offloaded": False}
 
     controller = DynamicAdmissionController(
         enabled=True,
@@ -860,7 +941,7 @@ def test_failed_pressure_offload_gets_default_reason_without_eviction_state():
     )
 
     assert report["pressure"] is True
-    assert report["evictions"] == [
+    assert report["offloads"] == [
         {
             "agent_id": "agent",
             "e_s": 10.0,
@@ -868,14 +949,13 @@ def test_failed_pressure_offload_gets_default_reason_without_eviction_state():
             "predicted_remaining_s": 5.0,
             "tool_elapsed_s": None,
             "policy_reason": "eligible_for_pressure_offload",
-            "evicted": False,
             "offloaded": False,
             "reason": "offload_rejected_without_reason",
         }
     ]
     assert "offload_attempt_failed" in report["reasons"]
     assert controller.pending_counts()["idle_long"] == 1
-    assert controller.pending_counts()["evicted_pending_tool"] == 0
+    assert controller.pending_counts()["offloaded_pending_tool"] == 0
 
 
 def test_predictor_unavailable_skips_idle_offload_policy():
@@ -911,7 +991,7 @@ def test_predictor_unavailable_skips_idle_offload_policy():
     assert policy["policy"] == "skipped"
     assert policy["reason"] == "predictor_unavailable"
     assert offloaded == []
-    assert report["evictions"] == []
+    assert report["offloads"] == []
     assert report["skipped_candidates"] == [
         {
             "agent_id": "agent-no-predictor",
@@ -929,7 +1009,7 @@ def test_predictor_unavailable_falls_back_to_elapsed_long_tool_call():
 
     def offload(cand):
         offloaded.append(cand.agent_id)
-        return {"evicted": True, "offloaded": True, "freed_gb": cand.kv_gb}
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     def update(agent_id, patch):
         state_updates.setdefault(agent_id, {}).update(patch)
@@ -974,33 +1054,33 @@ def test_predictor_unavailable_falls_back_to_elapsed_long_tool_call():
     assert report["heap_candidates"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
     assert report["heap_candidates"][0]["predicted_remaining_s"] is None
     assert report["heap_candidates"][0]["tool_elapsed_s"] >= 30.0
-    assert report["evictions"][0]["agent_id"] == "fallback-agent"
-    assert report["evictions"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
-    assert report["evictions"][0]["tool_elapsed_s"] >= 30.0
+    assert report["offloads"][0]["agent_id"] == "fallback-agent"
+    assert report["offloads"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["offloads"][0]["tool_elapsed_s"] >= 30.0
     assert state_updates["fallback-agent"]["kv_policy"] == "idle_long"
     assert state_updates["fallback-agent"]["fallback_long_tool_call_s"] == 30.0
 
 
-def test_evicted_ready_lane_admits_before_fresh_agents():
+def test_offloaded_ready_lane_admits_before_fresh_agents():
     admitted: list[str] = []
 
-    def evict(cand):
-        return {"evicted": True, "freed_gb": cand.kv_gb}
+    def offload(cand):
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
 
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
-        predictor=FakePredictor({"evicted-agent": 5.0}),
+        predictor=FakePredictor({"offloaded-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),
-        evict_callback=evict,
+        offload_callback=offload,
         restore_callback=lambda agent_id: {"restored": True},
     )
     controller.on_tick(
         tick=0,
         vllm_info={"kv_free_gb": 0.05},
         agents={
-            "evicted-agent": {
-                "agent_id": "evicted-agent",
+            "offloaded-agent": {
+                "agent_id": "offloaded-agent",
                 "state": "tool_call",
                 "kv_blocks": 1,
             }
@@ -1010,11 +1090,11 @@ def test_evicted_ready_lane_admits_before_fresh_agents():
 
     resumed: list[bool] = []
     waiter = threading.Thread(
-        target=lambda: resumed.append(controller.wait_if_evicted("evicted-agent"))
+        target=lambda: resumed.append(controller.wait_if_offloaded("offloaded-agent"))
     )
     waiter.start()
     deadline = time.time() + 2
-    while controller.pending_counts()["evicted_ready"] == 0 and time.time() < deadline:
+    while controller.pending_counts()["offloaded_ready"] == 0 and time.time() < deadline:
         time.sleep(0.01)
 
     controller.enqueue_fresh(AgentLaunchSpec("fresh-agent"))
@@ -1027,7 +1107,7 @@ def test_evicted_ready_lane_admits_before_fresh_agents():
 
     waiter.join(timeout=2)
     assert resumed == [True]
-    assert report["admissions"][0]["agent_id"] == "evicted-agent"
-    assert report["admissions"][0]["previously_evicted"] is True
+    assert report["admissions"][0]["agent_id"] == "offloaded-agent"
+    assert report["admissions"][0]["previously_offloaded"] is True
     assert admitted == []
     assert controller.pending_counts()["fresh"] == 1

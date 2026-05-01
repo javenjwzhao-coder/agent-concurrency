@@ -275,12 +275,6 @@ def _file_agent_reader(path: Path) -> Callable[[], dict]:
     return _read
 
 
-def default_eviction_endpoint(vllm_url: str) -> str:
-    """Return the default local vLLM agent-KV eviction endpoint."""
-    base = vllm_url.rstrip("/") + "/"
-    return urljoin(base, "agent_kv_cache/evict")
-
-
 def default_offload_endpoint(vllm_url: str) -> str:
     """Return the default local vLLM agent-KV CPU-offload endpoint."""
     base = vllm_url.rstrip("/") + "/"
@@ -334,7 +328,7 @@ class AgentLaunchSpec:
     agent_id: str
     payload: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    previously_evicted: bool = False
+    previously_offloaded: bool = False
     queued_ts: str = field(default_factory=lambda: iso_utc(now_utc()))
 
 
@@ -349,7 +343,7 @@ class _IdleAgentCandidate:
 
 
 class DynamicAdmissionController:
-    """Admission/eviction policy for multi-agent vLLM KV-cache pressure."""
+    """Admission/offload policy for multi-agent vLLM KV-cache pressure."""
 
     ACTIVE_STATES = {"reasoning", "tool_call", "waiting"}
 
@@ -365,14 +359,16 @@ class DynamicAdmissionController:
         fallback_long_tool_call_s: float = 30.0,
         offload_endpoint: Optional[str] = None,
         restore_endpoint: Optional[str] = None,
-        eviction_endpoint: Optional[str] = None,
-        eviction_timeout_s: float = 2.0,
+        offload_timeout_s: float = 2.0,
+        exact_freed_gb_timeout_s: float = 1.0,
+        exact_freed_gb_poll_interval_s: float = 0.05,
+        vllm_url: Optional[str] = None,
+        total_gpu_blocks: int = 0,
         bytes_per_blk: Optional[int] = None,
         predictor_model: Optional[Path | str] = None,
         predictor: Any = None,
         admit_callback: Optional[Callable[[AgentLaunchSpec], Any]] = None,
         state_update_callback: Optional[Callable[[str, dict[str, Any]], None]] = None,
-        evict_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
         offload_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
         restore_callback: Optional[Callable[[str], dict[str, Any]]] = None,
         session: Optional[requests.Session] = None,
@@ -384,22 +380,28 @@ class DynamicAdmissionController:
         self.max_active_agents = max(0, int(max_active_agents))
         self.short_tool_call_threshold_s = max(0.0, float(short_tool_call_threshold_s))
         self.fallback_long_tool_call_s = max(0.0, float(fallback_long_tool_call_s))
-        self.offload_endpoint = str(offload_endpoint or eviction_endpoint or "")
+        self.offload_endpoint = str(offload_endpoint or "")
         self.restore_endpoint = str(restore_endpoint) if restore_endpoint else ""
-        self.eviction_endpoint = str(eviction_endpoint) if eviction_endpoint else ""
-        self.eviction_timeout_s = max(0.1, float(eviction_timeout_s))
+        self.offload_timeout_s = max(0.1, float(offload_timeout_s))
+        self.exact_freed_gb_timeout_s = max(0.0, float(exact_freed_gb_timeout_s))
+        self.exact_freed_gb_poll_interval_s = max(
+            0.01, float(exact_freed_gb_poll_interval_s)
+        )
+        self.vllm_url = str(vllm_url or "")
+        self.total_gpu_blocks = max(0, int(total_gpu_blocks or 0))
         self.bytes_per_blk = int(bytes_per_blk) if bytes_per_blk else None
         self._admit_callback = admit_callback
         self._state_update_callback = state_update_callback
-        self._offload_callback = offload_callback or evict_callback
+        self._offload_callback = offload_callback
         self._restore_callback = restore_callback
         self._session = session or requests.Session()
 
         self._fresh: deque[AgentLaunchSpec] = deque()
-        self._evicted_ready: deque[str] = deque()
-        self._evicted_ready_set: set[str] = set()
-        self._evicted_events: dict[str, threading.Event] = {}
-        self._evicted_pending: set[str] = set()
+        self._offloaded_ready: deque[str] = deque()
+        self._offloaded_ready_set: set[str] = set()
+        self._offloaded_events: dict[str, threading.Event] = {}
+        self._readmitted_at: dict[str, str] = {}
+        self._offloaded_pending: set[str] = set()
         self._idle_short: set[str] = set()
         self._idle_long: set[str] = set()
         self._kv_policy_events: deque[dict[str, Any]] = deque(maxlen=1024)
@@ -422,15 +424,15 @@ class DynamicAdmissionController:
 
     def enqueue_fresh(self, spec: AgentLaunchSpec) -> None:
         with self._lock:
-            spec.previously_evicted = False
+            spec.previously_offloaded = False
             self._fresh.append(spec)
 
     def pending_counts(self) -> dict[str, int]:
         with self._lock:
             return {
                 "fresh": len(self._fresh),
-                "evicted_ready": len(self._evicted_ready),
-                "evicted_pending_tool": len(self._evicted_pending),
+                "offloaded_ready": len(self._offloaded_ready),
+                "offloaded_pending_tool": len(self._offloaded_pending),
                 "idle_short": len(self._idle_short),
                 "idle_long": len(self._idle_long),
             }
@@ -473,7 +475,7 @@ class DynamicAdmissionController:
                         agent_id,
                         {
                             "kv_policy": "idle_long",
-                            "kv_evicted": False,
+                            "kv_offloaded": False,
                             "admission_state": "admitted",
                             "predicted_remaining_s": None,
                             "tool_elapsed_s": self._round(elapsed_s),
@@ -510,7 +512,7 @@ class DynamicAdmissionController:
                     agent_id,
                     {
                         "kv_policy": "idle_short",
-                        "kv_evicted": False,
+                        "kv_offloaded": False,
                         "admission_state": "admitted",
                         "predicted_remaining_s": self._round(predicted),
                         "last_kv_policy": event,
@@ -529,7 +531,7 @@ class DynamicAdmissionController:
                 agent_id,
                 {
                     "kv_policy": event["policy"],
-                    "kv_evicted": False,
+                    "kv_offloaded": False,
                     "admission_state": "admitted",
                     "predicted_remaining_s": self._round(predicted),
                     "last_kv_policy": event,
@@ -538,49 +540,55 @@ class DynamicAdmissionController:
             self._record_kv_policy_event_locked(event)
             return event
 
-    def wait_if_evicted(self, agent_id: str) -> bool:
-        """Block an agent after a tool call until the sidecar re-admits it."""
+    def wait_if_offloaded(
+        self, agent_id: str, *, return_admitted_at: bool = False
+    ) -> bool | tuple[bool, Optional[str]]:
+        """Block an offloaded agent after a tool call until re-admission."""
         with self._lock:
-            event = self._evicted_events.get(agent_id)
+            event = self._offloaded_events.get(agent_id)
             if event is None:
-                return False
+                return (False, None) if return_admitted_at else False
             if event.is_set():
-                self._clear_evicted_locked(agent_id)
-                return False
-            if agent_id not in self._evicted_ready_set:
-                self._evicted_ready.append(agent_id)
-                self._evicted_ready_set.add(agent_id)
-            self._evicted_pending.discard(agent_id)
+                admitted_at = self._readmitted_at.pop(agent_id, None)
+                self._clear_offloaded_locked(agent_id)
+                if admitted_at is not None:
+                    return (True, admitted_at) if return_admitted_at else True
+                return (False, None) if return_admitted_at else False
+            if agent_id not in self._offloaded_ready_set:
+                self._offloaded_ready.append(agent_id)
+                self._offloaded_ready_set.add(agent_id)
+            self._offloaded_pending.discard(agent_id)
             self._update_agent_state_locked(
                 agent_id,
                 {
-                    "state": "evicted_waiting",
+                    "state": "offloaded_waiting",
                     "state_since": iso_utc(now_utc()),
-                    "admission_state": "evicted_ready",
+                    "admission_state": "offloaded_ready",
                 },
             )
 
         event.wait()
         with self._lock:
-            self._clear_evicted_locked(agent_id)
+            admitted_at = self._readmitted_at.pop(agent_id, None) or iso_utc(now_utc())
+            self._clear_offloaded_locked(agent_id)
             self._update_agent_state_locked(
                 agent_id,
                 {
-                    "kv_evicted": False,
+                    "kv_offloaded": False,
                     "kv_policy": "readmitted",
                     "admission_state": "admitted",
-                    "admitted_since": iso_utc(now_utc()),
+                    "admitted_since": admitted_at,
                 },
             )
-        return True
+        return (True, admitted_at) if return_admitted_at else True
 
     def finish_agent(self, agent_id: str) -> None:
         """Clean up any queued/blocked admission state for a finished agent."""
         with self._lock:
-            event = self._evicted_events.get(agent_id)
+            event = self._offloaded_events.get(agent_id)
             if event is not None:
                 event.set()
-            self._clear_evicted_locked(agent_id)
+            self._clear_offloaded_locked(agent_id)
 
     def on_tick(
         self,
@@ -621,14 +629,14 @@ class DynamicAdmissionController:
                 "queue": self.pending_counts(),
                 "heap_candidates": [],
                 "skipped_candidates": [],
-                "evictions": [],
+                "offloads": [],
                 "admissions": [],
                 "kv_policy_events": self._drain_kv_policy_events_locked(),
                 "reasons": [],
             }
             runnable_queue = (
                 report["queue"].get("fresh", 0)
-                + report["queue"].get("evicted_ready", 0)
+                + report["queue"].get("offloaded_ready", 0)
             )
 
             if self._predictor_error:
@@ -660,16 +668,40 @@ class DynamicAdmissionController:
                 report["reasons"].append("headroom_low")
 
             current_free_gb = free_gb
+            current_free_blocks = self._kv_free_blocks(vllm_info)
             while current_free_gb <= self.threshold_gb and heap:
                 _, _, cand = heapq.heappop(heap)
-                evict_result = self._offload_candidate(cand)
-                report["evictions"].append(evict_result)
-                if evict_result.get("evicted"):
-                    freed_gb = _finite_float(evict_result.get("freed_gb"))
+                offload_result = self._offload_candidate(cand)
+                report["offloads"].append(offload_result)
+                if offload_result.get("offloaded"):
+                    freed_gb = _finite_float(offload_result.get("freed_gb"))
+                    if freed_gb is not None:
+                        offload_result.setdefault("freed_gb_source", "offload_endpoint")
+                    else:
+                        observed = self._measure_exact_freed_gb(
+                            before_free_blocks=current_free_blocks,
+                            bytes_per_blk=bytes_per_blk,
+                        )
+                        if observed is not None:
+                            freed_gb = observed["freed_gb"]
+                            offload_result.update(observed)
+                            offload_result["freed_gb"] = self._round(freed_gb)
+                        else:
+                            offload_result["freed_gb_source"] = "unavailable_exact"
                     if freed_gb is None:
-                        freed_gb = cand.kv_gb
+                        freed_gb = 0.0
                     current_free_gb += max(0.0, freed_gb)
-                    self._mark_agent_evicted_locked(cand.agent_id, evict_result)
+                    after_blocks = offload_result.get("free_blocks_after")
+                    if after_blocks is not None:
+                        current_free_blocks = int(after_blocks)
+                    elif (
+                        current_free_blocks is not None
+                        and offload_result.get("freed_blocks") is not None
+                    ):
+                        current_free_blocks += int(offload_result["freed_blocks"])
+                    elif _finite_float(offload_result.get("freed_gb")) is not None:
+                        current_free_blocks = None
+                    self._mark_agent_offloaded_locked(cand.agent_id, offload_result)
                 elif "offload_attempt_failed" not in report["reasons"]:
                     report["reasons"].append("offload_attempt_failed")
 
@@ -724,19 +756,25 @@ class DynamicAdmissionController:
     def _kv_free_gb(
         self, vllm_info: dict[str, Any], bytes_per_blk: int
     ) -> Optional[float]:
+        free_blocks = self._kv_free_blocks(vllm_info)
+        if free_blocks is not None:
+            return max(0.0, free_blocks * bytes_per_blk / 1e9)
+
         free_gb = _finite_float(vllm_info.get("kv_free_gb"))
         if free_gb is not None:
             return max(0.0, free_gb)
-
-        free_blocks = _finite_float(vllm_info.get("num_gpu_blocks_free"))
-        if free_blocks is not None:
-            return max(0.0, free_blocks * bytes_per_blk / 1e9)
 
         total = _finite_float(vllm_info.get("kv_total_gb"))
         used = _finite_float(vllm_info.get("kv_used_gb"))
         if total is not None and used is not None:
             return max(0.0, total - used)
         return None
+
+    def _kv_free_blocks(self, vllm_info: dict[str, Any]) -> Optional[int]:
+        free_blocks = _finite_float(vllm_info.get("num_gpu_blocks_free"))
+        if free_blocks is None:
+            return None
+        return max(0, int(free_blocks))
 
     def _average_active_kv_gb(
         self, agents: dict[str, dict[str, Any]], bytes_per_blk: int
@@ -745,7 +783,7 @@ class DynamicAdmissionController:
         for agent in agents.values():
             if agent.get("state") not in self.ACTIVE_STATES:
                 continue
-            if agent.get("kv_evicted"):
+            if agent.get("kv_offloaded"):
                 continue
             kv_gb = _agent_kv_gb(agent, bytes_per_blk)
             if kv_gb is not None and kv_gb > 0:
@@ -787,7 +825,10 @@ class DynamicAdmissionController:
         for agent_id, agent in agents.items():
             if agent.get("state") != "tool_call":
                 continue
-            if agent_id in self._evicted_events or agent.get("kv_evicted"):
+            if (
+                agent_id in self._offloaded_events
+                or agent.get("kv_offloaded")
+            ):
                 continue
             if (
                 agent_id in self._idle_short
@@ -828,7 +869,7 @@ class DynamicAdmissionController:
                         agent_id,
                         {
                             "kv_policy": "idle_long",
-                            "kv_evicted": False,
+                            "kv_offloaded": False,
                             "admission_state": "admitted",
                             "predicted_remaining_s": None,
                             "tool_elapsed_s": self._round(elapsed_s),
@@ -869,7 +910,7 @@ class DynamicAdmissionController:
                         agent_id,
                         {
                             "kv_policy": "idle_short",
-                            "kv_evicted": False,
+                            "kv_offloaded": False,
                             "admission_state": "admitted",
                             "predicted_remaining_s": self._round(remaining_s),
                             "last_kv_policy": event,
@@ -892,7 +933,7 @@ class DynamicAdmissionController:
                     agent_id,
                     {
                         "kv_policy": "idle_long",
-                        "kv_evicted": False,
+                        "kv_offloaded": False,
                         "admission_state": "admitted",
                         "predicted_remaining_s": self._round(remaining_s),
                         "last_kv_policy": event,
@@ -968,16 +1009,14 @@ class DynamicAdmissionController:
             if self._offload_callback is not None:
                 payload = self._offload_callback(cand) or {}
             else:
-                endpoint = self.offload_endpoint or self.eviction_endpoint
-                if not endpoint:
+                if not self.offload_endpoint:
                     return {
                         **result,
-                        "evicted": False,
                         "offloaded": False,
                         "reason": "missing_offload_endpoint",
                     }
                 resp = self._session.post(
-                    endpoint,
+                    self.offload_endpoint,
                     json={
                         "agent_id": cand.agent_id,
                         "only_ref_cnt_zero": True,
@@ -985,32 +1024,57 @@ class DynamicAdmissionController:
                         "tool_elapsed_s": cand.tool_elapsed_s,
                         "policy_reason": cand.policy_reason,
                     },
-                    timeout=self.eviction_timeout_s,
+                    timeout=self.offload_timeout_s,
                 )
                 if resp.status_code >= 400:
                     return {
                         **result,
-                        "evicted": False,
                         "offloaded": False,
                         "status_code": resp.status_code,
                         "reason": resp.text[:300],
                     }
                 payload = resp.json()
-            if "evicted" in payload:
-                evicted = bool(payload.get("evicted"))
-            elif "offloaded" in payload:
-                evicted = bool(payload.get("offloaded"))
-            else:
-                evicted = True
-            if evicted:
+            offloaded = bool(payload.get("offloaded", True))
+            if offloaded:
                 self._idle_long.discard(cand.agent_id)
-            merged = {**result, **payload, "evicted": evicted}
-            merged.setdefault("offloaded", evicted)
-            if not evicted and not merged.get("reason"):
+            merged = {**result, **payload, "offloaded": offloaded}
+            if not offloaded and not merged.get("reason"):
                 merged["reason"] = "offload_rejected_without_reason"
             return merged
         except Exception as exc:
-            return {**result, "evicted": False, "offloaded": False, "reason": str(exc)}
+            return {**result, "offloaded": False, "reason": str(exc)}
+
+    def _measure_exact_freed_gb(
+        self,
+        *,
+        before_free_blocks: Optional[int],
+        bytes_per_blk: int,
+    ) -> Optional[dict[str, Any]]:
+        if not self.vllm_url or before_free_blocks is None:
+            return None
+
+        deadline = time.monotonic() + self.exact_freed_gb_timeout_s
+        while True:
+            after = poll_vllm(
+                self._session,
+                self.vllm_url,
+                bytes_per_blk,
+                self.total_gpu_blocks,
+            )
+            after_free_blocks = self._kv_free_blocks(after)
+            if after_free_blocks is not None:
+                delta_blocks = after_free_blocks - before_free_blocks
+                if delta_blocks > 0:
+                    return {
+                        "freed_blocks": delta_blocks,
+                        "free_blocks_before": before_free_blocks,
+                        "free_blocks_after": after_free_blocks,
+                        "freed_gb": delta_blocks * bytes_per_blk / 1e9,
+                        "freed_gb_source": "vllm_free_blocks_delta",
+                    }
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self.exact_freed_gb_poll_interval_s)
 
     def _restore_agent_locked(self, agent_id: str) -> dict[str, Any]:
         result: dict[str, Any] = {"agent_id": agent_id}
@@ -1023,7 +1087,7 @@ class DynamicAdmissionController:
                 resp = self._session.post(
                     self.restore_endpoint,
                     json={"agent_id": agent_id},
-                    timeout=self.eviction_timeout_s,
+                    timeout=self.offload_timeout_s,
                 )
                 if resp.status_code >= 400:
                     return {
@@ -1046,22 +1110,22 @@ class DynamicAdmissionController:
         self._kv_policy_events.clear()
         return events
 
-    def _mark_agent_evicted_locked(
-        self, agent_id: str, evict_result: dict[str, Any]
+    def _mark_agent_offloaded_locked(
+        self, agent_id: str, offload_result: dict[str, Any]
     ) -> None:
-        event = self._evicted_events.get(agent_id)
+        event = self._offloaded_events.get(agent_id)
         if event is None or event.is_set():
             event = threading.Event()
-            self._evicted_events[agent_id] = event
-        self._evicted_pending.add(agent_id)
+            self._offloaded_events[agent_id] = event
+        self._offloaded_pending.add(agent_id)
         self._idle_long.discard(agent_id)
         self._update_agent_state_locked(
             agent_id,
             {
-                "kv_evicted": True,
-                "admission_state": "evicted_pending_tool",
-                "last_eviction": iso_utc(now_utc()),
-                "last_eviction_result": evict_result,
+                "kv_offloaded": True,
+                "admission_state": "offloaded_pending_tool",
+                "last_offload": iso_utc(now_utc()),
+                "last_offload_result": offload_result,
             },
         )
 
@@ -1076,7 +1140,7 @@ class DynamicAdmissionController:
         admitted = 0
 
         while admitted < admit_limit:
-            agent_id = self._pop_next_evicted_ready_locked()
+            agent_id = self._pop_next_offloaded_ready_locked()
             if agent_id is None:
                 break
             report["admissions"].append(self._admit_locked(agent_id))
@@ -1121,11 +1185,11 @@ class DynamicAdmissionController:
         elapsed = max(0.0, now_mono - self._last_fresh_admit_monotonic)
         return max(0.0, self.initial_admit_interval_s - elapsed)
 
-    def _pop_next_evicted_ready_locked(self) -> Optional[str]:
-        while self._evicted_ready:
-            agent_id = self._evicted_ready.popleft()
-            self._evicted_ready_set.discard(agent_id)
-            if agent_id in self._evicted_events:
+    def _pop_next_offloaded_ready_locked(self) -> Optional[str]:
+        while self._offloaded_ready:
+            agent_id = self._offloaded_ready.popleft()
+            self._offloaded_ready_set.discard(agent_id)
+            if agent_id in self._offloaded_events:
                 return agent_id
         return None
 
@@ -1138,41 +1202,49 @@ class DynamicAdmissionController:
         if isinstance(item, str):
             agent_id = item
             restore_result = self._restore_agent_locked(agent_id)
-            event = self._evicted_events.get(agent_id)
-            if event is not None:
-                event.set()
+            event = self._offloaded_events.get(agent_id)
+            admitted_at = iso_utc(now_utc())
+            self._readmitted_at[agent_id] = admitted_at
             self._update_agent_state_locked(
                 agent_id,
                 {
+                    "kv_offloaded": False,
+                    "kv_policy": "readmitted",
                     "admission_state": "admitted",
-                    "admitted_since": iso_utc(now_utc()),
+                    "admitted_since": admitted_at,
                     "last_restore_result": restore_result,
                 },
             )
+            if event is not None:
+                event.set()
             return {
                 "agent_id": agent_id,
-                "previously_evicted": True,
+                "previously_offloaded": True,
                 "admitted": True,
+                "admitted_at": admitted_at,
                 "restore_result": restore_result,
             }
 
         assert self._admit_callback is not None
+        admitted_at = iso_utc(now_utc())
         self._admit_callback(item)
         return {
             "agent_id": item.agent_id,
-            "previously_evicted": item.previously_evicted,
+            "previously_offloaded": item.previously_offloaded,
             "admitted": True,
+            "admitted_at": admitted_at,
         }
 
-    def _clear_evicted_locked(self, agent_id: str) -> None:
-        self._evicted_events.pop(agent_id, None)
-        self._evicted_pending.discard(agent_id)
-        self._evicted_ready_set.discard(agent_id)
+    def _clear_offloaded_locked(self, agent_id: str) -> None:
+        self._offloaded_events.pop(agent_id, None)
+        self._offloaded_pending.discard(agent_id)
+        self._offloaded_ready_set.discard(agent_id)
+        self._readmitted_at.pop(agent_id, None)
         self._idle_short.discard(agent_id)
         self._idle_long.discard(agent_id)
-        if self._evicted_ready:
-            self._evicted_ready = deque(
-                aid for aid in self._evicted_ready if aid != agent_id
+        if self._offloaded_ready:
+            self._offloaded_ready = deque(
+                aid for aid in self._offloaded_ready if aid != agent_id
             )
 
     def _update_agent_state_locked(
@@ -1352,9 +1424,9 @@ def parse_args() -> argparse.Namespace:
 
     ac = p.add_argument_group("dynamic admission control")
     ac.add_argument("--admission-control", action="store_true",
-                    help="Enable admission/eviction policy decisions in the sidecar.")
+                    help="Enable admission/offload policy decisions in the sidecar.")
     ac.add_argument("--admission-threshold-gb", type=float, default=0.1,
-                    help="Free KV-cache GB threshold that triggers pressure eviction.")
+                    help="Free KV-cache GB threshold that triggers pressure offload.")
     ac.add_argument("--initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--max-fresh-admits-per-tick", type=int, default=1,
@@ -1374,10 +1446,8 @@ def parse_args() -> argparse.Namespace:
     ac.add_argument("--restore-endpoint", default=None,
                     help="vLLM admin endpoint to notify readmission. Defaults to "
                          "<vllm-url>/agent_kv_cache/restore.")
-    ac.add_argument("--eviction-endpoint", default=None,
-                    help="Backward-compatible alias for --offload-endpoint.")
-    ac.add_argument("--eviction-timeout-s", type=float, default=2.0,
-                    help="HTTP timeout for one eviction request.")
+    ac.add_argument("--offload-timeout-s", type=float, default=None,
+                    help="HTTP timeout for one offload request.")
 
     dash = p.add_argument_group("live dashboard (optional)")
     dash.add_argument("--http-port", type=int, default=0,
@@ -1410,14 +1480,13 @@ def main() -> int:
             max_active_agents=args.max_active_agents,
             short_tool_call_threshold_s=args.short_tool_call_threshold_s,
             fallback_long_tool_call_s=args.fallback_long_tool_call_s,
-            offload_endpoint=(
-                args.offload_endpoint
-                or args.eviction_endpoint
-                or default_offload_endpoint(args.vllm_url)
-            ),
+            offload_endpoint=args.offload_endpoint or default_offload_endpoint(args.vllm_url),
             restore_endpoint=args.restore_endpoint or default_restore_endpoint(args.vllm_url),
-            eviction_endpoint=args.eviction_endpoint,
-            eviction_timeout_s=args.eviction_timeout_s,
+            offload_timeout_s=(
+                args.offload_timeout_s if args.offload_timeout_s is not None else 2.0
+            ),
+            vllm_url=args.vllm_url,
+            total_gpu_blocks=args.total_gpu_blocks,
             bytes_per_blk=bpb,
             predictor_model=args.admission_predictor_model,
         )

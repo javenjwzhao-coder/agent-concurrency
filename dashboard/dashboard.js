@@ -216,13 +216,13 @@
   //   ts        — epoch ms
   //   live      — agents in reasoning|tool_call|waiting
   //   reasoning, tool_call, waiting  — phase breakdown of `live`
-  //   offloaded — agents currently in evicted_waiting (KV pushed to CPU)
+  //   offloaded — agents currently in offloaded_waiting (KV pushed to CPU)
   //   done      — finished agents
   //   launched  — total agents the sidecar has ever seen (cumulative)
   //   heap      — admission.heap_candidates length (eligible to offload)
   //   C, threshold, pressure — free KV GB, configured offload threshold,
   //                            and whether the controller is in pressure
-  //   queue     — fresh + evicted_ready waiting to be admitted
+  //   queue     — fresh + offloaded_ready waiting to be admitted
   //   vllmPreemptions — cumulative vLLM scheduler preemptions from /metrics
 
   function snapshotCounts(record) {
@@ -236,7 +236,9 @@
         case "reasoning":       reasoning++; break;
         case "tool_call":       tool_call++; break;
         case "waiting":         waiting++;   break;
-        case "evicted_waiting": offloaded++; break;
+        case "offloaded_waiting":
+          offloaded++;
+          break;
         case "done":            done++;      break;
         default:                waiting++;   break;
       }
@@ -253,7 +255,7 @@
     return {
       live: reasoning + tool_call + waiting,
       reasoning, tool_call, waiting, offloaded, done, launched,
-      queue: (q.fresh || 0) + (q.evicted_ready || 0),
+      queue: (q.fresh || 0) + (q.offloaded_ready || 0),
       heap: (adm.heap_candidates || []).length,
       C,
       threshold,
@@ -294,7 +296,7 @@
       `reasoning: ${s.reasoning}\ntool_call: ${s.tool_call}\nwaiting:   ${s.waiting}\n\nlaunched: ${s.launched}`,
     );
     setBadge("offloadedCount", `offloaded: ${s.offloaded}`,
-      "agents whose KV is currently offloaded to CPU (evicted_waiting)");
+      "agents whose KV is currently offloaded to CPU (offloaded_waiting)");
     setBadge("heapCount", `heap: ${s.heap}`,
       "agents currently in the offload heap (eligible to be offloaded)");
     setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.effectiveW)} / T: ${fmtGb(s.threshold)}`,
@@ -306,7 +308,7 @@
       pressureEl.classList.toggle("badge-pressure-active", s.pressure);
     }
     setBadge("queueCount", `queue: ${s.queue}`,
-      "fresh + evicted_ready agents waiting to be admitted");
+      "fresh + offloaded_ready agents waiting to be admitted");
     setBadge("doneCount", `done: ${s.done} / ${s.launched}`,
       "completed agents / total launched");
     setBadge("vllmPreemptCount", `vllm preempt: ${fmtCount(s.vllmPreemptions)}`,
@@ -507,13 +509,14 @@
     const ts = record.ts;
     const tooltipBase = baseTooltip(record);
 
-    for (const ev of (adm.evictions || [])) {
-      const evicted = ev.evicted === true
-        || (ev.evicted === undefined && ev.offloaded === true);
-      if (evicted) {
+    for (const ev of (adm.offloads || [])) {
+      if (ev.offloaded === true) {
         addEvent(ts, "offload", `OFFLOAD: ${ev.agent_id}`,
           `agent: ${ev.agent_id}\n` +
           `freed_gb: ${fmt(ev.freed_gb)}\n` +
+          `freed_blocks: ${fmt(ev.freed_blocks)}\n` +
+          `free_blocks: ${fmt(ev.free_blocks_before)} -> ${fmt(ev.free_blocks_after)}\n` +
+          `freed_gb_source: ${fmt(ev.freed_gb_source)}\n` +
           `e_s:      ${fmt(ev.e_s)}\n` +
           `kv_gb:    ${fmt(ev.kv_gb)}\n` +
           `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
@@ -533,13 +536,16 @@
     }
     for (const ad of (adm.admissions || [])) {
       if (!ad.admitted) continue;
-      const type = ad.previously_evicted ? "readmit" : "admit";
-      const tag = ad.previously_evicted
+      const wasOffloaded = ad.previously_offloaded === true;
+      const type = wasOffloaded ? "readmit" : "admit";
+      const tag = wasOffloaded
         ? `READMIT: ${ad.agent_id}`
         : `ADMIT: ${ad.agent_id}`;
-      addEvent(ts, type, tag,
+      const adTs = eventTimestamp(ts, ad, ["admitted_at", "admitted_since", "ts"]);
+      addEvent(adTs, type, tag,
         `agent: ${ad.agent_id}\n` +
-        `previously_evicted: ${ad.previously_evicted}`,
+        `previously_offloaded: ${wasOffloaded}\n` +
+        `admitted_at: ${fmt(ad.admitted_at)}`,
         tooltipBase);
     }
     if ((adm.reasons || []).indexOf("saturation_guard") !== -1) {
@@ -563,8 +569,8 @@
       `active: ${fmt(adm.active_agents)} / ${fmt(adm.max_active_agents)}`,
       `active_slots: ${fmt(adm.active_agent_slots)}`,
       `queue:  fresh=${fmt(adm.queue && adm.queue.fresh)} ` +
-        `ready=${fmt(adm.queue && adm.queue.evicted_ready)} ` +
-        `pending_tool=${fmt(adm.queue && adm.queue.evicted_pending_tool)}`,
+        `ready=${fmt(adm.queue && adm.queue.offloaded_ready)} ` +
+        `pending_tool=${fmt(adm.queue && adm.queue.offloaded_pending_tool)}`,
       `heap_candidates: ${(adm.heap_candidates || []).length}`,
     ].join("\n");
   }
@@ -644,6 +650,14 @@
     state.eventPoints.push({ id, ts: start.getTime(), type, label, extraText, sharedBase });
     incrementEventCount(type);
     scheduleEventLineRender();
+  }
+
+  function eventTimestamp(recordTs, event, keys) {
+    for (const key of keys) {
+      const value = event && event[key];
+      if (parseTimeMs(value) !== null) return value;
+    }
+    return recordTs;
   }
 
   // ── proximity tooltip (fires from container mousemove) ─────────────────

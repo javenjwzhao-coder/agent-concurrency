@@ -99,7 +99,6 @@ class AgentAwareOffloadingConnector(OffloadingConnector):
         scheduler = self.connector_scheduler
         if not hasattr(scheduler, "offload_agent_kv"):
             return {
-                "evicted": False,
                 "offloaded": False,
                 "reason": "agent-aware scheduler is unavailable",
             }
@@ -112,15 +111,6 @@ class AgentAwareOffloadingConnector(OffloadingConnector):
         if not hasattr(scheduler, "restore_agent_kv"):
             return {"restored": False, "reason": "agent-aware scheduler is unavailable"}
         return scheduler.restore_agent_kv(agent_id)
-
-    def evict_agent_kv(
-        self,
-        agent_id: str,
-        only_ref_cnt_zero: bool = True,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        return self.offload_agent_kv(
-            agent_id, only_ref_cnt_zero=only_ref_cnt_zero, **kwargs)
 
 
 class AgentAwareOffloadingScheduler:
@@ -162,7 +152,6 @@ class AgentAwareOffloadingScheduler:
     ) -> dict[str, Any]:
         if not agent_id:
             return {
-                "evicted": False,
                 "offloaded": False,
                 "pending": False,
                 "reason": "missing agent_id",
@@ -175,7 +164,6 @@ class AgentAwareOffloadingScheduler:
         active_reqs = len(self._agent_to_requests.get(agent_id, ()))
         if known_blocks <= 0 and active_reqs <= 0:
             return {
-                "evicted": False,
                 "offloaded": False,
                 "pending": False,
                 "known_blocks": 0,
@@ -185,7 +173,6 @@ class AgentAwareOffloadingScheduler:
 
         self._pending_agent_offloads.add(agent_id)
         return {
-            "evicted": True,
             "offloaded": True,
             "pending": True,
             "known_blocks": known_blocks,

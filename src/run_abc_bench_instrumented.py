@@ -105,6 +105,21 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def parse_iso_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 # ──────────────────────── per-agent phase tracker ─────────────────────────────
 
 class AgentPhaseTracker:
@@ -228,7 +243,7 @@ class AgentPhaseTracker:
                 "kv_blocks": None,
                 "kv_gb": None,
                 "last_kv_updated": None,
-                "kv_evicted": False,
+                "kv_offloaded": False,
                 "admission_state": "admitted",
             }
         with self._lock:
@@ -379,11 +394,23 @@ class AgentPhaseTracker:
                         ):
                             live.pop(key, None)
 
+                was_offloaded = False
+                admitted_at = None
                 if self.admission_controller is not None:
-                    self.admission_controller.wait_if_evicted(self.agent_id)
+                    was_offloaded, admitted_at = self.admission_controller.wait_if_offloaded(
+                        self.agent_id,
+                        return_admitted_at=True,
+                    )
 
-                # After a tool result the LLM starts reasoning again.
-                self._open_phase("reasoning", event_dt)
+                # After a tool result the LLM starts reasoning again. If the
+                # agent was offloaded, the wait above can block for a while;
+                # align the new phase with the readmission event instead of
+                # backdating it to the observation timestamp.
+                if was_offloaded:
+                    reasoning_start_dt = parse_iso_utc(admitted_at) or now_utc()
+                else:
+                    reasoning_start_dt = event_dt
+                self._open_phase("reasoning", reasoning_start_dt)
                 return
 
             # ── error event ──
@@ -1095,7 +1122,7 @@ def parse_args() -> argparse.Namespace:
     sc.add_argument("--sidecar-admission-control", action="store_true",
                     help="Let the embedded sidecar admit queued agents dynamically.")
     sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=0.1,
-                    help="Free KV-cache GB threshold that triggers pressure eviction.")
+                    help="Free KV-cache GB threshold that triggers pressure offload.")
     sc.add_argument("--sidecar-initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-max-fresh-admits-per-tick", type=int, default=1,
@@ -1114,15 +1141,13 @@ def parse_args() -> argparse.Namespace:
                     help="vLLM admin endpoint for per-agent KV CPU offload.")
     sc.add_argument("--sidecar-restore-endpoint", default=None,
                     help="vLLM admin endpoint to notify agent KV readmission.")
-    sc.add_argument("--sidecar-eviction-endpoint", default=None,
-                    help="Backward-compatible alias for --sidecar-offload-endpoint.")
+    sc.add_argument("--sidecar-offload-timeout-s", type=float, default=None,
+                    help="HTTP timeout for one offload request.")
     sc.add_argument("--sidecar-http-port", type=int, default=0,
                     help="Bind a live HTTP/SSE feed for the dashboard on this "
                          "port (0 disables).")
     sc.add_argument("--sidecar-http-host", default="127.0.0.1",
                     help="Bind address for the live dashboard feed.")
-    sc.add_argument("--sidecar-eviction-timeout-s", type=float, default=2.0,
-                    help="HTTP timeout for one eviction request.")
     return p.parse_args()
 
 
@@ -1186,15 +1211,18 @@ def main() -> int:
                 fallback_long_tool_call_s=args.sidecar_fallback_long_tool_call_s,
                 offload_endpoint=(
                     args.sidecar_offload_endpoint
-                    or args.sidecar_eviction_endpoint
                     or _sidecar.default_offload_endpoint(args.sidecar_vllm_url)
                 ),
                 restore_endpoint=(
                     args.sidecar_restore_endpoint
                     or _sidecar.default_restore_endpoint(args.sidecar_vllm_url)
                 ),
-                eviction_endpoint=args.sidecar_eviction_endpoint,
-                eviction_timeout_s=args.sidecar_eviction_timeout_s,
+                offload_timeout_s=(
+                    args.sidecar_offload_timeout_s
+                    if args.sidecar_offload_timeout_s is not None else 2.0
+                ),
+                vllm_url=args.sidecar_vllm_url,
+                total_gpu_blocks=args.sidecar_total_gpu_blocks,
                 bytes_per_blk=_sc_bpb,
                 predictor_model=args.sidecar_admission_predictor_model,
                 state_update_callback=_update_live_agent,

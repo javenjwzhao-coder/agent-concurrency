@@ -3,7 +3,7 @@
 apply_patches.py — agent-aware KV offloading patches for vLLM/vllm-ascend 0.13.
 
 The runtime now uses a custom KV connector instead of direct block-pool
-pin/evict hooks.  The connector reuses vLLM's OffloadingConnector transfer
+pin/offload hooks.  The connector reuses vLLM's OffloadingConnector transfer
 machinery and changes only policy: the sidecar can mark a long idle agent for
 CPU offload, and the connector stores/restores that agent's KV blocks through
 the configured OffloadingSpec.
@@ -101,6 +101,38 @@ def _insert_after_anchor(
 def _code_block(indent: int, code: str, *, leading_newline: bool = False) -> str:
     body = textwrap.indent(textwrap.dedent(code).strip("\n") + "\n", " " * indent)
     return ("\n" if leading_newline else "") + body
+
+
+def _strip_function_block(text: str, name: str) -> tuple[str, bool]:
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+        if stripped.startswith(f"def {name}") or stripped.startswith(f"async def {name}"):
+            base_indent = len(line) - len(stripped)
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                next_stripped = next_line.lstrip()
+                if next_stripped and len(next_line) - len(next_stripped) <= base_indent:
+                    break
+                i += 1
+            changed = True
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out), changed
+
+
+def _strip_old_offload_aliases(text: str) -> tuple[str, bool]:
+    changed = False
+    for name in ("evi" + "ct_agent_kv", "evi" + "ct_agent_kv_async"):
+        text, removed = _strip_function_block(text, name)
+        changed = changed or removed
+    return text, changed
 
 
 def _patch_via_regex_usage_block(
@@ -350,7 +382,12 @@ def _patch_async_llm() -> None:
         print(f"[WARN] async_llm.py not found ({ASYNC_LLM})")
         return
     txt = ASYNC_LLM.read_text()
+    txt, removed_old = _strip_old_offload_aliases(txt)
     if "async def restore_agent_kv" in txt and "async def offload_agent_kv" in txt:
+        if removed_old:
+            ASYNC_LLM.write_text(txt)
+            print("[OK] async_llm.py: old agent connector aliases removed")
+            return
         print("[SKIP] async_llm.py already has agent connector methods")
         return
     methods = _code_block(4, """\
@@ -367,11 +404,6 @@ def _patch_async_llm() -> None:
 
         async def restore_agent_kv(self, agent_id: str) -> dict:
             return await self.engine_core.restore_agent_kv_async(str(agent_id))
-
-        async def evict_agent_kv(
-                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-            return await self.engine_core.offload_agent_kv_async(
-                str(agent_id), only_ref_cnt_zero)
     """, leading_newline=True)
     txt, ok = _insert_before_anchor(
         txt,
@@ -382,6 +414,9 @@ def _patch_async_llm() -> None:
     if ok:
         ASYNC_LLM.write_text(txt)
         print("[OK] async_llm.py: agent connector methods added")
+    elif removed_old:
+        ASYNC_LLM.write_text(txt)
+        print("[OK] async_llm.py: old agent connector aliases removed")
 
 
 def _patch_core_client() -> None:
@@ -389,7 +424,7 @@ def _patch_core_client() -> None:
         print(f"[WARN] core_client.py not found ({CORE_CLIENT})")
         return
     txt = CORE_CLIENT.read_text()
-    changed = False
+    txt, changed = _strip_old_offload_aliases(txt)
 
     if "def restore_agent_kv(self, agent_id: str) -> dict:" not in txt:
         abstract_sync = _code_block(4, """\
@@ -401,10 +436,6 @@ def _patch_core_client() -> None:
                 raise NotImplementedError
 
             def restore_agent_kv(self, agent_id: str) -> dict:
-                raise NotImplementedError
-
-            def evict_agent_kv(
-                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
                 raise NotImplementedError
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
@@ -434,10 +465,6 @@ def _patch_core_client() -> None:
 
             async def restore_agent_kv_async(self, agent_id: str) -> dict:
                 raise NotImplementedError
-
-            async def evict_agent_kv_async(
-                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-                raise NotImplementedError
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -466,11 +493,6 @@ def _patch_core_client() -> None:
 
             def restore_agent_kv(self, agent_id: str) -> dict:
                 return self.engine_core.restore_agent_kv(agent_id)
-
-            def evict_agent_kv(
-                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-                return self.engine_core.offload_agent_kv(
-                    agent_id, only_ref_cnt_zero)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -501,11 +523,6 @@ def _patch_core_client() -> None:
 
             def restore_agent_kv(self, agent_id: str) -> dict:
                 return self.call_utility("restore_agent_kv", agent_id)
-
-            def evict_agent_kv(
-                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-                return self.call_utility(
-                    "offload_agent_kv", agent_id, only_ref_cnt_zero)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -538,11 +555,6 @@ def _patch_core_client() -> None:
 
             async def restore_agent_kv_async(self, agent_id: str) -> dict:
                 return await self.call_utility_async("restore_agent_kv", agent_id)
-
-            async def evict_agent_kv_async(
-                    self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-                return await self.call_utility_async(
-                    "offload_agent_kv", agent_id, only_ref_cnt_zero)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -573,7 +585,12 @@ def _patch_engine_core() -> None:
         print(f"[WARN] core.py not found ({ENGINE_CORE})")
         return
     txt = ENGINE_CORE.read_text()
+    txt, removed_old = _strip_old_offload_aliases(txt)
     if "def restore_agent_kv(" in txt and "def offload_agent_kv(" in txt:
+        if removed_old:
+            ENGINE_CORE.write_text(txt)
+            print("[OK] core.py: old agent connector aliases removed")
+            return
         print("[SKIP] core.py already has agent connector methods")
         return
     methods = _code_block(4, """\
@@ -586,10 +603,6 @@ def _patch_engine_core() -> None:
 
         def restore_agent_kv(self, agent_id: str) -> dict:
             return self.scheduler.restore_agent_kv(agent_id)
-
-        def evict_agent_kv(
-                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-            return self.scheduler.offload_agent_kv(agent_id, only_ref_cnt_zero)
     """, leading_newline=True)
     txt, ok = _insert_after_anchor(
         txt,
@@ -611,6 +624,9 @@ def _patch_engine_core() -> None:
     if ok:
         ENGINE_CORE.write_text(txt)
         print("[OK] core.py: agent connector methods added")
+    elif removed_old:
+        ENGINE_CORE.write_text(txt)
+        print("[OK] core.py: old agent connector aliases removed")
 
 
 def _patch_scheduler() -> None:
@@ -618,7 +634,12 @@ def _patch_scheduler() -> None:
         print(f"[WARN] scheduler.py not found ({SCHEDULER})")
         return
     txt = SCHEDULER.read_text()
+    txt, removed_old = _strip_old_offload_aliases(txt)
     if "def restore_agent_kv(self, agent_id: str) -> dict:" in txt:
+        if removed_old:
+            SCHEDULER.write_text(txt)
+            print("[OK] scheduler.py: old agent connector aliases removed")
+            return
         print("[SKIP] scheduler.py already has agent connector methods")
         return
     methods = _code_block(4, """\
@@ -637,7 +658,6 @@ def _patch_scheduler() -> None:
             scheduler = self._agent_kv_connector_scheduler()
             if scheduler is None or not hasattr(scheduler, "offload_agent_kv"):
                 return {
-                    "evicted": False,
                     "offloaded": False,
                     "reason": "agent-aware KV connector is not configured",
                 }
@@ -651,10 +671,6 @@ def _patch_scheduler() -> None:
                     "reason": "agent-aware KV connector is not configured",
                 }
             return scheduler.restore_agent_kv(agent_id)
-
-        def evict_agent_kv(
-                self, agent_id: str, only_ref_cnt_zero: bool = True) -> dict:
-            return self.offload_agent_kv(agent_id, only_ref_cnt_zero)
     """)
     txt, ok = _insert_before_anchor(
         txt,
@@ -665,6 +681,9 @@ def _patch_scheduler() -> None:
     if ok:
         SCHEDULER.write_text(txt)
         print("[OK] scheduler.py: agent connector methods added")
+    elif removed_old:
+        SCHEDULER.write_text(txt)
+        print("[OK] scheduler.py: old agent connector aliases removed")
 
 
 def patch_agent_kv_api() -> None:
@@ -701,14 +720,13 @@ async def offload_agent_kv_cache(raw_request: Request):
     only_ref_cnt_zero = bool(body.get("only_ref_cnt_zero", True))
     if not agent_id:
         return _agent_kv_response(
-            {"evicted": False, "offloaded": False, "reason": "missing agent_id"},
+            {"offloaded": False, "reason": "missing agent_id"},
             status_code=400,
         )
     client = engine_client(raw_request)
     if not hasattr(client, "offload_agent_kv"):
         return _agent_kv_response(
             {
-                "evicted": False,
                 "offloaded": False,
                 "reason": "engine client missing offload_agent_kv",
             },
@@ -718,7 +736,6 @@ async def offload_agent_kv_cache(raw_request: Request):
         agent_id, only_ref_cnt_zero=only_ref_cnt_zero)
     result = await _agent_kv_maybe_await(result)
     return _agent_kv_response(result or {
-        "evicted": False,
         "offloaded": False,
         "reason": "engine returned no result",
     })
@@ -748,21 +765,13 @@ async def restore_agent_kv_cache(raw_request: Request):
         "restored": False,
         "reason": "engine returned no result",
     })
-
-
-@router.post("/agent_kv_cache/evict")
-async def evict_agent_kv_cache(raw_request: Request):
-    return await offload_agent_kv_cache(raw_request)
 # END agent-concurrency agent KV API routes
     """)
 
     old_block = re.compile(
-        r"\n[ \t]*(?:# BEGIN agent-concurrency agent KV API routes\n)?"
-        r"[ \t]*async def _agent_kv_json\(raw_request: Request\):.*?"
-        r"[ \t]*@router\.post\(\"/agent_kv_cache/evict\"\)\n"
-        r"[ \t]*async def evict_agent_kv_cache\(raw_request: Request\):\n"
-        r"[ \t]*return await offload_agent_kv_cache\(raw_request\)\n"
-        r"[ \t]*(?:# END agent-concurrency agent KV API routes\n)?",
+        r"\n[ \t]*# BEGIN agent-concurrency agent KV API routes\n"
+        r".*?"
+        r"\n[ \t]*# END agent-concurrency agent KV API routes\n",
         re.DOTALL,
     )
     txt, removed = old_block.subn("\n", txt)
@@ -810,7 +819,6 @@ def _validate_agent_kv_api_routes(errors: list[str]) -> None:
     for route_path in (
         '"/agent_kv_cache/offload"',
         '"/agent_kv_cache/restore"',
-        '"/agent_kv_cache/evict"',
     ):
         if route_path not in txt:
             errors.append(f"api_server.py missing {route_path} route")

@@ -42,13 +42,13 @@ ticks it already rendered.
   "agents": {                                  // Per-agent live state (key = agent_id).
     "agent_task_3_w0_2": {
       "task_id": "task_3",                     // str
-      "state":   "reasoning",                  // "waiting"|"reasoning"|"tool_call"|"evicted_waiting"|"done"
+      "state":   "reasoning",                  // "waiting"|"reasoning"|"tool_call"|"offloaded_waiting"|"done"
       "state_since": "2026-04-29T14:29:55.000+00:00",  // ISO-8601 — phase entry timestamp
       "started_at": "2026-04-29T14:29:54.000+00:00",   // optional ISO-8601 — run start
       "finished_at": null,                     // optional ISO-8601|null — fixed when state becomes done
       "kv_gb":   0.34,                         // float | null
       "kv_blocks": 1024,                       // int   | null
-      "admission_state": "admitted",           // "admitted"|"evicted_pending_tool"|"evicted_ready"
+      "admission_state": "admitted",           // "admitted"|"offloaded_pending_tool"|"offloaded_ready"
       "kv_policy": "idle_short",               // optional: "idle_short"|"idle_long"|"readmitted"|...
       "tool_name": "execute_bash"              // present only during "tool_call"
       // …additional tool-call fields (tool_args_json, tool_payload_bytes, …) may also appear
@@ -76,13 +76,13 @@ ticks it already rendered.
 
     "queue": {                                 // pending admissions
       "fresh": 2,
-      "evicted_ready": 0,
-      "evicted_pending_tool": 1,
+      "offloaded_ready": 0,
+      "offloaded_pending_tool": 1,
       "idle_short": 3,
       "idle_long": 4
     },
 
-    "heap_candidates": [                       // ranked idle-agent eviction heap (snapshot)
+    "heap_candidates": [                       // ranked idle-agent offload heap (snapshot)
       { "agent_id": "...", "kv_gb": 0.5, "predicted_remaining_s": 8.0,
         "tool_elapsed_s": null, "policy_reason": "eligible_for_pressure_offload",
         "e_s": 4.0 }
@@ -96,18 +96,22 @@ ticks it already rendered.
         "threshold_s": 2.0, "fallback_long_tool_call_s": 30.0 }
     ],
 
-    "evictions": [                             // offload attempts fired this tick
-      { "agent_id": "...", "evicted": true,
+    "offloads": [                              // offload attempts fired this tick
+      { "agent_id": "...", "offloaded": true,
         "kv_gb": 0.5, "freed_gb": 0.48,
+        "freed_blocks": 48, "free_blocks_before": 120,
+        "free_blocks_after": 168,
+        "freed_gb_source": "vllm_free_blocks_delta",
         "predicted_remaining_s": 8.0, "e_s": 4.0,
         "status_code": 200, "reason": "ok" },
-      { "agent_id": "...", "evicted": false, "offloaded": false,
+      { "agent_id": "...", "offloaded": false,
         "kv_gb": 0.5, "status_code": 409,
         "reason": "no tracked KV blocks for agent" }
     ],
 
     "admissions": [                            // events fired this tick
-      { "agent_id": "...", "admitted": true, "previously_evicted": false }
+      { "agent_id": "...", "admitted": true, "previously_offloaded": false,
+        "admitted_at": "2026-04-29T14:30:00.234567+00:00" }
     ],
 
     "reasons": [                               // gating notes for this tick
@@ -140,15 +144,15 @@ ticks it already rendered.
 | One row per agent                    | keys of `agents` (first-seen order, never reshuffled)               |
 | Agent row label                      | `agent_id (elapsed: N secs)`, then `agent_id (E2E: N secs)` after `state=done`; uses `started_at`/`finished_at` when present |
 | Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active) |
-| Phase color                          | reasoning=blue, tool_call=green, waiting=gray, evicted_waiting=orange (rendered as "offloaded"), done=light gray |
+| Phase color                          | reasoning=blue, tool_call=green, waiting=gray, offloaded_waiting=orange, done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
 | Offload threshold line               | `100 * (1 - admission.threshold_gb / vllm.kv_total_gb)` per tick    |
 | Free-KV pressure badge               | `admission.C`, `admission.threshold_gb`, and `admission.pressure`   |
 | vLLM preempt badge                   | `vllm.scheduler_preemptions_total` from vLLM `/metrics`             |
-| OFFLOAD marker (red)                 | `admission.evictions[*]` where `evicted == true` (KV pushed to CPU) |
-| OFFLOAD_FAIL marker (dashed orange)  | `admission.evictions[*]` where `evicted == false` (attempt rejected) |
-| ADMIT marker (green)                 | `admission.admissions[*]` where `admitted && !previously_evicted`   |
-| READMIT marker (cyan)                | `admission.admissions[*]` where `admitted && previously_evicted`    |
+| OFFLOAD marker (red)                 | `admission.offloads[*]` where `offloaded == true` (KV pushed to CPU) |
+| OFFLOAD_FAIL marker (dashed orange)  | `admission.offloads[*]` where `offloaded == false` (attempt rejected) |
+| ADMIT marker (green)                 | `admission.admissions[*].admitted_at` where `admitted && !previously_offloaded`; falls back to tick `ts` if absent |
+| READMIT marker (cyan)                | `admission.admissions[*].admitted_at` where `admitted && previously_offloaded`; falls back to tick `ts` if absent |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low effective headroom blocks queued agents) |
 | Event tooltip                        | `{ts, tick, C, threshold_gb, pressure, w, s_t, s_prev}` plus event-specific fields |
 | Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick           |

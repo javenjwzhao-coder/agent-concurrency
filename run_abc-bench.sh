@@ -223,8 +223,7 @@ flat_keys = [
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
     ("SIDECAR_OFFLOAD_ENDPOINT", "sidecar.admission_control.offload_endpoint"),
     ("SIDECAR_RESTORE_ENDPOINT", "sidecar.admission_control.restore_endpoint"),
-    ("SIDECAR_EVICTION_ENDPOINT", "sidecar.admission_control.eviction_endpoint"),
-    ("SIDECAR_EVICTION_TIMEOUT_S", "sidecar.admission_control.eviction_timeout_s"),
+    ("SIDECAR_OFFLOAD_TIMEOUT_S", "sidecar.admission_control.offload_timeout_s"),
 ]
 
 for bash_name, dotted in flat_keys:
@@ -372,7 +371,7 @@ build_runner_cmd() {
                 --sidecar-max-active-agents "${SIDECAR_MAX_ACTIVE_AGENTS:-0}"
                 --sidecar-short-tool-call-threshold-s "${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
                 --sidecar-fallback-long-tool-call-s "${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
-                --sidecar-eviction-timeout-s "${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
+                --sidecar-offload-timeout-s "${SIDECAR_OFFLOAD_TIMEOUT_S:-2.0}"
             )
             if [[ -n "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
                 cmd+=(--sidecar-admission-predictor-model "$SIDECAR_ADMISSION_PREDICTOR_MODEL")
@@ -382,9 +381,6 @@ build_runner_cmd() {
             fi
             if [[ -n "${SIDECAR_RESTORE_ENDPOINT:-}" ]]; then
                 cmd+=(--sidecar-restore-endpoint "$SIDECAR_RESTORE_ENDPOINT")
-            fi
-            if [[ -n "${SIDECAR_EVICTION_ENDPOINT:-}" ]]; then
-                cmd+=(--sidecar-eviction-endpoint "$SIDECAR_EVICTION_ENDPOINT")
             fi
         fi
     fi
@@ -479,9 +475,9 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
         echo "    short_tool_call_s:  ${SIDECAR_SHORT_TOOL_CALL_THRESHOLD_S:-2.0}"
         echo "    fallback_long_s:    ${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"
-        echo "    offload_endpoint:   ${SIDECAR_OFFLOAD_ENDPOINT:-${SIDECAR_EVICTION_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload}}"
+        echo "    offload_endpoint:   ${SIDECAR_OFFLOAD_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload}"
         echo "    restore_endpoint:   ${SIDECAR_RESTORE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/restore}"
-        echo "    eviction_timeout_s: ${SIDECAR_EVICTION_TIMEOUT_S:-2.0}"
+        echo "    offload_timeout_s:  ${SIDECAR_OFFLOAD_TIMEOUT_S:-2.0}"
     fi
 fi
 echo ""

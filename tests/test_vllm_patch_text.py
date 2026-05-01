@@ -5,10 +5,12 @@ PATCH_TEXT = Path("src/vllm_patches/apply_patches.py").read_text()
 CONNECTOR_TEXT = Path("src/vllm_patches/agent_offloading_connector.py").read_text()
 
 
-def test_vllm_patch_exposes_offload_restore_and_compat_routes():
+def test_vllm_patch_exposes_offload_restore_routes():
     assert '"/agent_kv_cache/offload"' in PATCH_TEXT
     assert '"/agent_kv_cache/restore"' in PATCH_TEXT
-    assert '"/agent_kv_cache/evict"' in PATCH_TEXT
+    legacy_method = "evi" + "ct_agent_kv"
+    assert legacy_method not in PATCH_TEXT
+    assert legacy_method not in CONNECTOR_TEXT
     assert "offload_agent_kv" in PATCH_TEXT
     assert "restore_agent_kv" in PATCH_TEXT
     assert '"router = APIRouter()\\n"' in PATCH_TEXT
@@ -21,7 +23,6 @@ def test_custom_connector_reuses_offloading_infrastructure():
     assert "class AgentAwareOffloadingWorker(OffloadingConnectorWorker)" in CONNECTOR_TEXT
     assert "GPULoadStoreSpec" in CONNECTOR_TEXT
     assert "_AGENT_STORE_PREFIX" in CONNECTOR_TEXT
-    assert "return await offload_agent_kv_cache(raw_request)" in PATCH_TEXT
 
 
 def test_custom_connector_holds_real_request_for_synthetic_store_jobs():
