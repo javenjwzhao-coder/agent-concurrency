@@ -190,13 +190,13 @@ s_prev = previous tick's average
 w = C / min(s_t, s_prev)
 ```
 
-`headroom_low` means `w < 1`. `saturation_guard` is emitted only when
-`w < 1` and there is runnable queued work (`fresh` or `offloaded_ready`) that
-cannot be admitted.
+`headroom_low` means `w <= w_threshold`. `saturation_guard` is emitted only
+when `w <= w_threshold` and there is runnable queued work (`fresh` or
+`offloaded_ready`) that cannot be admitted. `w_threshold` defaults to `2.0`.
 
 Policy order:
 
-1. If `w < 1`, admit no new fresh agents.
+1. If `w <= w_threshold`, admit no new fresh agents.
 2. If `max_active_agents` is positive and the number of active admitted agents
    (`reasoning`, `tool_call`, or `waiting`) has reached that cap, admit no
    fresh or previously offloaded agents.
@@ -213,7 +213,7 @@ Policy order:
    agent-aware OffloadingConnector.
    Finished agent requests are held inside vLLM first; short or completed
    non-offloaded tool calls release the hold through `/agent_kv_cache/release`.
-6. If `w >= 1` and the active-agent cap has room, admit from the waiting
+6. If `w > w_threshold` and the active-agent cap has room, admit from the waiting
    queue. The percent threshold only controls pressure offload.
 
 Successful offload records report freed memory from the exact vLLM free-block
@@ -267,6 +267,7 @@ sidecar:
   admission_control:
     enabled: true
     threshold_percent: 10.0
+    w_threshold: 2.0
     initial_admit_interval_s: 1.0
     max_active_agents: 32
     fallback_long_tool_call_s: 5.0

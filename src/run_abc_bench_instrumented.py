@@ -1135,6 +1135,8 @@ def parse_args() -> argparse.Namespace:
                     help="Free KV-cache percent threshold that triggers pressure offload.")
     sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=None,
                     help=argparse.SUPPRESS)
+    sc.add_argument("--sidecar-admission-w-threshold", type=float, default=2.0,
+                    help="Minimum headroom w required before admitting queued agents.")
     sc.add_argument("--sidecar-initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-max-fresh-admits-per-tick", type=int, default=1,
@@ -1219,6 +1221,7 @@ def main() -> int:
                 enabled=True,
                 threshold_percent=args.sidecar_admission_threshold_percent,
                 threshold_gb=args.sidecar_admission_threshold_gb,
+                w_threshold=args.sidecar_admission_w_threshold,
                 initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
                 max_fresh_admits_per_tick=args.sidecar_max_fresh_admits_per_tick,
                 max_active_agents=args.sidecar_max_active_agents,

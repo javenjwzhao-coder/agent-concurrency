@@ -44,15 +44,16 @@ At each sidecar tick, the controller gathers:
 - `s_t`: current average per-active-agent KV usage.
 - `s_{t-1}`: previous tick's average, memoized from the last poll.
 - `w = C / min(s_t, s_{t-1})`: conservative concurrency headroom.
-  `headroom_low` means `w < 1`; `saturation_guard` and
+  `headroom_low` means `w <= w_threshold`; `saturation_guard` and
   `admission_blocked_by_pressure` are emitted only when effective low headroom
   keeps runnable queued work pending.
 
 Policy:
 
-1. **Saturation guard**: if effective headroom is below one, admit no queued
-   agents this tick. Effective headroom is `w`, recomputed after any pressure
-   offload as `w_after_offload` when offload frees KV capacity.
+1. **Saturation guard**: if effective headroom is at or below `w_threshold`,
+   admit no queued agents this tick. Effective headroom is `w`, recomputed
+   after any pressure offload as `w_after_offload` when offload frees KV
+   capacity. `w_threshold` defaults to `2.0`.
 2. **Active-agent cap**: if `max_active_agents` is positive, the sidecar
    admits no fresh or previously offloaded agents once the number of active
    admitted agents (`reasoning`, `tool_call`, or `waiting`) reaches that cap.
@@ -86,9 +87,9 @@ Policy:
    free-block delta (`free_blocks_after - free_blocks_before`) or from an
    explicit endpoint value; the sidecar does not substitute the candidate's
    estimated KV size.
-6. **Admission**: when effective `w >= 1` and the active-agent cap has room,
-   launch queued agents. `threshold_percent` is not an admission gate; it only
-   decides when pressure offload should run.
+6. **Admission**: when effective `w > w_threshold` and the active-agent cap has
+   room, launch queued agents. `threshold_percent` is not an admission gate; it
+   only decides when pressure offload should run.
    Previously offloaded agents use a priority lane ahead of fresh agents. Fresh
    agents are admitted one at a time by default; the configured run path has
    no separate batch-submission knob.
@@ -214,6 +215,7 @@ sidecar:
   admission_control:
     enabled: true
     threshold_percent: 10.0
+    w_threshold: 2.0
     initial_admit_interval_s: 1.0
     max_fresh_admits_per_tick: 1
     max_active_agents: 32
@@ -225,7 +227,8 @@ wrapper defaults. In particular, `predictor_model` defaults to
 `prediction.save_model`, and offload/restore/release endpoints default under
 `sidecar.vllm_url`. `threshold_percent` is a free-KV threshold, so `10.0`
 means pressure offload begins when free KV capacity is at or below 10% of the
-configured or reported total.
+configured or reported total. `w_threshold` is an admission headroom threshold,
+so `2.0` admits queued agents only after effective `w` is greater than two.
 
 Then run:
 

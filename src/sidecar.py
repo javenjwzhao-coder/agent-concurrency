@@ -359,6 +359,7 @@ class DynamicAdmissionController:
         enabled: bool = False,
         threshold_percent: float = 10.0,
         threshold_gb: Optional[float] = None,
+        w_threshold: float = 2.0,
         initial_admit_interval_s: float = 2.0,
         max_fresh_admits_per_tick: int = 1,
         max_active_agents: int = 0,
@@ -387,6 +388,7 @@ class DynamicAdmissionController:
         self._legacy_threshold_gb = (
             None if threshold_gb is None else max(0.0, float(threshold_gb))
         )
+        self.w_threshold = max(0.0, float(w_threshold))
         self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
         self.max_fresh_admits_per_tick = max(1, int(max_fresh_admits_per_tick))
         self.max_active_agents = max(0, int(max_active_agents))
@@ -657,6 +659,7 @@ class DynamicAdmissionController:
                 "s_prev": self._round(prev_avg_gb),
                 "active_agent_samples": avg_count,
                 "w": self._round(w),
+                "w_threshold": self._round(self.w_threshold),
                 "threshold_percent": self._round(threshold_percent),
                 "threshold_gb": self._round(threshold_gb),
                 "threshold_source": (
@@ -709,7 +712,7 @@ class DynamicAdmissionController:
                 for _, _, cand in heap
             ]
 
-            if w is not None and w < 1.0:
+            if w is not None and w <= self.w_threshold:
                 report["reasons"].append("headroom_low")
 
             current_free_gb = free_gb
@@ -776,7 +779,7 @@ class DynamicAdmissionController:
             if (
                 admit_limit <= 0
                 and effective_w is not None
-                and effective_w < 1.0
+                and effective_w <= self.w_threshold
                 and runnable_queue > 0
             ):
                 report["reasons"].append("saturation_guard")
@@ -1265,9 +1268,11 @@ class DynamicAdmissionController:
     def _admission_limit(self, w: Optional[float]) -> int:
         if w is None:
             return 1
-        if w < 1.0:
+        if w <= self.w_threshold:
             return 0
-        return max(0, int(math.floor(w)))
+        if self.w_threshold <= 0:
+            return max(0, int(math.floor(w)))
+        return max(1, int(math.floor(w / self.w_threshold)))
 
     def _admit_with_limit_locked(self, admit_limit: int, report: dict[str, Any]) -> None:
         admitted = 0
@@ -1562,6 +1567,8 @@ def parse_args() -> argparse.Namespace:
                     help="Free KV-cache percent threshold that triggers pressure offload.")
     ac.add_argument("--admission-threshold-gb", type=float, default=None,
                     help=argparse.SUPPRESS)
+    ac.add_argument("--admission-w-threshold", type=float, default=2.0,
+                    help="Minimum headroom w required before admitting queued agents.")
     ac.add_argument("--initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--max-fresh-admits-per-tick", type=int, default=1,
@@ -1614,6 +1621,7 @@ def main() -> int:
             enabled=True,
             threshold_percent=args.admission_threshold_percent,
             threshold_gb=args.admission_threshold_gb,
+            w_threshold=args.admission_w_threshold,
             initial_admit_interval_s=args.initial_admit_interval_s,
             max_fresh_admits_per_tick=args.max_fresh_admits_per_tick,
             max_active_agents=args.max_active_agents,

@@ -84,8 +84,23 @@ def test_headroom_bootstrap_and_memoized_average():
 
     assert second["s_prev"] == 1.5
     assert second["w"] == 2.0
-    assert [a["agent_id"] for a in second["admissions"]] == ["fresh-b"]
-    assert "fresh_admit_tick_cap" in second["reasons"]
+    assert second["w_threshold"] == 2.0
+    assert second["admissions"] == []
+    assert "headroom_low" in second["reasons"]
+    assert "admission_blocked_by_headroom" in second["reasons"]
+    assert admitted == ["fresh-a"]
+    assert controller.pending_counts()["fresh"] == 2
+
+    third = controller.on_tick(
+        tick=2,
+        vllm_info={"kv_free_gb": 3.1},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert third["w"] > 2.0
+    assert [a["agent_id"] for a in third["admissions"]] == ["fresh-b"]
+    assert "fresh_admit_tick_cap" in third["reasons"]
     assert admitted == ["fresh-a", "fresh-b"]
     assert controller.pending_counts()["fresh"] == 1
 
@@ -194,6 +209,15 @@ def test_low_headroom_without_runnable_queue_does_not_emit_saturation_guard():
     assert "admission_blocked_by_headroom" not in report["reasons"]
     assert report["queue"]["fresh"] == 0
     assert report["queue"]["offloaded_ready"] == 0
+
+
+def test_w_threshold_controls_admission_limit():
+    controller = DynamicAdmissionController(enabled=True, w_threshold=2.0)
+
+    assert controller._admission_limit(None) == 1
+    assert controller._admission_limit(2.0) == 0
+    assert controller._admission_limit(2.1) == 1
+    assert controller._admission_limit(4.0) == 2
 
 
 def test_pressure_threshold_alone_does_not_block_fresh_admission():
@@ -475,6 +499,7 @@ def test_fresh_admit_tick_cap_can_be_tuned():
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
+        w_threshold=1.0,
         initial_admit_interval_s=0.0,
         max_fresh_admits_per_tick=2,
         admit_callback=lambda spec: admitted.append(spec.agent_id),
@@ -817,6 +842,7 @@ def test_pressure_offload_can_create_one_fresh_admission_slot():
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
+        w_threshold=1.0,
         initial_admit_interval_s=0.0,
         predictor=FakePredictor({"idle-agent": 5.0}),
         admit_callback=lambda spec: admitted.append(spec.agent_id),

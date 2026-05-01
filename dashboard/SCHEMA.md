@@ -63,6 +63,7 @@ ticks it already rendered.
     "s_t":     0.31,                           // float — current avg KV usage of active agents
     "s_prev":  0.29,                           // float|null — previous tick's avg
     "w":       18.03,                          // float|null — headroom = C / min(s_t, s_prev)
+    "w_threshold": 2.0,                         // float — minimum headroom before admitting queued agents
     "w_after_offload": null,                   // float|null — recomputed headroom after pressure offload, when changed
     "threshold_percent": 10.0,                 // float — configured free-KV pressure threshold
     "threshold_gb": 3.36,                      // float|null — derived pressure threshold for this tick
@@ -119,8 +120,8 @@ ticks it already rendered.
     ],
 
     "reasons": [                               // gating notes for this tick
-      "headroom_low",                          // emitted whenever w < 1.0
-      "saturation_guard",                      // emitted when effective w < 1.0 blocks runnable queue
+      "headroom_low",                          // emitted whenever w <= w_threshold
+      "saturation_guard",                      // emitted when effective w <= w_threshold blocks runnable queue
       "admission_blocked_by_pressure",         // emitted when queued work stays pending due to effective w pressure
       "active_agent_cap",                      // emitted when max_active_agents constrains admissions
       "admission_blocked_by_active_agent_cap", // emitted when no active-agent slots are available
@@ -158,7 +159,7 @@ ticks it already rendered.
 | ADMIT marker (green)                 | `admission.admissions[*].admitted_at` where `admitted && !previously_offloaded`; falls back to tick `ts` if absent |
 | READMIT marker (cyan)                | `admission.admissions[*].admitted_at` where `admitted && previously_offloaded`; falls back to tick `ts` if absent |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low effective headroom blocks queued agents) |
-| Event tooltip                        | `{ts, tick, C, C_percent, threshold_percent, threshold_gb, pressure, w, s_t, s_prev}` plus event-specific fields |
+| Event tooltip                        | `{ts, tick, C, C_percent, threshold_percent, threshold_gb, pressure, w, w_threshold, s_t, s_prev}` plus event-specific fields |
 | Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick           |
 
 ## Replay

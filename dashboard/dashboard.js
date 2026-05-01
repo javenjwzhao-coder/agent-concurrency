@@ -250,6 +250,7 @@
     const thresholdGb = thresholdGbForRecord(record);
     const freePercent = freeKvPercent(record);
     const w = finiteNumber(adm.w);
+    const wThreshold = finiteNumber(adm.w_threshold);
     const wAfterOffload = finiteNumber(adm.w_after_offload);
     const effectiveW = wAfterOffload !== null ? wAfterOffload : w;
     const pressure = adm.pressure === true
@@ -265,6 +266,7 @@
       thresholdGb,
       freePercent,
       w,
+      wThreshold,
       wAfterOffload,
       effectiveW,
       pressure,
@@ -307,7 +309,7 @@
     setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.effectiveW)} / T: ${fmtPct(s.threshold)}`,
       "free KV GB / effective headroom W / free-KV threshold percent\n" +
       `free_pct: ${fmtPct(s.freePercent)}\nthreshold_gb: ${fmtGb(s.thresholdGb)}\n` +
-      `raw w: ${fmtW(s.w)}\nw_after_offload: ${fmtW(s.wAfterOffload)}\n` +
+      `raw w: ${fmtW(s.w)}\nw_threshold: ${fmtW(s.wThreshold)}\nw_after_offload: ${fmtW(s.wAfterOffload)}\n` +
       "controller offloads only when free KV percent <= threshold");
     const pressureEl = $("#pressureBadge");
     if (pressureEl) {
@@ -575,6 +577,7 @@
       `s_t:    ${fmt(adm.s_t)}`,
       `s_prev: ${fmt(adm.s_prev)}`,
       `w:      ${fmt(adm.w)}`,
+      `w_threshold: ${fmt(adm.w_threshold)}`,
       `active: ${fmt(adm.active_agents)} / ${fmt(adm.max_active_agents)}`,
       `active_slots: ${fmt(adm.active_agent_slots)}`,
       `queue:  fresh=${fmt(adm.queue && adm.queue.fresh)} ` +
