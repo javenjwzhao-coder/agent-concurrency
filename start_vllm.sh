@@ -734,17 +734,19 @@ import importlib
 import pathlib
 
 import vllm
+import vllm.entrypoints.openai.api_server as api_server
 import vllm.entrypoints.openai.protocol as protocol
 import vllm.entrypoints.openai.serving_chat as serving_chat
 
 target = pathlib.Path(__import__("os").environ["VLLM_PATCH_DIR"]).resolve()
 vllm_file = pathlib.Path(vllm.__file__).resolve()
+api_server_file = pathlib.Path(api_server.__file__).resolve()
 protocol_file = pathlib.Path(protocol.__file__).resolve()
 serving_chat_file = pathlib.Path(serving_chat.__file__).resolve()
 desired = __import__("os").environ["DESIRED_VLLM"]
 version = metadata.version("vllm")
 
-for path in (vllm_file, protocol_file, serving_chat_file):
+for path in (vllm_file, api_server_file, protocol_file, serving_chat_file):
     if not path.is_relative_to(target):
         raise AssertionError(f"Imported vLLM path {path} is not under patched target {target}")
 
@@ -758,12 +760,25 @@ connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector"
 )
 assert hasattr(connector, "AgentAwareOffloadingConnector")
+route_paths = {getattr(route, "path", "") for route in api_server.router.routes}
+missing_routes = {
+    "/agent_kv_cache/offload",
+    "/agent_kv_cache/restore",
+    "/agent_kv_cache/evict",
+} - route_paths
+if missing_routes:
+    raise AssertionError(
+        f"api_server router missing agent KV route(s): {sorted(missing_routes)}; "
+        f"api_server.py={api_server_file}"
+    )
 
 print(f"[INFO] vllm version -> {version}")
 print(f"[INFO] vllm package -> {vllm_file}")
+print(f"[INFO] api_server.py -> {api_server_file}")
 print(f"[INFO] protocol.py -> {protocol_file}")
 print(f"[INFO] serving_chat.py -> {serving_chat_file}")
 print(f"[INFO] connector.py -> {pathlib.Path(connector.__file__).resolve()}")
+print(f"[INFO] agent KV routes -> {sorted(p for p in route_paths if 'agent_kv' in p)}")
 PY
 
     # ── 5. Skip if already running ────────────────────────────────────────────
