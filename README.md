@@ -120,9 +120,10 @@ local Ascend runtime stack (`torch==2.8.0`, `torch-npu==2.8.0.post2`,
 with `VLLM_TARGET_DEVICE=empty` inside the project `.venv`, then clones
 vllm-ascend v0.13.0 into `.vllm-ascend-src/`, initializes submodules, and
 installs it editable for `SOC_VERSION=ascend910_9391` by default. Override
-`VLLM_ASCEND_SOC_VERSION` if the target Ascend chip changes. If GitHub is not
-reachable from the NPU machine, pre-populate those source directories or set
-`VLLM_GIT_URL` / `VLLM_ASCEND_GIT_URL` to an accessible mirror. Set
+`VLLM_ASCEND_SOC_VERSION` if the target Ascend chip changes. Source clones use
+GitHub SSH URLs by default; if SSH is unavailable from the NPU machine,
+pre-populate those source directories or set `VLLM_GIT_URL` /
+`VLLM_ASCEND_GIT_URL` to an accessible mirror or HTTPS URL. Set
 `VLLM_ASCEND_INSTALL_METHOD=wheel` to use the guide's pre-built wheel path
 instead. Before source builds, the script installs the CANN Python build
 dependencies (`sympy`, `numpy<2.0.0`, and related utilities) into `.venv` and
