@@ -52,9 +52,125 @@ wait_for_ready() {
     return 1
 }
 
+list_vllm_worker_pids() {
+    {
+        pgrep -x VLLMWorker_TP 2>/dev/null || true
+        pgrep -f VLLMWorker_TP 2>/dev/null || true
+    } | awk '!seen[$0]++'
+}
+
+snapshot_vllm_worker_pids() {
+    local pid_file="$1"
+    list_vllm_worker_pids > "${pid_file}.workers.before" 2>/dev/null || true
+}
+
+clear_vllm_worker_snapshot() {
+    local pid_file
+    pid_file=$(cfg native.pid_file)
+    rm -f "${pid_file}.workers.before"
+}
+
 stop_vllm_from_pid_file() {
     local pid_file
     pid_file=$(cfg native.pid_file)
+
+    new_vllm_worker_pids_since_snapshot() {
+        local snapshot="${pid_file}.workers.before"
+        local worker_pids pid
+        [ -f "$snapshot" ] || return 0
+        worker_pids=$(list_vllm_worker_pids)
+        for pid in $worker_pids; do
+            if ! grep -qx "$pid" "$snapshot" 2>/dev/null; then
+                echo "$pid"
+            fi
+        done
+    }
+
+    collect_descendant_pids() {
+        local root="$1"
+        local queue="$root"
+        local descendants=""
+        local parent children child
+        while [ -n "$queue" ]; do
+            parent="${queue%% *}"
+            if [ "$queue" = "$parent" ]; then
+                queue=""
+            else
+                queue="${queue#* }"
+            fi
+            children=$(pgrep -P "$parent" 2>/dev/null || true)
+            for child in $children; do
+                descendants="${descendants} ${child}"
+                queue="${queue:+$queue }${child}"
+            done
+        done
+        echo "$descendants"
+    }
+
+    process_group_id() {
+        ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]'
+    }
+
+    dedupe_pids() {
+        local seen="" out="" pid
+        for pid in "$@"; do
+            case "$pid" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            case " $seen " in
+                *" $pid "*) continue ;;
+            esac
+            seen="${seen} ${pid}"
+            out="${out} ${pid}"
+        done
+        echo "$out"
+    }
+
+    send_signal_to_pids() {
+        local signal="$1"
+        shift
+        local pid
+        for pid in "$@"; do
+            case "$pid" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            [ "$pid" = "$$" ] && continue
+            kill "-${signal}" "$pid" 2>/dev/null || true
+        done
+    }
+
+    pids_still_running() {
+        local running="" pid
+        for pid in "$@"; do
+            case "$pid" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            if kill -0 "$pid" 2>/dev/null; then
+                running="${running} ${pid}"
+            fi
+        done
+        echo "$running"
+    }
+
+    wait_for_vllm_shutdown() {
+        local pgid="$1"
+        shift
+        local pids="$*"
+        local running group_running
+        for _ in $(seq 1 15); do
+            running=$(pids_still_running $pids)
+            if [ -n "$pgid" ] && command -v pgrep >/dev/null 2>&1; then
+                group_running=$(pgrep -g "$pgid" 2>/dev/null || true)
+                running=$(dedupe_pids $running $group_running)
+            fi
+            if [ -z "$running" ]; then
+                return 0
+            fi
+            sleep 1
+        done
+        return 1
+    }
+
     if [ ! -f "$pid_file" ]; then
         echo "[WARN] No vLLM PID file found at $pid_file; nothing to kill." >&2
         return 0
@@ -68,25 +184,46 @@ stop_vllm_from_pid_file() {
         return 0
     fi
 
-    if ! kill -0 "$pid" 2>/dev/null; then
+    local descendants worker_pids target_pids pgid self_pgid kill_pgid
+    descendants=""
+    pgid=""
+    kill_pgid=""
+    if kill -0 "$pid" 2>/dev/null; then
+        descendants=$(collect_descendant_pids "$pid")
+        pgid=$(process_group_id "$pid")
+    fi
+    worker_pids=$(new_vllm_worker_pids_since_snapshot)
+    target_pids=$(dedupe_pids "$pid" $descendants $worker_pids)
+
+    if [ -z "$target_pids" ]; then
         echo "[WARN] vLLM PID $pid is not running; removing stale $pid_file" >&2
-        rm -f "$pid_file"
+        rm -f "$pid_file" "${pid_file}.workers.before"
         return 0
     fi
 
-    echo "[ERROR] Killing vLLM PID $pid because startup validation failed." >&2
-    kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 10); do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            rm -f "$pid_file"
-            return 0
-        fi
-        sleep 1
-    done
+    self_pgid=$(process_group_id "$$")
+    if [ -n "$pgid" ] && [ "$pgid" != "$self_pgid" ]; then
+        kill_pgid="$pgid"
+        echo "[ERROR] Killing vLLM process group $pgid rooted at PID $pid because startup validation failed." >&2
+        kill -TERM "-$pgid" 2>/dev/null || true
+    else
+        echo "[ERROR] Killing vLLM process tree rooted at PID $pid because startup validation failed." >&2
+    fi
+    if [ -n "$worker_pids" ]; then
+        echo "[ERROR] Also killing vLLM worker PID(s):$(dedupe_pids $worker_pids)" >&2
+    fi
+    send_signal_to_pids TERM $target_pids
+    if wait_for_vllm_shutdown "$kill_pgid" $target_pids; then
+        rm -f "$pid_file" "${pid_file}.workers.before"
+        return 0
+    fi
 
-    echo "[ERROR] vLLM PID $pid did not exit after SIGTERM; sending SIGKILL." >&2
-    kill -9 "$pid" 2>/dev/null || true
-    rm -f "$pid_file"
+    echo "[ERROR] vLLM processes did not exit after SIGTERM; sending SIGKILL." >&2
+    if [ -n "$kill_pgid" ]; then
+        kill -KILL "-$kill_pgid" 2>/dev/null || true
+    fi
+    send_signal_to_pids KILL $target_pids
+    rm -f "$pid_file" "${pid_file}.workers.before"
 }
 
 verify_agent_kv_offload_route() {
@@ -789,6 +926,7 @@ PY
 
     # ── 6. Launch vllm serve natively ────────────────────────────────────────
     echo "[INFO] Starting native vLLM (model=$(basename $MODEL), tp=$TP, port=$PORT)..."
+    snapshot_vllm_worker_pids "$PID_FILE"
     (
         set +u
         source "$TOOLKIT"
@@ -805,13 +943,21 @@ PY
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
         export OMP_NUM_THREADS=1
 
-        "$VENV/bin/python" "$VLLM_CLI" serve "$MODEL" \
+        VLLM_CMD=("$VENV/bin/python" "$VLLM_CLI" serve "$MODEL" \
           --served-model-name "$SERVED_NAME" \
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
-          --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}' \
-          $EXTRA
+          --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}')
+        if [ -n "$EXTRA" ]; then
+            # shellcheck disable=SC2206
+            EXTRA_ARGS=($EXTRA)
+            VLLM_CMD+=("${EXTRA_ARGS[@]}")
+        fi
+        if command -v setsid >/dev/null 2>&1; then
+            exec setsid "${VLLM_CMD[@]}"
+        fi
+        exec "${VLLM_CMD[@]}"
     ) > /dev/null 2>&1 &
     echo $! > "$PID_FILE"
     echo "[INFO] vLLM PID: $(cat $PID_FILE)"
@@ -829,6 +975,7 @@ if ! wait_for_ready; then
     exit 1
 fi
 verify_agent_kv_offload_route || exit 1
+clear_vllm_worker_snapshot
 
 # Export sidecar geometry for callers of run_abc_bench_instrumented.py
 SC_NUM_LAYERS=$(cfg sidecar.num_layers)

@@ -11,6 +11,9 @@ def test_vllm_patch_exposes_offload_restore_and_compat_routes():
     assert '"/agent_kv_cache/evict"' in PATCH_TEXT
     assert "offload_agent_kv" in PATCH_TEXT
     assert "restore_agent_kv" in PATCH_TEXT
+    assert '"router = APIRouter()\\n"' in PATCH_TEXT
+    assert "agent KV route is not module-level" in PATCH_TEXT
+    assert "api_server.py syntax error" in PATCH_TEXT
 
 
 def test_custom_connector_reuses_offloading_infrastructure():

@@ -672,102 +672,158 @@ def patch_agent_kv_api() -> None:
         print(f"[WARN] api_server.py not found ({API_SERVER})")
         return
     txt = API_SERVER.read_text()
-    if '"/agent_kv_cache/restore"' in txt and '"/agent_kv_cache/offload"' in txt:
-        print("[SKIP] api_server.py already has agent connector routes")
-        return
     route = textwrap.dedent("""\
 
-        async def _agent_kv_json(raw_request: Request):
-            try:
-                return await raw_request.json()
-            except Exception:
-                return {}
+# BEGIN agent-concurrency agent KV API routes
+async def _agent_kv_json(raw_request: Request):
+    try:
+        return await raw_request.json()
+    except Exception:
+        return {}
 
-        def _agent_kv_response(payload, status_code: int = 200):
-            from fastapi.responses import JSONResponse as _AgentKVJSONResponse
-            return _AgentKVJSONResponse(payload, status_code=status_code)
 
-        async def _agent_kv_maybe_await(result):
-            import inspect as _agent_kv_inspect
-            if _agent_kv_inspect.isawaitable(result):
-                return await result
-            return result
+def _agent_kv_response(payload, status_code: int = 200):
+    from fastapi.responses import JSONResponse as _AgentKVJSONResponse
+    return _AgentKVJSONResponse(payload, status_code=status_code)
 
-        @router.post("/agent_kv_cache/offload")
-        async def offload_agent_kv_cache(raw_request: Request):
-            body = await _agent_kv_json(raw_request)
-            agent_id = str(body.get("agent_id") or "")
-            only_ref_cnt_zero = bool(body.get("only_ref_cnt_zero", True))
-            if not agent_id:
-                return _agent_kv_response(
-                    {"evicted": False, "offloaded": False, "reason": "missing agent_id"},
-                    status_code=400,
-                )
-            client = engine_client(raw_request)
-            if not hasattr(client, "offload_agent_kv"):
-                return _agent_kv_response(
-                    {
-                        "evicted": False,
-                        "offloaded": False,
-                        "reason": "engine client missing offload_agent_kv",
-                    },
-                    status_code=501,
-                )
-            result = client.offload_agent_kv(
-                agent_id, only_ref_cnt_zero=only_ref_cnt_zero)
-            result = await _agent_kv_maybe_await(result)
-            return _agent_kv_response(result or {
+
+async def _agent_kv_maybe_await(result):
+    import inspect as _agent_kv_inspect
+    if _agent_kv_inspect.isawaitable(result):
+        return await result
+    return result
+
+
+@router.post("/agent_kv_cache/offload")
+async def offload_agent_kv_cache(raw_request: Request):
+    body = await _agent_kv_json(raw_request)
+    agent_id = str(body.get("agent_id") or "")
+    only_ref_cnt_zero = bool(body.get("only_ref_cnt_zero", True))
+    if not agent_id:
+        return _agent_kv_response(
+            {"evicted": False, "offloaded": False, "reason": "missing agent_id"},
+            status_code=400,
+        )
+    client = engine_client(raw_request)
+    if not hasattr(client, "offload_agent_kv"):
+        return _agent_kv_response(
+            {
                 "evicted": False,
                 "offloaded": False,
-                "reason": "engine returned no result",
-            })
+                "reason": "engine client missing offload_agent_kv",
+            },
+            status_code=501,
+        )
+    result = client.offload_agent_kv(
+        agent_id, only_ref_cnt_zero=only_ref_cnt_zero)
+    result = await _agent_kv_maybe_await(result)
+    return _agent_kv_response(result or {
+        "evicted": False,
+        "offloaded": False,
+        "reason": "engine returned no result",
+    })
 
-        @router.post("/agent_kv_cache/restore")
-        async def restore_agent_kv_cache(raw_request: Request):
-            body = await _agent_kv_json(raw_request)
-            agent_id = str(body.get("agent_id") or "")
-            if not agent_id:
-                return _agent_kv_response(
-                    {"restored": False, "reason": "missing agent_id"},
-                    status_code=400,
-                )
-            client = engine_client(raw_request)
-            if not hasattr(client, "restore_agent_kv"):
-                return _agent_kv_response(
-                    {
-                        "restored": False,
-                        "reason": "engine client missing restore_agent_kv",
-                    },
-                    status_code=501,
-                )
-            result = client.restore_agent_kv(agent_id)
-            result = await _agent_kv_maybe_await(result)
-            return _agent_kv_response(result or {
+
+@router.post("/agent_kv_cache/restore")
+async def restore_agent_kv_cache(raw_request: Request):
+    body = await _agent_kv_json(raw_request)
+    agent_id = str(body.get("agent_id") or "")
+    if not agent_id:
+        return _agent_kv_response(
+            {"restored": False, "reason": "missing agent_id"},
+            status_code=400,
+        )
+    client = engine_client(raw_request)
+    if not hasattr(client, "restore_agent_kv"):
+        return _agent_kv_response(
+            {
                 "restored": False,
-                "reason": "engine returned no result",
-            })
+                "reason": "engine client missing restore_agent_kv",
+            },
+            status_code=501,
+        )
+    result = client.restore_agent_kv(agent_id)
+    result = await _agent_kv_maybe_await(result)
+    return _agent_kv_response(result or {
+        "restored": False,
+        "reason": "engine returned no result",
+    })
 
-        @router.post("/agent_kv_cache/evict")
-        async def evict_agent_kv_cache(raw_request: Request):
-            return await offload_agent_kv_cache(raw_request)
+
+@router.post("/agent_kv_cache/evict")
+async def evict_agent_kv_cache(raw_request: Request):
+    return await offload_agent_kv_cache(raw_request)
+# END agent-concurrency agent KV API routes
     """)
 
-    for anchor in (
+    old_block = re.compile(
+        r"\n[ \t]*(?:# BEGIN agent-concurrency agent KV API routes\n)?"
+        r"[ \t]*async def _agent_kv_json\(raw_request: Request\):.*?"
+        r"[ \t]*@router\.post\(\"/agent_kv_cache/evict\"\)\n"
+        r"[ \t]*async def evict_agent_kv_cache\(raw_request: Request\):\n"
+        r"[ \t]*return await offload_agent_kv_cache\(raw_request\)\n"
+        r"[ \t]*(?:# END agent-concurrency agent KV API routes\n)?",
+        re.DOTALL,
+    )
+    txt, removed = old_block.subn("\n", txt)
+
+    anchor = "router = APIRouter()\n"
+    if anchor in txt:
+        txt = txt.replace(anchor, anchor + route + "\n", 1)
+        API_SERVER.write_text(txt)
+        action = "repositioned" if removed else "added"
+        print(f"[OK] api_server.py: agent offload/restore routes {action}")
+        return
+
+    print("[WARN] Could not find module-level router anchor; trying route anchors", file=sys.stderr)
+    for fallback_anchor in (
         '@router.post("/reset_prefix_cache")',
         '@router.post("/reset_mm_cache")',
         '@router.post("/reset_encoder_cache")',
         '@router.get("/health")',
     ):
-        if anchor in txt:
-            idx = txt.index(anchor)
+        if fallback_anchor in txt:
+            idx = txt.index(fallback_anchor)
             line_start = txt.rfind("\n", 0, idx) + 1
             indent = txt[line_start:idx]
             block = textwrap.indent(route, indent) if indent else route
-            txt = txt.replace(indent + anchor, block + "\n" + indent + anchor, 1)
+            txt = txt.replace(indent + fallback_anchor,
+                              block + "\n" + indent + fallback_anchor,
+                              1)
             API_SERVER.write_text(txt)
-            print("[OK] api_server.py: agent offload/restore routes added")
+            action = "repositioned" if removed else "added"
+            print(f"[OK] api_server.py: agent offload/restore routes {action}")
             return
     print("[WARN] Could not find API route anchor; skipping routes", file=sys.stderr)
+
+
+def _validate_agent_kv_api_routes(errors: list[str]) -> None:
+    if not API_SERVER.exists():
+        return
+    txt = API_SERVER.read_text()
+    try:
+        compile(txt, str(API_SERVER), "exec")
+    except SyntaxError as exc:
+        errors.append(f"api_server.py syntax error: {exc}")
+        return
+
+    for route_path in (
+        '"/agent_kv_cache/offload"',
+        '"/agent_kv_cache/restore"',
+        '"/agent_kv_cache/evict"',
+    ):
+        if route_path not in txt:
+            errors.append(f"api_server.py missing {route_path} route")
+
+    router_idx = txt.find("router = APIRouter()")
+    route_idx = txt.find('@router.post("/agent_kv_cache/offload")')
+    if router_idx < 0 or route_idx < 0:
+        return
+    line_start = txt.rfind("\n", 0, route_idx) + 1
+    if txt[line_start:route_idx]:
+        errors.append("api_server.py agent KV route is not module-level")
+    if route_idx < router_idx:
+        errors.append("api_server.py agent KV route appears before router is defined")
 
 
 def validate() -> None:
@@ -798,12 +854,11 @@ def validate() -> None:
         (CORE_CLIENT, "restore_agent_kv", "core_client.py missing restore forwarding"),
         (ENGINE_CORE, "def restore_agent_kv", "core.py missing restore_agent_kv"),
         (SCHEDULER, "def restore_agent_kv", "scheduler.py missing restore_agent_kv"),
-        (API_SERVER, '"/agent_kv_cache/offload"', "api_server.py missing offload route"),
-        (API_SERVER, '"/agent_kv_cache/restore"', "api_server.py missing restore route"),
     ]
     for path, needle, message in checks:
         if path.exists() and needle not in path.read_text():
             errors.append(message)
+    _validate_agent_kv_api_routes(errors)
 
     if errors:
         for err in errors:
