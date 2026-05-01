@@ -52,6 +52,108 @@ wait_for_ready() {
     return 1
 }
 
+stop_vllm_from_pid_file() {
+    local pid_file
+    pid_file=$(cfg native.pid_file)
+    if [ ! -f "$pid_file" ]; then
+        echo "[WARN] No vLLM PID file found at $pid_file; nothing to kill." >&2
+        return 0
+    fi
+
+    local pid
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    if [ -z "$pid" ]; then
+        echo "[WARN] vLLM PID file is empty: $pid_file" >&2
+        rm -f "$pid_file"
+        return 0
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "[WARN] vLLM PID $pid is not running; removing stale $pid_file" >&2
+        rm -f "$pid_file"
+        return 0
+    fi
+
+    echo "[ERROR] Killing vLLM PID $pid because startup validation failed." >&2
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$pid_file"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "[ERROR] vLLM PID $pid did not exit after SIGTERM; sending SIGKILL." >&2
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$pid_file"
+}
+
+verify_agent_kv_offload_route() {
+    local url="http://localhost:${HOST_PORT}/agent_kv_cache/offload"
+    local response body code
+
+    echo "[INFO] Verifying agent KV offload route: POST $url"
+    if ! response=$(curl -sS --max-time 10 -X POST "$url" \
+            -H "Content-Type: application/json" \
+            -d '{"agent_id":"__startup_probe__"}' \
+            -w $'\n%{http_code}' 2>&1); then
+        echo "[ERROR] Agent KV offload probe failed to reach vLLM:" >&2
+        echo "$response" >&2
+        stop_vllm_from_pid_file
+        return 1
+    fi
+
+    code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    case "$code" in
+        ''|*[!0-9]*)
+            echo "[ERROR] Agent KV offload probe returned invalid HTTP code: $code" >&2
+            echo "[ERROR] Response body: $body" >&2
+            stop_vllm_from_pid_file
+            return 1
+            ;;
+    esac
+
+    if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+        echo "[ERROR] Agent KV offload probe returned HTTP $code" >&2
+        echo "[ERROR] Response body: $body" >&2
+        stop_vllm_from_pid_file
+        return 1
+    fi
+
+    if ! AGENT_KV_PROBE_BODY="$body" python3 - <<'PY'
+import json
+import os
+import sys
+
+body = os.environ.get("AGENT_KV_PROBE_BODY", "")
+try:
+    payload = json.loads(body)
+except Exception as exc:
+    print(f"[ERROR] Agent KV offload probe returned non-JSON body: {exc}", file=sys.stderr)
+    print(body, file=sys.stderr)
+    sys.exit(1)
+
+reason = str(payload.get("reason", ""))
+ok = (
+    payload.get("evicted") is True
+    or payload.get("offloaded") is True
+    or "no tracked KV blocks for agent" in reason
+)
+if not ok:
+    print("[ERROR] Agent KV offload route responded, but payload is not usable:", file=sys.stderr)
+    print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+    sys.exit(1)
+
+print("[INFO] Agent KV offload probe OK: " + json.dumps(payload, sort_keys=True))
+PY
+    then
+        stop_vllm_from_pid_file
+        return 1
+    fi
+}
+
 # =============================================================================
 # NATIVE LAUNCH (no Docker)
 # Creates a project-local uv venv that inherits non-vLLM dependencies from the
@@ -707,7 +809,11 @@ HOST_PORT=$(cfg native.port)
 VLLM_API_KEY=$(cfg native.api_key)
 start_native
 
-wait_for_ready || exit 1
+if ! wait_for_ready; then
+    stop_vllm_from_pid_file
+    exit 1
+fi
+verify_agent_kv_offload_route || exit 1
 
 # Export sidecar geometry for callers of run_abc_bench_instrumented.py
 SC_NUM_LAYERS=$(cfg sidecar.num_layers)
