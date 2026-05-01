@@ -17,6 +17,7 @@ vllm_ascend.kv_offload.npu.NPUOffloadingSpec.
 from __future__ import annotations
 
 import base64
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -112,6 +113,17 @@ class AgentAwareOffloadingConnector(OffloadingConnector):
             return {"restored": False, "reason": "agent-aware scheduler is unavailable"}
         return scheduler.restore_agent_kv(agent_id)
 
+    def release_agent_kv(
+        self,
+        agent_id: str,
+        reason: str = "release",
+    ) -> dict[str, Any]:
+        assert self.connector_scheduler is not None
+        scheduler = self.connector_scheduler
+        if not hasattr(scheduler, "release_agent_kv"):
+            return {"released": False, "reason": "agent-aware scheduler is unavailable"}
+        return scheduler.release_agent_kv(agent_id, reason=reason)
+
 
 class AgentAwareOffloadingScheduler:
     """Scheduler-side policy wrapper around OffloadingConnectorScheduler."""
@@ -125,13 +137,21 @@ class AgentAwareOffloadingScheduler:
         self._agent_to_requests: dict[str, set[str]] = defaultdict(set)
         self._request_to_agent: dict[str, str] = {}
         self._agent_snapshots: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        self._held_agent_requests: dict[str, set[str]] = defaultdict(set)
+        self._held_request_snapshots: dict[str, dict[str, Any]] = {}
+        self._release_ready_req_ids: set[str] = set()
         self._pending_agent_offloads: set[str] = set()
         self._agent_store_jobs: dict[str, str] = {}
         self._agent_store_real_reqs: dict[str, str] = {}
         self._agent_real_req_pending_jobs: dict[str, set[str]] = defaultdict(set)
         self._job_seq = 0
-        self._store_all_new_blocks = bool(
-            extra_config.get("agent_store_all_new_blocks", False))
+        self._hold_finished_requests = bool(
+            extra_config.get("agent_hold_finished_requests", True))
+        try:
+            self._hold_ttl_s = max(
+                0.0, float(extra_config.get("agent_hold_ttl_s", 300.0)))
+        except (TypeError, ValueError):
+            self._hold_ttl_s = 300.0
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
@@ -158,41 +178,88 @@ class AgentAwareOffloadingScheduler:
             }
 
         agent_id = str(agent_id)
-        snapshots = self._agent_snapshots.get(agent_id, {})
+        self._release_stale_holds()
+        held_req_ids = list(self._held_agent_requests.get(agent_id, ()))
+        snapshots = {
+            req_id: self._held_request_snapshots[req_id]
+            for req_id in held_req_ids
+            if req_id in self._held_request_snapshots
+        }
         known_blocks = sum(
             len(snapshot.get("block_hashes", ())) for snapshot in snapshots.values())
         active_reqs = len(self._agent_to_requests.get(agent_id, ()))
-        if known_blocks <= 0 and active_reqs <= 0:
+        if known_blocks <= 0:
             return {
                 "offloaded": False,
                 "pending": False,
-                "known_blocks": 0,
-                "active_requests": 0,
-                "reason": "no tracked KV blocks for agent",
+                "known_blocks": known_blocks,
+                "held_requests": len(snapshots),
+                "active_requests": active_reqs,
+                "reason": "no held KV blocks for agent",
             }
 
         self._pending_agent_offloads.add(agent_id)
+        offload_jobs = sum(
+            len(self._agent_real_req_pending_jobs.get(req_id, ()))
+            for req_id in snapshots)
         return {
             "offloaded": True,
             "pending": True,
             "known_blocks": known_blocks,
+            "held_requests": len(snapshots),
             "active_requests": active_reqs,
+            "offload_jobs": offload_jobs,
             "reason": "queued for async connector offload",
+        }
+
+    def release_agent_kv(
+        self,
+        agent_id: str,
+        reason: str = "release",
+    ) -> dict[str, Any]:
+        if not agent_id:
+            return {"released": False, "reason": "missing agent_id"}
+
+        agent_id = str(agent_id)
+        req_ids = list(self._held_agent_requests.get(agent_id, ()))
+        released_req_ids: list[str] = []
+        pending_req_ids: list[str] = []
+        for req_id in req_ids:
+            if self._request_has_pending_store(req_id):
+                pending_req_ids.append(req_id)
+                continue
+            self._drop_hold(agent_id, req_id)
+            released_req_ids.append(req_id)
+
+        if not self._held_agent_requests.get(agent_id):
+            self._pending_agent_offloads.discard(agent_id)
+
+        return {
+            "released": bool(released_req_ids),
+            "held_requests": len(req_ids),
+            "released_requests": len(released_req_ids),
+            "pending_requests": len(pending_req_ids),
+            "released_request_ids": released_req_ids,
+            "pending_request_ids": pending_req_ids,
+            "reason": reason,
         }
 
     def restore_agent_kv(self, agent_id: str) -> dict[str, Any]:
         if not agent_id:
             return {"restored": False, "reason": "missing agent_id"}
         agent_id = str(agent_id)
+        self._release_stale_holds()
         pending = agent_id in self._pending_agent_offloads
         self._pending_agent_offloads.discard(agent_id)
         known_blocks = sum(
             len(snapshot.get("block_hashes", ()))
             for snapshot in self._agent_snapshots.get(agent_id, {}).values())
+        held_requests = len(self._held_agent_requests.get(agent_id, ()))
         return {
             "restored": True,
             "pending_offload_cleared": pending,
             "known_blocks": known_blocks,
+            "held_requests": held_requests,
             "reason": (
                 "blocks will be loaded by OffloadingConnector prefix lookup "
                 "when the readmitted agent submits its next request"
@@ -214,6 +281,7 @@ class AgentAwareOffloadingScheduler:
         self,
         scheduler_output: Any,
     ) -> OffloadingConnectorMetadata:
+        self._release_stale_holds()
         reqs_to_store: dict[str, Any] = {}
 
         for req_id, new_block_id_groups, preempted in yield_req_data(
@@ -233,22 +301,16 @@ class AgentAwareOffloadingScheduler:
                 continue
 
             self._snapshot_request(req_id, req)
-            agent_id = self._request_to_agent.get(req_id)
-            if not agent_id:
-                continue
-            if agent_id not in self._pending_agent_offloads and not self._store_all_new_blocks:
-                continue
-
-            snapshot = self._agent_snapshots.get(agent_id, {}).get(req_id)
-            if snapshot is None:
-                continue
-            job_id = self._next_agent_store_job_id(agent_id, req_id)
-            store_spec = self._prepare_store(job_id, agent_id, req_id, snapshot)
-            if store_spec is not None:
-                reqs_to_store[job_id] = store_spec
 
         for agent_id in list(self._pending_agent_offloads):
-            for req_id, snapshot in list(self._agent_snapshots.get(agent_id, {}).items()):
+            held_req_ids = list(self._held_agent_requests.get(agent_id, ()))
+            if not held_req_ids:
+                self._pending_agent_offloads.discard(agent_id)
+                continue
+            for req_id in held_req_ids:
+                snapshot = self._held_request_snapshots.get(req_id)
+                if snapshot is None:
+                    continue
                 job_id = self._next_agent_store_job_id(agent_id, req_id)
                 store_spec = self._prepare_store(job_id, agent_id, req_id, snapshot)
                 if store_spec is not None:
@@ -267,11 +329,10 @@ class AgentAwareOffloadingScheduler:
             req_id for req_id in finished_sending
             if str(req_id).startswith(_AGENT_STORE_PREFIX)
         }
+        release_ready = set(self._release_ready_req_ids)
+        self._release_ready_req_ids.clear()
 
         self._base.update_connector_output(connector_output)
-
-        if not agent_finished:
-            return
 
         for req_id in agent_finished:
             agent_id = self._agent_store_jobs.pop(req_id, None)
@@ -282,11 +343,20 @@ class AgentAwareOffloadingScheduler:
                     pending.discard(req_id)
                     if not pending:
                         self._agent_real_req_pending_jobs.pop(real_req_id, None)
+                        if agent_id is not None:
+                            self._drop_hold(agent_id, real_req_id)
+                            if not self._held_agent_requests.get(agent_id):
+                                self._pending_agent_offloads.discard(agent_id)
             if agent_id is not None:
                 logger.debug("Agent %s KV offload store completed via %s",
                              agent_id, req_id)
 
-        remaining = finished_sending - agent_finished
+        for req_id in finished_sending - agent_finished:
+            snapshot = self._held_request_snapshots.get(req_id)
+            if snapshot is not None:
+                self._drop_hold(snapshot.get("agent_id"), req_id)
+
+        remaining = (finished_sending - agent_finished) | release_ready
         try:
             connector_output.finished_sending = remaining
         except Exception:
@@ -302,12 +372,15 @@ class AgentAwareOffloadingScheduler:
         req_id = request.request_id
         self._snapshot_request(req_id, request, block_ids=block_ids)
         agent_id = self._request_to_agent.get(req_id)
-        agent_store_pending = bool(self._agent_real_req_pending_jobs.get(req_id))
         request_being_stored, params = self._base.request_finished(
             request, block_ids)
+        held = False
+        if agent_id and self._hold_finished_requests:
+            held = self._hold_request(agent_id, req_id)
+        agent_store_pending = bool(self._agent_real_req_pending_jobs.get(req_id))
         if agent_id:
             self._agent_to_requests[agent_id].discard(req_id)
-        return request_being_stored or agent_store_pending, params
+        return request_being_stored or agent_store_pending or held, params
 
     def _snapshot_request(
         self,
@@ -367,6 +440,8 @@ class AgentAwareOffloadingScheduler:
             return None
         if not store_output.block_hashes_to_store:
             self._base.manager.touch(block_hashes)
+            if req_id in self._held_request_snapshots:
+                self._mark_held_request_ready_to_free(agent_id, req_id)
             return None
 
         block_hashes_to_store = set(store_output.block_hashes_to_store)
@@ -391,6 +466,56 @@ class AgentAwareOffloadingScheduler:
         logger.debug("Agent %s offloading %d KV blocks via %s",
                      agent_id, len(block_hashes_to_store), job_id)
         return GPULoadStoreSpec(src_block_ids), store_output.store_spec
+
+    def _hold_request(self, agent_id: str, req_id: str) -> bool:
+        snapshot = self._agent_snapshots.get(agent_id, {}).get(req_id)
+        if snapshot is None:
+            return False
+        if not snapshot.get("block_ids") or not snapshot.get("block_hashes"):
+            return False
+        held = dict(snapshot)
+        held["agent_id"] = agent_id
+        held["held_since"] = time.monotonic()
+        self._held_request_snapshots[req_id] = held
+        self._held_agent_requests[agent_id].add(req_id)
+        return True
+
+    def _drop_hold(self, agent_id: str | None, req_id: str) -> None:
+        snapshot = self._held_request_snapshots.pop(req_id, None)
+        if agent_id is None and snapshot is not None:
+            agent_id = snapshot.get("agent_id")
+        if agent_id:
+            held = self._held_agent_requests.get(agent_id)
+            if held is not None:
+                held.discard(req_id)
+                if not held:
+                    self._held_agent_requests.pop(agent_id, None)
+
+    def _mark_held_request_ready_to_free(self, agent_id: str, req_id: str) -> None:
+        if req_id not in self._held_request_snapshots:
+            return
+        self._drop_hold(agent_id, req_id)
+        self._release_ready_req_ids.add(req_id)
+        if not self._held_agent_requests.get(agent_id):
+            self._pending_agent_offloads.discard(agent_id)
+
+    def _request_has_pending_store(self, req_id: str) -> bool:
+        if self._agent_real_req_pending_jobs.get(req_id):
+            return True
+        return bool(self._base._reqs_being_stored.get(req_id))
+
+    def _release_stale_holds(self) -> None:
+        if self._hold_ttl_s <= 0:
+            return
+        cutoff = time.monotonic() - self._hold_ttl_s
+        for req_id, snapshot in list(self._held_request_snapshots.items()):
+            held_since = float(snapshot.get("held_since") or 0.0)
+            if held_since <= 0.0 or held_since > cutoff:
+                continue
+            if self._request_has_pending_store(req_id):
+                continue
+            agent_id = str(snapshot.get("agent_id") or "")
+            self._mark_held_request_ready_to_free(agent_id, req_id)
 
 
 class AgentAwareOffloadingWorker(OffloadingConnectorWorker):
@@ -438,12 +563,10 @@ class AgentAwareOffloadingWorker(OffloadingConnectorWorker):
                             if not real_req_jobs:
                                 self._agent_store_real_req_jobs.pop(
                                     real_req_id, None)
-                                self._agent_store_real_req_done.add(real_req_id)
-                                if real_req_id in self._finished_reqs_waiting_for_store:
-                                    self._finished_reqs_waiting_for_store.remove(
-                                        real_req_id)
-                                    self._agent_store_real_req_done.discard(real_req_id)
-                                    finished_sending.add(real_req_id)
+                                self._agent_store_real_req_done.discard(real_req_id)
+                                self._finished_reqs_waiting_for_store.discard(
+                                    real_req_id)
+                                finished_sending.add(real_req_id)
                 elif req_id in self._finished_reqs_waiting_for_store:
                     if not self._agent_store_real_req_jobs.get(req_id):
                         self._finished_reqs_waiting_for_store.remove(req_id)

@@ -8,11 +8,13 @@ CONNECTOR_TEXT = Path("src/vllm_patches/agent_offloading_connector.py").read_tex
 def test_vllm_patch_exposes_offload_restore_routes():
     assert '"/agent_kv_cache/offload"' in PATCH_TEXT
     assert '"/agent_kv_cache/restore"' in PATCH_TEXT
+    assert '"/agent_kv_cache/release"' in PATCH_TEXT
     legacy_method = "evi" + "ct_agent_kv"
     assert legacy_method not in PATCH_TEXT
     assert legacy_method not in CONNECTOR_TEXT
     assert "offload_agent_kv" in PATCH_TEXT
     assert "restore_agent_kv" in PATCH_TEXT
+    assert "release_agent_kv" in PATCH_TEXT
     assert '"router = APIRouter()\\n"' in PATCH_TEXT
     assert "agent KV route is not module-level" in PATCH_TEXT
     assert "api_server.py syntax error" in PATCH_TEXT
@@ -29,8 +31,18 @@ def test_custom_connector_holds_real_request_for_synthetic_store_jobs():
     assert "_make_agent_store_job_id(agent_id, req_id" in CONNECTOR_TEXT
     assert "_parse_agent_store_job_id(req_id)" in CONNECTOR_TEXT
     assert "_agent_real_req_pending_jobs[req_id].add(job_id)" in CONNECTOR_TEXT
-    assert "return request_being_stored or agent_store_pending, params" in CONNECTOR_TEXT
+    assert "return request_being_stored or agent_store_pending or held, params" in CONNECTOR_TEXT
     assert "finished_sending.add(real_req_id)" in CONNECTOR_TEXT
+
+
+def test_custom_connector_holds_and_releases_finished_agent_requests():
+    assert "_held_agent_requests" in CONNECTOR_TEXT
+    assert "_held_request_snapshots" in CONNECTOR_TEXT
+    assert "held = self._hold_request(agent_id, req_id)" in CONNECTOR_TEXT
+    assert "return request_being_stored or agent_store_pending or held, params" in CONNECTOR_TEXT
+    assert "def release_agent_kv(" in CONNECTOR_TEXT
+    assert "released_request_ids" in CONNECTOR_TEXT
+    assert "_release_stale_holds" in CONNECTOR_TEXT
 
 
 def test_vllm_patch_has_v013_engine_forwarding_anchors():

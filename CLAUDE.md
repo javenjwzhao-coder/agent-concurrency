@@ -211,6 +211,8 @@ Policy order:
 5. If free KV percent is at or below `threshold_percent`, offload
    highest-scoring eligible long idle `tool_call` agents through the
    agent-aware OffloadingConnector.
+   Finished agent requests are held inside vLLM first; short or completed
+   non-offloaded tool calls release the hold through `/agent_kv_cache/release`.
 6. If `w >= 1` and the active-agent cap has room, admit from the waiting
    queue. The percent threshold only controls pressure offload.
 
@@ -234,10 +236,12 @@ Telemetry:
 Control:
 
 - Adds `POST /agent_kv_cache/offload` and `POST /agent_kv_cache/restore`.
+- Adds `POST /agent_kv_cache/release` for releasing held KV without offload.
 - Installs `AgentAwareOffloadingConnector` under vLLM's KV connector package.
 - Reuses vLLM's `OffloadingConnector` async worker and the configured
   vllm-ascend `NPUOffloadingSpec`.
-- Tracks `agent_id -> request_id -> block_ids` in the connector scheduler.
+- Tracks `agent_id -> request_id -> block_ids` and held finished requests in
+  the connector scheduler.
 
 Do not try to offload from sidecar using only `kv_blocks_size_gb`; those fields
 are telemetry. Safe mutation requires connector/scheduler block ownership.
@@ -269,7 +273,7 @@ sidecar:
 ```
 
 Omitted admission values use wrapper defaults. `predictor_model` defaults to
-`prediction.save_model`, offload/restore endpoints default under
+`prediction.save_model`, offload/restore/release endpoints default under
 `sidecar.vllm_url`, and `sidecar.vllm_url` is derived from `llm.base_url` when
 it is not set explicitly.
 

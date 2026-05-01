@@ -66,8 +66,9 @@ Policy:
    delayed by the fresh-task ramp.
 4. **Tool-call KV policy**: when a tool call starts, predict its remaining
    duration. Calls below `short_tool_call_threshold_s` stay resident and are
-   excluded from pressure offload. Longer calls are eligible for the pressure
-   heap. If the predictor is unavailable on a first run, tool calls older than
+   excluded from pressure offload, and their held KV reservation is released.
+   Longer calls keep the vLLM hold and are eligible for the pressure heap. If
+   the predictor is unavailable on a first run, tool calls older than
    `fallback_long_tool_call_s` are treated as long idle candidates.
 5. **Pressure offload**: if free KV percent is at or below
    `threshold_percent`, offload eligible idle `tool_call` agents by
@@ -101,12 +102,14 @@ The vLLM patch provides two capabilities needed for the control loop:
 
 1. Telemetry: OpenAI responses include `kv_blocks_used` and
    `kv_blocks_size_gb` when the request carries `agent_id`.
-2. Control: `POST /agent_kv_cache/offload` marks an agent for connector-backed
-   CPU offload, and `POST /agent_kv_cache/restore` notifies readmission.
+2. Control: `POST /agent_kv_cache/offload` marks held agent KV for
+   connector-backed CPU offload, `POST /agent_kv_cache/release` frees held KV
+   without offload, and `POST /agent_kv_cache/restore` notifies readmission.
 
 The patch installs `AgentAwareOffloadingConnector`, a small subclass/wrapper of
 vLLM's `OffloadingConnector`. It tracks `agent_id -> request_id -> block_ids`,
-uses the existing async transfer worker and the configured
+holds finished agent requests before their blocks reach vLLM's free queue, uses
+the existing async transfer worker and the configured
 `vllm_ascend.kv_offload.npu.NPUOffloadingSpec`, and changes only the save
 decision logic.
 
@@ -219,7 +222,7 @@ sidecar:
 
 The omitted predictor, endpoint, timeout, and short-tool-call settings use the
 wrapper defaults. In particular, `predictor_model` defaults to
-`prediction.save_model`, and offload/restore endpoints default under
+`prediction.save_model`, and offload/restore/release endpoints default under
 `sidecar.vllm_url`. `threshold_percent` is a free-KV threshold, so `10.0`
 means pressure offload begins when free KV capacity is at or below 10% of the
 configured or reported total.

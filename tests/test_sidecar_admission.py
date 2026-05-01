@@ -654,10 +654,15 @@ def test_offloaded_ready_readmit_bypasses_initial_fresh_admit_ramp():
 
 def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
     offloaded: list[str] = []
+    released: list[tuple[str, str]] = []
 
     def offload(cand):
         offloaded.append(cand.agent_id)
         return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    def release(agent_id, reason):
+        released.append((agent_id, reason))
+        return {"released": True, "held_requests": 1}
 
     controller = DynamicAdmissionController(
         enabled=True,
@@ -665,6 +670,7 @@ def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
         short_tool_call_threshold_s=2.0,
         predictor=FakePredictor({"short-agent": 1.0}),
         offload_callback=offload,
+        release_callback=release,
         bytes_per_blk=BYTES_PER_GB,
     )
     policy = controller.on_tool_call_start(
@@ -677,6 +683,8 @@ def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
     )
 
     assert policy["policy"] == "idle_short"
+    assert policy["release_result"]["released"] is True
+    assert released == [("short-agent", "short_tool_call")]
 
     report = controller.on_tick(
         tick=0,
@@ -994,11 +1002,13 @@ def test_failed_pressure_offload_gets_default_reason_without_offload_state():
 
 def test_predictor_unavailable_skips_idle_offload_policy():
     offloaded: list[str] = []
+    released: list[tuple[str, str]] = []
 
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
         offload_callback=lambda cand: offloaded.append(cand.agent_id) or {},
+        release_callback=lambda agent_id, reason: released.append((agent_id, reason)) or {},
     )
 
     policy = controller.on_tool_call_start(
@@ -1025,6 +1035,7 @@ def test_predictor_unavailable_skips_idle_offload_policy():
     assert policy["policy"] == "skipped"
     assert policy["reason"] == "predictor_unavailable"
     assert offloaded == []
+    assert released == []
     assert report["offloads"] == []
     assert report["skipped_candidates"] == [
         {
@@ -1093,6 +1104,25 @@ def test_predictor_unavailable_falls_back_to_elapsed_long_tool_call():
     assert report["offloads"][0]["tool_elapsed_s"] >= 30.0
     assert state_updates["fallback-agent"]["kv_policy"] == "idle_long"
     assert state_updates["fallback-agent"]["fallback_long_tool_call_s"] == 30.0
+
+
+def test_release_agent_kv_uses_release_endpoint_callback():
+    released: list[tuple[str, str]] = []
+
+    def release(agent_id, reason):
+        released.append((agent_id, reason))
+        return {"released": True, "held_requests": 1, "released_requests": 1}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        release_callback=release,
+    )
+
+    result = controller.release_agent_kv("agent", "tool_complete")
+
+    assert result["released"] is True
+    assert result["held_requests"] == 1
+    assert released == [("agent", "tool_complete")]
 
 
 def test_offloaded_ready_lane_admits_before_fresh_agents():

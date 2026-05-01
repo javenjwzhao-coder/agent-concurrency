@@ -258,6 +258,8 @@ class AgentPhaseTracker:
     def run_end(self, outcome: str = "run_complete", detail: str = "agent finished"):
         """Called after conversation.run() returns."""
         end_dt = now_utc()
+        if self.admission_controller is not None:
+            self.admission_controller.release_agent_kv(self.agent_id, "final")
         with _live_lock:
             if self.agent_id in _LIVE_AGENTS:
                 _LIVE_AGENTS[self.agent_id]["state"] = "done"
@@ -299,6 +301,9 @@ class AgentPhaseTracker:
                 if source == "agent":
                     # Agent emitted a text message (not a tool call).
                     # Close the reasoning phase; the agent is now idle.
+                    if self.admission_controller is not None:
+                        self.admission_controller.release_agent_kv(
+                            self.agent_id, "final")
                     self._close_phase(event_dt, outcome="agent_message",
                                       detail="assistant text message")
                     self._open_phase("waiting", event_dt)
@@ -401,6 +406,9 @@ class AgentPhaseTracker:
                         self.agent_id,
                         return_admitted_at=True,
                     )
+                    if not was_offloaded:
+                        self.admission_controller.release_agent_kv(
+                            self.agent_id, "tool_complete")
 
                 # After a tool result the LLM starts reasoning again. If the
                 # agent was offloaded, the wait above can block for a while;
@@ -415,6 +423,8 @@ class AgentPhaseTracker:
 
             # ── error event ──
             if isinstance(event, AgentErrorEvent):
+                if self.admission_controller is not None:
+                    self.admission_controller.release_agent_kv(self.agent_id, "error")
                 self._close_phase(event_dt, outcome="error",
                                   detail=str(getattr(event, "message", "agent error")))
                 self._open_phase("waiting", event_dt)
@@ -1143,6 +1153,8 @@ def parse_args() -> argparse.Namespace:
                     help="vLLM admin endpoint for per-agent KV CPU offload.")
     sc.add_argument("--sidecar-restore-endpoint", default=None,
                     help="vLLM admin endpoint to notify agent KV readmission.")
+    sc.add_argument("--sidecar-release-endpoint", default=None,
+                    help="vLLM admin endpoint to release held agent KV without offload.")
     sc.add_argument("--sidecar-offload-timeout-s", type=float, default=None,
                     help="HTTP timeout for one offload request.")
     sc.add_argument("--sidecar-http-port", type=int, default=0,
@@ -1219,6 +1231,10 @@ def main() -> int:
                 restore_endpoint=(
                     args.sidecar_restore_endpoint
                     or _sidecar.default_restore_endpoint(args.sidecar_vllm_url)
+                ),
+                release_endpoint=(
+                    args.sidecar_release_endpoint
+                    or _sidecar.default_release_endpoint(args.sidecar_vllm_url)
                 ),
                 offload_timeout_s=(
                     args.sidecar_offload_timeout_s

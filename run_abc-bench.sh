@@ -224,6 +224,7 @@ flat_keys = [
     ("SIDECAR_ADMISSION_PREDICTOR_MODEL", "sidecar.admission_control.predictor_model"),
     ("SIDECAR_OFFLOAD_ENDPOINT", "sidecar.admission_control.offload_endpoint"),
     ("SIDECAR_RESTORE_ENDPOINT", "sidecar.admission_control.restore_endpoint"),
+    ("SIDECAR_RELEASE_ENDPOINT", "sidecar.admission_control.release_endpoint"),
     ("SIDECAR_OFFLOAD_TIMEOUT_S", "sidecar.admission_control.offload_timeout_s"),
 ]
 
@@ -387,6 +388,9 @@ build_runner_cmd() {
             if [[ -n "${SIDECAR_RESTORE_ENDPOINT:-}" ]]; then
                 cmd+=(--sidecar-restore-endpoint "$SIDECAR_RESTORE_ENDPOINT")
             fi
+            if [[ -n "${SIDECAR_RELEASE_ENDPOINT:-}" ]]; then
+                cmd+=(--sidecar-release-endpoint "$SIDECAR_RELEASE_ENDPOINT")
+            fi
         fi
     fi
 
@@ -486,6 +490,7 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
         echo "    predictor_model:    ${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}"
         echo "    offload_endpoint:   ${SIDECAR_OFFLOAD_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload}"
         echo "    restore_endpoint:   ${SIDECAR_RESTORE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/restore}"
+        echo "    release_endpoint:   ${SIDECAR_RELEASE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/release}"
         echo "    offload_timeout_s:  ${SIDECAR_OFFLOAD_TIMEOUT_S:-2.0}"
     fi
 fi

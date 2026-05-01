@@ -276,6 +276,7 @@ reason = str(payload.get("reason", ""))
 ok = (
     payload.get("offloaded") is True
     or "no tracked KV blocks for agent" in reason
+    or "no held KV blocks for agent" in reason
 )
 if not ok:
     print("[ERROR] Agent KV offload route responded, but payload is not usable:", file=sys.stderr)
@@ -941,6 +942,7 @@ route_paths = {getattr(route, "path", "") for route in api_server.router.routes}
 missing_routes = {
     "/agent_kv_cache/offload",
     "/agent_kv_cache/restore",
+    "/agent_kv_cache/release",
 } - route_paths
 if missing_routes:
     raise AssertionError(
@@ -988,7 +990,7 @@ PY
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
-          --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}')
+          --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu", "agent_hold_finished_requests": true, "agent_hold_ttl_s": 300.0}}')
         if [ -n "$EXTRA" ]; then
             # shellcheck disable=SC2206
             EXTRA_ARGS=($EXTRA)

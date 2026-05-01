@@ -287,6 +287,12 @@ def default_restore_endpoint(vllm_url: str) -> str:
     return urljoin(base, "agent_kv_cache/restore")
 
 
+def default_release_endpoint(vllm_url: str) -> str:
+    """Return the default local vLLM agent-KV hold-release endpoint."""
+    base = vllm_url.rstrip("/") + "/"
+    return urljoin(base, "agent_kv_cache/release")
+
+
 def _parse_iso_ts(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -360,6 +366,7 @@ class DynamicAdmissionController:
         fallback_long_tool_call_s: float = 30.0,
         offload_endpoint: Optional[str] = None,
         restore_endpoint: Optional[str] = None,
+        release_endpoint: Optional[str] = None,
         offload_timeout_s: float = 2.0,
         exact_freed_gb_timeout_s: float = 1.0,
         exact_freed_gb_poll_interval_s: float = 0.05,
@@ -372,6 +379,7 @@ class DynamicAdmissionController:
         state_update_callback: Optional[Callable[[str, dict[str, Any]], None]] = None,
         offload_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
         restore_callback: Optional[Callable[[str], dict[str, Any]]] = None,
+        release_callback: Optional[Callable[[str, str], dict[str, Any]]] = None,
         session: Optional[requests.Session] = None,
     ) -> None:
         self.enabled = bool(enabled)
@@ -386,6 +394,7 @@ class DynamicAdmissionController:
         self.fallback_long_tool_call_s = max(0.0, float(fallback_long_tool_call_s))
         self.offload_endpoint = str(offload_endpoint or "")
         self.restore_endpoint = str(restore_endpoint) if restore_endpoint else ""
+        self.release_endpoint = str(release_endpoint) if release_endpoint else ""
         self.offload_timeout_s = max(0.1, float(offload_timeout_s))
         self.exact_freed_gb_timeout_s = max(0.0, float(exact_freed_gb_timeout_s))
         self.exact_freed_gb_poll_interval_s = max(
@@ -398,6 +407,7 @@ class DynamicAdmissionController:
         self._state_update_callback = state_update_callback
         self._offload_callback = offload_callback
         self._restore_callback = restore_callback
+        self._release_callback = release_callback
         self._session = session or requests.Session()
 
         self._fresh: deque[AgentLaunchSpec] = deque()
@@ -508,9 +518,12 @@ class DynamicAdmissionController:
             if predicted < self.short_tool_call_threshold_s:
                 self._idle_long.discard(agent_id)
                 self._idle_short.add(agent_id)
+                release_result = self._release_agent_locked(
+                    agent_id, "short_tool_call")
                 event.update({
                     "policy": "idle_short",
                     "reason": "predicted_short",
+                    "release_result": release_result,
                 })
                 self._update_agent_state_locked(
                     agent_id,
@@ -519,6 +532,7 @@ class DynamicAdmissionController:
                         "kv_offloaded": False,
                         "admission_state": "admitted",
                         "predicted_remaining_s": self._round(predicted),
+                        "last_release_result": release_result,
                         "last_kv_policy": event,
                     },
                 )
@@ -586,12 +600,27 @@ class DynamicAdmissionController:
             )
         return (True, admitted_at) if return_admitted_at else True
 
+    def release_agent_kv(self, agent_id: str, reason: str = "release") -> dict[str, Any]:
+        """Release any held vLLM KV blocks for an agent that was not offloaded."""
+        with self._lock:
+            result = self._release_agent_locked(agent_id, reason)
+            self._update_agent_state_locked(
+                agent_id,
+                {"last_release_result": result},
+            )
+            return result
+
     def finish_agent(self, agent_id: str) -> None:
         """Clean up any queued/blocked admission state for a finished agent."""
         with self._lock:
+            release_result = self._release_agent_locked(agent_id, "final")
             event = self._offloaded_events.get(agent_id)
             if event is not None:
                 event.set()
+            self._update_agent_state_locked(
+                agent_id,
+                {"last_release_result": release_result},
+            )
             self._clear_offloaded_locked(agent_id)
 
     def on_tick(
@@ -969,6 +998,8 @@ class DynamicAdmissionController:
                 if agent_id not in self._idle_short:
                     self._idle_long.discard(agent_id)
                     self._idle_short.add(agent_id)
+                    release_result = self._release_agent_locked(
+                        agent_id, "short_tool_call")
                     event = {
                         "ts": iso_utc(now_utc()),
                         "agent_id": agent_id,
@@ -976,6 +1007,7 @@ class DynamicAdmissionController:
                         "predicted_remaining_s": self._round(remaining_s),
                         "threshold_s": self.short_tool_call_threshold_s,
                         "reason": "predicted_short",
+                        "release_result": release_result,
                     }
                     self._update_agent_state_locked(
                         agent_id,
@@ -984,6 +1016,7 @@ class DynamicAdmissionController:
                             "kv_offloaded": False,
                             "admission_state": "admitted",
                             "predicted_remaining_s": self._round(remaining_s),
+                            "last_release_result": release_result,
                             "last_kv_policy": event,
                         },
                     )
@@ -1090,7 +1123,6 @@ class DynamicAdmissionController:
                     self.offload_endpoint,
                     json={
                         "agent_id": cand.agent_id,
-                        "only_ref_cnt_zero": True,
                         "predicted_remaining_s": cand.predicted_remaining_s,
                         "tool_elapsed_s": cand.tool_elapsed_s,
                         "policy_reason": cand.policy_reason,
@@ -1172,6 +1204,36 @@ class DynamicAdmissionController:
             return {**result, **payload, "restored": restored}
         except Exception as exc:
             return {**result, "restored": False, "reason": str(exc)}
+
+    def _release_agent_locked(self, agent_id: str, reason: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"agent_id": agent_id, "release_reason": reason}
+        try:
+            if self._release_callback is not None:
+                payload = self._release_callback(agent_id, reason) or {}
+            else:
+                if not self.release_endpoint:
+                    return {
+                        **result,
+                        "released": False,
+                        "reason": "missing_release_endpoint",
+                    }
+                resp = self._session.post(
+                    self.release_endpoint,
+                    json={"agent_id": agent_id, "reason": reason},
+                    timeout=self.offload_timeout_s,
+                )
+                if resp.status_code >= 400:
+                    return {
+                        **result,
+                        "released": False,
+                        "status_code": resp.status_code,
+                        "reason": resp.text[:300],
+                    }
+                payload = resp.json()
+            released = bool(payload.get("released", False))
+            return {**result, **payload, "released": released}
+        except Exception as exc:
+            return {**result, "released": False, "reason": str(exc)}
 
     def _record_kv_policy_event_locked(self, event: dict[str, Any]) -> None:
         self._kv_policy_events.append(dict(event))
@@ -1519,6 +1581,9 @@ def parse_args() -> argparse.Namespace:
     ac.add_argument("--restore-endpoint", default=None,
                     help="vLLM admin endpoint to notify readmission. Defaults to "
                          "<vllm-url>/agent_kv_cache/restore.")
+    ac.add_argument("--release-endpoint", default=None,
+                    help="vLLM admin endpoint to release held agent KV without "
+                         "offload. Defaults to <vllm-url>/agent_kv_cache/release.")
     ac.add_argument("--offload-timeout-s", type=float, default=None,
                     help="HTTP timeout for one offload request.")
 
@@ -1556,6 +1621,7 @@ def main() -> int:
             fallback_long_tool_call_s=args.fallback_long_tool_call_s,
             offload_endpoint=args.offload_endpoint or default_offload_endpoint(args.vllm_url),
             restore_endpoint=args.restore_endpoint or default_restore_endpoint(args.vllm_url),
+            release_endpoint=args.release_endpoint or default_release_endpoint(args.vllm_url),
             offload_timeout_s=(
                 args.offload_timeout_s if args.offload_timeout_s is not None else 2.0
             ),
