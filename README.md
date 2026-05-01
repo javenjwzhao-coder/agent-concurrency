@@ -36,6 +36,9 @@ Main components:
 | `src/vllm_patches/apply_patches.py` | Patches vLLM/vllm-ascend 0.13.0 to report per-agent KV usage and install the agent-aware offloading connector. |
 | `run_abc-bench.sh` | YAML-driven wrapper that expands config, validates settings, starts the runner, sidecar, and optional predictor build. |
 
+For a diagram-heavy deep dive, see
+[`docs/agent_kv_offload_architecture.md`](docs/agent_kv_offload_architecture.md).
+
 ## Dynamic Admission Control
 
 At each sidecar tick, the controller gathers:
