@@ -23,8 +23,13 @@ def test_dashboard_renders_success_and_failed_offload_markers():
     assert "freed_blocks: ${fmt(ev.freed_blocks)}" in js
     assert "free_blocks: ${fmt(ev.free_blocks_before)} -> ${fmt(ev.free_blocks_after)}" in js
     assert "freed_gb_source: ${fmt(ev.freed_gb_source)}" in js
+    assert "pending: ${fmt(ev.pending)}" in js
+    assert "held_requests: ${fmt(ev.held_requests)}" in js
+    assert "known_blocks: ${fmt(ev.known_blocks)}" in js
+    assert "offload_jobs: ${fmt(ev.offload_jobs)}" in js
     assert "status_code: ${fmt(ev.status_code)}" in js
     assert "reason: ${fmt(ev.reason)}" in js
+    assert "timeout_s: ${fmt(ev.timeout_s)}" in js
     assert "threshold_percent: ${fmt(adm.threshold_percent)}" in js
     assert "threshold_gb: ${fmt(adm.threshold_gb)}" in js
 

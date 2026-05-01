@@ -5,45 +5,118 @@
 # one-off tweaks without adding rarely changed fields back to this file.
 
 llm:
+  # Model name sent to the OpenAI-compatible vLLM server.
+  # This must match a model alias exposed by the server.
   model: "openai/qwen3-32b"
+
+  # Base URL for the OpenAI-compatible API. The wrapper derives sidecar.vllm_url
+  # by stripping the trailing /v1 unless sidecar.vllm_url is set explicitly.
   base_url: "http://127.0.0.1:8027/v1"
+
+  # API key sent to the local server. For local vLLM this is usually a dummy
+  # value, but the OpenAI client still requires one.
   api_key: "sk-local-ascend"
 
 dataset:
+  # Directory containing ABC-Bench task repositories or task definitions.
   root: "/root/jwzhao/tasks/"
+
+  # Maximum number of tasks to launch for this run. Lower this for quick
+  # smoke tests; increase it for full concurrency experiments.
   max_tasks: 50
 
 paths:
+  # Root directory where per-agent working copies are created.
   workspace_root: "/root/jwzhao/abc_runs"
+
+  # Root directory for benchmark outputs, logs, and task result artifacts.
   results_root: "/root/jwzhao/abc_results"
 
 testing:
+  # When true, run each task's validation/tests after the agent finishes.
+  # Disable only when measuring model/tool-call behavior without test cost.
   enabled: true
 
 prediction:
+  # When true, collect tool-call traces and train/use the duration predictor.
   enabled: true
+
+  # Tool calls predicted below this duration are considered short for the
+  # predictor training label. Admission control has its own short-call knob.
   long_call_threshold_s: 2.0
+
+  # Path for the trained duration model. Admission control uses this by default
+  # as sidecar.admission_control.predictor_model when that field is omitted.
   save_model: "./duration_model.joblib"
 
 sidecar:
+  # Enables the live sidecar telemetry loop. Admission control requires this.
   enabled: true
+
+  # Seconds between sidecar ticks. Lower values react faster but add more
+  # polling and dashboard/log traffic.
   interval: 1
 
   # Must match the served model and vLLM KV-cache configuration.
+  # Number of transformer layers contributing KV cache.
   num_layers: 64
+
+  # Number of KV heads per layer. Use the model's KV-head count, not necessarily
+  # its attention-head count.
   num_kv_heads: 8
+
+  # Per-head dimension for K/V tensors.
   head_dim: 128
+
+  # vLLM KV block size in tokens. Must match the server-side block size.
   block_size: 128
+
+  # Total GPU KV blocks available to vLLM. Used to compute free/used GB and
+  # pressure thresholds when vLLM metrics do not expose a reliable total.
   total_gpu_blocks: 1000
 
   # Set to 0 or remove to disable the live dashboard.
   http_port: 8765
 
   admission_control:
+    # Enables dynamic queue admission and agent KV offload decisions.
+    # If false, the sidecar only records telemetry.
     enabled: true
+
+    # Free-KV pressure threshold, as a percent of total KV capacity.
+    # Offload is considered when free KV is <= this value. This is not the
+    # admission gate; w_threshold controls admission.
     threshold_percent: 15.0
+
+    # Admission headroom gate. Queued agents are admitted only when effective
+    # w > w_threshold. Default policy uses w_threshold=2.0, meaning keep enough
+    # headroom for roughly two average active agents before admitting more.
     w_threshold: 2.0
+
+    # Bootstrap pacing before the controller has a stable active-agent average.
+    # The runner admits at most one fresh task per this interval during startup.
     initial_admit_interval_s: 1.0
+
+    # Maximum number of never-started agents admitted per sidecar tick.
+    # Previously offloaded agents use a priority lane and are not counted as
+    # fresh admissions.
     max_fresh_admits_per_tick: 1
+
+    # Hard cap on active admitted agents. Set 0 to disable this cap and let KV
+    # pressure/headroom be the only admission limit.
     max_active_agents: 20
+
+    # Fallback offload eligibility when no predictor model is available or a
+    # prediction cannot be produced. A tool call older than this many seconds is
+    # treated as long/offloadable.
     fallback_long_tool_call_s: 5.0
+
+    # HTTP timeout for POST /agent_kv_cache/offload. This should be long enough
+    # for vLLM's engine/core path to acknowledge the request under pressure.
+    # A timeout is reported as offload_request_timeout.
+    offload_timeout_s: 10.0
+
+    # After an offload is accepted, poll vLLM free blocks for this many seconds
+    # to capture the exact freed_gb delta. If async connector transfer has not
+    # completed yet, the event reports freed_gb_source: pending_async.
+    exact_freed_gb_timeout_s: 5.0

@@ -219,6 +219,7 @@ Policy order:
 Successful offload records report freed memory from the exact vLLM free-block
 delta (`free_blocks_after - free_blocks_before`) or an explicit endpoint value.
 The sidecar does not replace missing `freed_gb` with candidate KV estimates.
+Async connector offloads report `pending_async` until that exact delta is visible.
 
 The waiting queue has two lanes: previously offloaded agents first, then fresh
 agents FIFO.
@@ -271,12 +272,15 @@ sidecar:
     initial_admit_interval_s: 1.0
     max_active_agents: 32
     fallback_long_tool_call_s: 5.0
+    offload_timeout_s: 10.0
+    exact_freed_gb_timeout_s: 5.0
 ```
 
 Omitted admission values use wrapper defaults. `predictor_model` defaults to
 `prediction.save_model`, offload/restore/release endpoints default under
 `sidecar.vllm_url`, and `sidecar.vllm_url` is derived from `llm.base_url` when
-it is not set explicitly.
+it is not set explicitly. Accepted async offloads may report
+`freed_gb_source: pending_async` until vLLM reports the exact free-block delta.
 
 ## Output Artifacts
 

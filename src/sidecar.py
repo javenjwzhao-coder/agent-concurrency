@@ -62,6 +62,13 @@ except ImportError:
 
 # ─────────────────────────────────────── constants ────────────────────────────
 
+DEFAULT_OFFLOAD_TIMEOUT_S = 10.0
+DEFAULT_EXACT_FREED_GB_TIMEOUT_S = 5.0
+try:
+    _REQUEST_TIMEOUT_EXCEPTIONS = (requests.exceptions.Timeout,)
+except AttributeError:  # test fallback when requests is stubbed out
+    _REQUEST_TIMEOUT_EXCEPTIONS = ()
+
 _DTYPE_BYTES: dict[str, int] = {
     "float32": 4, "float16": 2, "bfloat16": 2,
     "float8_e4m3fn": 1, "float8_e5m2": 1, "int8": 1,
@@ -368,8 +375,8 @@ class DynamicAdmissionController:
         offload_endpoint: Optional[str] = None,
         restore_endpoint: Optional[str] = None,
         release_endpoint: Optional[str] = None,
-        offload_timeout_s: float = 2.0,
-        exact_freed_gb_timeout_s: float = 1.0,
+        offload_timeout_s: float = DEFAULT_OFFLOAD_TIMEOUT_S,
+        exact_freed_gb_timeout_s: float = DEFAULT_EXACT_FREED_GB_TIMEOUT_S,
         exact_freed_gb_poll_interval_s: float = 0.05,
         vllm_url: Optional[str] = None,
         total_gpu_blocks: int = 0,
@@ -739,7 +746,11 @@ class DynamicAdmissionController:
                             offload_result.update(observed)
                             offload_result["freed_gb"] = self._round(freed_gb)
                         else:
-                            offload_result["freed_gb_source"] = "unavailable_exact"
+                            offload_result["freed_gb_source"] = (
+                                "pending_async"
+                                if offload_result.get("pending")
+                                else "unavailable_exact"
+                            )
                     if freed_gb is None:
                         freed_gb = 0.0
                     current_free_gb += max(0.0, freed_gb)
@@ -1147,6 +1158,14 @@ class DynamicAdmissionController:
             if not offloaded and not merged.get("reason"):
                 merged["reason"] = "offload_rejected_without_reason"
             return merged
+        except _REQUEST_TIMEOUT_EXCEPTIONS as exc:
+            return {
+                **result,
+                "offloaded": False,
+                "reason": "offload_request_timeout",
+                "timeout_s": self._round(self.offload_timeout_s),
+                "error": str(exc),
+            }
         except Exception as exc:
             return {**result, "offloaded": False, "reason": str(exc)}
 
@@ -1593,6 +1612,9 @@ def parse_args() -> argparse.Namespace:
                          "offload. Defaults to <vllm-url>/agent_kv_cache/release.")
     ac.add_argument("--offload-timeout-s", type=float, default=None,
                     help="HTTP timeout for one offload request.")
+    ac.add_argument("--exact-freed-gb-timeout-s", type=float, default=None,
+                    help="How long to poll vLLM free blocks after an accepted "
+                         "offload before reporting pending async accounting.")
 
     dash = p.add_argument_group("live dashboard (optional)")
     dash.add_argument("--http-port", type=int, default=0,
@@ -1631,7 +1653,14 @@ def main() -> int:
             restore_endpoint=args.restore_endpoint or default_restore_endpoint(args.vllm_url),
             release_endpoint=args.release_endpoint or default_release_endpoint(args.vllm_url),
             offload_timeout_s=(
-                args.offload_timeout_s if args.offload_timeout_s is not None else 2.0
+                args.offload_timeout_s
+                if args.offload_timeout_s is not None
+                else DEFAULT_OFFLOAD_TIMEOUT_S
+            ),
+            exact_freed_gb_timeout_s=(
+                args.exact_freed_gb_timeout_s
+                if args.exact_freed_gb_timeout_s is not None
+                else DEFAULT_EXACT_FREED_GB_TIMEOUT_S
             ),
             vllm_url=args.vllm_url,
             total_gpu_blocks=args.total_gpu_blocks,

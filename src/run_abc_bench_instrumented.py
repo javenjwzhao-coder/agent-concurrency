@@ -1159,6 +1159,9 @@ def parse_args() -> argparse.Namespace:
                     help="vLLM admin endpoint to release held agent KV without offload.")
     sc.add_argument("--sidecar-offload-timeout-s", type=float, default=None,
                     help="HTTP timeout for one offload request.")
+    sc.add_argument("--sidecar-exact-freed-gb-timeout-s", type=float, default=None,
+                    help="How long the sidecar polls vLLM free blocks after an "
+                         "accepted offload before marking accounting pending.")
     sc.add_argument("--sidecar-http-port", type=int, default=0,
                     help="Bind a live HTTP/SSE feed for the dashboard on this "
                          "port (0 disables).")
@@ -1241,7 +1244,11 @@ def main() -> int:
                 ),
                 offload_timeout_s=(
                     args.sidecar_offload_timeout_s
-                    if args.sidecar_offload_timeout_s is not None else 2.0
+                    if args.sidecar_offload_timeout_s is not None else 10.0
+                ),
+                exact_freed_gb_timeout_s=(
+                    args.sidecar_exact_freed_gb_timeout_s
+                    if args.sidecar_exact_freed_gb_timeout_s is not None else 5.0
                 ),
                 vllm_url=args.sidecar_vllm_url,
                 total_gpu_blocks=args.sidecar_total_gpu_blocks,

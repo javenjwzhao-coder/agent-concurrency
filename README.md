@@ -86,7 +86,8 @@ Policy:
    Successful offload records report `freed_gb` only from an exact vLLM
    free-block delta (`free_blocks_after - free_blocks_before`) or from an
    explicit endpoint value; the sidecar does not substitute the candidate's
-   estimated KV size.
+   estimated KV size. Async connector offloads report `pending_async` until
+   that exact delta is visible.
 6. **Admission**: when effective `w > w_threshold` and the active-agent cap has
    room, launch queued agents. `threshold_percent` is not an admission gate; it
    only decides when pressure offload should run.
@@ -220,6 +221,8 @@ sidecar:
     max_fresh_admits_per_tick: 1
     max_active_agents: 32
     fallback_long_tool_call_s: 5.0
+    offload_timeout_s: 10.0
+    exact_freed_gb_timeout_s: 5.0
 ```
 
 The omitted predictor, endpoint, timeout, and short-tool-call settings use the
@@ -229,6 +232,8 @@ wrapper defaults. In particular, `predictor_model` defaults to
 means pressure offload begins when free KV capacity is at or below 10% of the
 configured or reported total. `w_threshold` is an admission headroom threshold,
 so `2.0` admits queued agents only after effective `w` is greater than two.
+Accepted async offloads may report `freed_gb_source: pending_async` until vLLM
+reports the exact free-block delta.
 
 Then run:
 

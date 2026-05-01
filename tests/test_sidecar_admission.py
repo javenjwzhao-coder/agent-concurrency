@@ -361,6 +361,47 @@ def test_successful_offload_without_exact_measurement_does_not_fake_freed_gb():
     assert report["offloads"][0]["freed_gb_source"] == "unavailable_exact"
 
 
+def test_pending_async_offload_without_exact_measurement_reports_pending_source():
+    def offload(cand):
+        return {
+            "offloaded": True,
+            "pending": True,
+            "held_requests": 1,
+            "known_blocks": 2,
+            "offload_jobs": 1,
+            "reason": "queued for async connector offload",
+        }
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        predictor=FakePredictor({"agent": 5.0}),
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 2,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    offload_report = report["offloads"][0]
+    assert offload_report["offloaded"] is True
+    assert "freed_gb" not in offload_report
+    assert offload_report["freed_gb_source"] == "pending_async"
+    assert offload_report["pending"] is True
+    assert offload_report["held_requests"] == 1
+    assert offload_report["known_blocks"] == 2
+
+
 def test_successful_offload_reports_exact_freed_gb_from_vllm_free_blocks_delta():
     def offload(cand):
         return {"offloaded": True, "reason": "queued"}

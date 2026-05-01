@@ -107,6 +107,8 @@ ticks it already rendered.
         "freed_blocks": 48, "free_blocks_before": 120,
         "free_blocks_after": 168,
         "freed_gb_source": "vllm_free_blocks_delta",
+        "pending": false, "held_requests": 1,
+        "known_blocks": 48, "offload_jobs": 1,
         "predicted_remaining_s": 8.0, "e_s": 4.0,
         "status_code": 200, "reason": "ok" },
       { "agent_id": "...", "offloaded": false,

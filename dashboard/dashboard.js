@@ -525,6 +525,11 @@
           `freed_blocks: ${fmt(ev.freed_blocks)}\n` +
           `free_blocks: ${fmt(ev.free_blocks_before)} -> ${fmt(ev.free_blocks_after)}\n` +
           `freed_gb_source: ${fmt(ev.freed_gb_source)}\n` +
+          `pending: ${fmt(ev.pending)}\n` +
+          `held_requests: ${fmt(ev.held_requests)}\n` +
+          `known_blocks: ${fmt(ev.known_blocks)}\n` +
+          `offload_jobs: ${fmt(ev.offload_jobs)}\n` +
+          `reason: ${fmt(ev.reason)}\n` +
           `e_s:      ${fmt(ev.e_s)}\n` +
           `kv_gb:    ${fmt(ev.kv_gb)}\n` +
           `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
@@ -534,6 +539,8 @@
           `agent: ${ev.agent_id}\n` +
           `status_code: ${fmt(ev.status_code)}\n` +
           `reason: ${fmt(ev.reason)}\n` +
+          `timeout_s: ${fmt(ev.timeout_s)}\n` +
+          `error: ${fmt(ev.error)}\n` +
           `offloaded: ${fmt(ev.offloaded)}\n` +
           `freed_gb: ${fmt(ev.freed_gb)}\n` +
           `kv_gb: ${fmt(ev.kv_gb)}\n` +
