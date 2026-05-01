@@ -229,6 +229,40 @@ def test_pressure_threshold_alone_does_not_block_fresh_admission():
     assert controller.pending_counts()["fresh"] == 0
 
 
+def test_percent_threshold_derives_pressure_from_total_capacity():
+    offloaded: list[str] = []
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_percent=10.0,
+        predictor=FakePredictor({"agent": 5.0}),
+        offload_callback=offload,
+    )
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 3.0, "kv_total_gb": 32.0},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "kv_blocks": 1,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["threshold_percent"] == 10.0
+    assert report["threshold_gb"] == 3.2
+    assert report["C_percent"] == 9.375
+    assert report["pressure"] is True
+    assert offloaded == ["agent"]
+
+
 def test_pressure_offload_pops_highest_score_idle_agent():
     offloaded: list[str] = []
 

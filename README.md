@@ -69,8 +69,9 @@ Policy:
    excluded from pressure offload. Longer calls are eligible for the pressure
    heap. If the predictor is unavailable on a first run, tool calls older than
    `fallback_long_tool_call_s` are treated as long idle candidates.
-5. **Pressure offload**: if `C <= threshold_gb`, offload eligible idle
-   `tool_call` agents by descending score:
+5. **Pressure offload**: if free KV percent is at or below
+   `threshold_percent`, offload eligible idle `tool_call` agents by
+   descending score:
 
    ```
    offload_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
@@ -85,7 +86,7 @@ Policy:
    explicit endpoint value; the sidecar does not substitute the candidate's
    estimated KV size.
 6. **Admission**: when effective `w >= 1` and the active-agent cap has room,
-   launch queued agents. `threshold_gb` is not an admission gate; it only
+   launch queued agents. `threshold_percent` is not an admission gate; it only
    decides when pressure offload should run.
    Previously offloaded agents use a priority lane ahead of fresh agents. Fresh
    agents are admitted one at a time by default; the configured run path has
@@ -209,7 +210,7 @@ removing the trailing `/v1`.
 sidecar:
   admission_control:
     enabled: true
-    threshold_gb: 3.2
+    threshold_percent: 10.0
     initial_admit_interval_s: 1.0
     max_fresh_admits_per_tick: 1
     max_active_agents: 32
@@ -219,7 +220,9 @@ sidecar:
 The omitted predictor, endpoint, timeout, and short-tool-call settings use the
 wrapper defaults. In particular, `predictor_model` defaults to
 `prediction.save_model`, and offload/restore endpoints default under
-`sidecar.vllm_url`.
+`sidecar.vllm_url`. `threshold_percent` is a free-KV threshold, so `10.0`
+means pressure offload begins when free KV capacity is at or below 10% of the
+configured or reported total.
 
 Then run:
 

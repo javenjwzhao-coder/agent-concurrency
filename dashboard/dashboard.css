@@ -198,7 +198,7 @@ main {
   stroke: #c47a07 !important;
 }
 
-/* Offload threshold line: used% where free KV reaches admission.threshold_gb. */
+/* Offload threshold line: used% where free KV reaches admission.threshold_percent. */
 .kv-line-threshold,
 .vis-graph-group1 {
   stroke: #ff003d !important;

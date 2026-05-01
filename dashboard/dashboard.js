@@ -220,7 +220,7 @@
   //   done      — finished agents
   //   launched  — total agents the sidecar has ever seen (cumulative)
   //   heap      — admission.heap_candidates length (eligible to offload)
-  //   C, threshold, pressure — free KV GB, configured offload threshold,
+  //   C, threshold, pressure — free KV GB, free-KV offload threshold percent,
   //                            and whether the controller is in pressure
   //   queue     — fresh + offloaded_ready waiting to be admitted
   //   vllmPreemptions — cumulative vLLM scheduler preemptions from /metrics
@@ -246,12 +246,15 @@
     const adm = record.admission || {};
     const q = adm.queue || {};
     const C = finiteNumber(adm.C);
-    const threshold = finiteNumber(adm.threshold_gb);
+    const threshold = thresholdFreePercent(record);
+    const thresholdGb = thresholdGbForRecord(record);
+    const freePercent = freeKvPercent(record);
     const w = finiteNumber(adm.w);
     const wAfterOffload = finiteNumber(adm.w_after_offload);
     const effectiveW = wAfterOffload !== null ? wAfterOffload : w;
     const pressure = adm.pressure === true
-      || (C !== null && threshold !== null && C <= threshold);
+      || (freePercent !== null && threshold !== null && freePercent <= threshold)
+      || (C !== null && thresholdGb !== null && C <= thresholdGb);
     return {
       live: reasoning + tool_call + waiting,
       reasoning, tool_call, waiting, offloaded, done, launched,
@@ -259,6 +262,8 @@
       heap: (adm.heap_candidates || []).length,
       C,
       threshold,
+      thresholdGb,
+      freePercent,
       w,
       wAfterOffload,
       effectiveW,
@@ -299,10 +304,11 @@
       "agents whose KV is currently offloaded to CPU (offloaded_waiting)");
     setBadge("heapCount", `heap: ${s.heap}`,
       "agents currently in the offload heap (eligible to be offloaded)");
-    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.effectiveW)} / T: ${fmtGb(s.threshold)}`,
-      "free KV GB / effective headroom W / pressure threshold GB\n" +
+    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.effectiveW)} / T: ${fmtPct(s.threshold)}`,
+      "free KV GB / effective headroom W / free-KV threshold percent\n" +
+      `free_pct: ${fmtPct(s.freePercent)}\nthreshold_gb: ${fmtGb(s.thresholdGb)}\n` +
       `raw w: ${fmtW(s.w)}\nw_after_offload: ${fmtW(s.wAfterOffload)}\n` +
-      "controller offloads only when C <= threshold");
+      "controller offloads only when free KV percent <= threshold");
     const pressureEl = $("#pressureBadge");
     if (pressureEl) {
       pressureEl.classList.toggle("badge-pressure-active", s.pressure);
@@ -530,6 +536,7 @@
           `freed_gb: ${fmt(ev.freed_gb)}\n` +
           `kv_gb: ${fmt(ev.kv_gb)}\n` +
           `C: ${fmt(adm.C)}\n` +
+          `threshold_percent: ${fmt(adm.threshold_percent)}\n` +
           `threshold_gb: ${fmt(adm.threshold_gb)}`,
           tooltipBase);
       }
@@ -561,8 +568,10 @@
       `ts:     ${record.ts}`,
       `tick:   ${record.tick}`,
       `C:      ${fmt(adm.C)}`,
+      `C_percent: ${fmt(adm.C_percent)}`,
+      `threshold_percent: ${fmt(adm.threshold_percent)}`,
       `threshold_gb: ${fmt(adm.threshold_gb)}`,
-      `pressure: ${pressureLabel(adm)}`,
+      `pressure: ${pressureLabel(record)}`,
       `s_t:    ${fmt(adm.s_t)}`,
       `s_prev: ${fmt(adm.s_prev)}`,
       `w:      ${fmt(adm.w)}`,
@@ -776,7 +785,7 @@
   function totalKvGb(record) {
     const vllm = record.vllm || {};
     const adm = record.admission || {};
-    const directTotal = finiteNumber(vllm.kv_total_gb);
+    const directTotal = finiteNumber(vllm.kv_total_gb) ?? finiteNumber(adm.kv_total_gb);
     if (directTotal !== null && directTotal > 0) return directTotal;
 
     const used = finiteNumber(vllm.kv_used_gb);
@@ -791,12 +800,48 @@
     return null;
   }
 
-  function offloadThresholdPct(record) {
+  function thresholdFreePercent(record) {
     const adm = record.admission || {};
-    const offloadThresholdGb = finiteNumber(adm.threshold_gb);
+    const direct = finiteNumber(adm.threshold_percent);
+    if (direct !== null) return Math.max(0, Math.min(100, direct));
+
+    const thresholdGb = finiteNumber(adm.threshold_gb);
     const total = totalKvGb(record);
-    if (offloadThresholdGb === null || total === null || total <= 0) return null;
-    return Math.max(0, Math.min(100, 100 * (1 - offloadThresholdGb / total)));
+    if (thresholdGb === null || total === null || total <= 0) return null;
+    return Math.max(0, Math.min(100, 100 * thresholdGb / total));
+  }
+
+  function thresholdGbForRecord(record) {
+    const adm = record.admission || {};
+    const direct = finiteNumber(adm.threshold_gb);
+    if (direct !== null) return direct;
+
+    const thresholdPct = thresholdFreePercent(record);
+    const total = totalKvGb(record);
+    if (thresholdPct === null || total === null || total <= 0) return null;
+    return total * thresholdPct / 100;
+  }
+
+  function freeKvPercent(record) {
+    const adm = record.admission || {};
+    const direct = finiteNumber(adm.C_percent);
+    if (direct !== null) return Math.max(0, Math.min(100, direct));
+
+    const free = finiteNumber(adm.C);
+    const total = totalKvGb(record);
+    if (free !== null && total !== null && total > 0) {
+      return Math.max(0, Math.min(100, 100 * free / total));
+    }
+
+    const usedPct = finiteNumber(record.vllm && record.vllm.kv_cache_used_pct);
+    if (usedPct !== null) return Math.max(0, Math.min(100, 100 - usedPct));
+    return null;
+  }
+
+  function offloadThresholdPct(record) {
+    const freeThresholdPct = thresholdFreePercent(record);
+    if (freeThresholdPct === null) return null;
+    return Math.max(0, Math.min(100, 100 - freeThresholdPct));
   }
 
   function vllmSchedulerPreemptions(vllm) {
@@ -1006,6 +1051,10 @@
     return v === null || v === undefined ? "n/a" : Number(v).toFixed(2);
   }
 
+  function fmtPct(v) {
+    return v === null || v === undefined ? "n/a" : `${Number(v).toFixed(1)}%`;
+  }
+
   function fmtW(v) {
     return v === null || v === undefined ? "n/a" : Number(v).toFixed(2);
   }
@@ -1014,12 +1063,17 @@
     return v === null || v === undefined ? "n/a" : String(v);
   }
 
-  function pressureLabel(adm) {
+  function pressureLabel(record) {
+    const adm = record && record.admission ? record.admission : {};
     if (adm && adm.pressure === true) return "yes";
     const C = finiteNumber(adm && adm.C);
-    const threshold = finiteNumber(adm && adm.threshold_gb);
-    if (C === null || threshold === null) return "unknown";
-    return C <= threshold ? "yes" : "no";
+    const thresholdGb = thresholdGbForRecord(record || {});
+    if (C !== null && thresholdGb !== null) return C <= thresholdGb ? "yes" : "no";
+
+    const freePct = freeKvPercent(record || {});
+    const thresholdPct = thresholdFreePercent(record || {});
+    if (freePct === null || thresholdPct === null) return "unknown";
+    return freePct <= thresholdPct ? "yes" : "no";
   }
 
   function formatHMS(d) {

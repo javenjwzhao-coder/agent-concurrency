@@ -208,10 +208,11 @@ Policy order:
    pressure offload. Predicted-long calls remain eligible for the heap. If no
    predictor is available yet, tool calls older than
    `fallback_long_tool_call_s` are treated as long idle candidates.
-5. If `C <= threshold_gb`, offload highest-scoring eligible long idle
-   `tool_call` agents through the agent-aware OffloadingConnector.
-6. If `C > threshold_gb`, `w >= 1`, and the active-agent cap has room, admit
-   from the waiting queue.
+5. If free KV percent is at or below `threshold_percent`, offload
+   highest-scoring eligible long idle `tool_call` agents through the
+   agent-aware OffloadingConnector.
+6. If `w >= 1` and the active-agent cap has room, admit from the waiting
+   queue. The percent threshold only controls pressure offload.
 
 Successful offload records report freed memory from the exact vLLM free-block
 delta (`free_blocks_after - free_blocks_before`) or an explicit endpoint value.
@@ -261,7 +262,7 @@ Important admission-control knobs:
 sidecar:
   admission_control:
     enabled: true
-    threshold_gb: 3.2
+    threshold_percent: 10.0
     initial_admit_interval_s: 1.0
     max_active_agents: 32
     fallback_long_tool_call_s: 5.0

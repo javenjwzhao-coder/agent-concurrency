@@ -25,6 +25,7 @@ def test_dashboard_renders_success_and_failed_offload_markers():
     assert "freed_gb_source: ${fmt(ev.freed_gb_source)}" in js
     assert "status_code: ${fmt(ev.status_code)}" in js
     assert "reason: ${fmt(ev.reason)}" in js
+    assert "threshold_percent: ${fmt(adm.threshold_percent)}" in js
     assert "threshold_gb: ${fmt(adm.threshold_gb)}" in js
 
     assert "OFFLOAD_FAIL" in html
@@ -44,7 +45,7 @@ def test_dashboard_exposes_controller_pressure_badge():
     assert "pressureBadge" in js
     assert "W: ${fmtW(s.effectiveW)}" in js
     assert "w_after_offload: ${fmtW(s.wAfterOffload)}" in js
-    assert "controller offloads only when C <= threshold" in js
+    assert "controller offloads only when free KV percent <= threshold" in js
     assert "badge-pressure-active" in css
 
 

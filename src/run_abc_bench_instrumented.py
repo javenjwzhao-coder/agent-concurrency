@@ -1121,8 +1121,10 @@ def parse_args() -> argparse.Namespace:
                          "Must match --num-gpu-blocks-override in vLLM args.")
     sc.add_argument("--sidecar-admission-control", action="store_true",
                     help="Let the embedded sidecar admit queued agents dynamically.")
-    sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=0.1,
-                    help="Free KV-cache GB threshold that triggers pressure offload.")
+    sc.add_argument("--sidecar-admission-threshold-percent", type=float, default=10.0,
+                    help="Free KV-cache percent threshold that triggers pressure offload.")
+    sc.add_argument("--sidecar-admission-threshold-gb", type=float, default=None,
+                    help=argparse.SUPPRESS)
     sc.add_argument("--sidecar-initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     sc.add_argument("--sidecar-max-fresh-admits-per-tick", type=int, default=1,
@@ -1203,6 +1205,7 @@ def main() -> int:
         if args.sidecar_admission_control:
             _sc_admission_controller = _sidecar.DynamicAdmissionController(
                 enabled=True,
+                threshold_percent=args.sidecar_admission_threshold_percent,
                 threshold_gb=args.sidecar_admission_threshold_gb,
                 initial_admit_interval_s=args.sidecar_initial_admit_interval_s,
                 max_fresh_admits_per_tick=args.sidecar_max_fresh_admits_per_tick,

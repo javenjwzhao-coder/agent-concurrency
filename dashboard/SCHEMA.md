@@ -58,11 +58,15 @@ ticks it already rendered.
   "admission": {                               // Controller decisions for this tick.
     "enabled": true,                           // bool
     "C":       5.59,                           // float — free KV in GB this tick
+    "C_percent": 16.67,                        // float — free KV as percent of total capacity
+    "kv_total_gb": 33.55,                      // float — total KV capacity used for percent thresholds
     "s_t":     0.31,                           // float — current avg KV usage of active agents
     "s_prev":  0.29,                           // float|null — previous tick's avg
     "w":       18.03,                          // float|null — headroom = C / min(s_t, s_prev)
     "w_after_offload": null,                   // float|null — recomputed headroom after pressure offload, when changed
-    "threshold_gb": 3.2,                       // float — configured pressure threshold
+    "threshold_percent": 10.0,                 // float — configured free-KV pressure threshold
+    "threshold_gb": 3.36,                      // float|null — derived pressure threshold for this tick
+    "threshold_source": "percent",             // string — percent, or gb_legacy for old configs
     "fallback_long_tool_call_s": 30.0,         // float — first-run predictor fallback age
     "first_saturation_seen": false,            // bool — initial launch ramp is disabled after first SAT
     "initial_admit_interval_s": 2.0,           // float — fresh-admit interval before first SAT
@@ -72,7 +76,7 @@ ticks it already rendered.
     "active_agent_slots": 16,                  // int|null — remaining cap slots, null when uncapped
     "next_initial_admit_in_s": null,           // float|null — seconds until next ramped fresh admit
     "active_agent_samples": 4,                 // int
-    "pressure": true,                          // bool — controller pressure gate, C <= threshold_gb
+    "pressure": true,                          // bool — pressure gate, C_percent <= threshold_percent
 
     "queue": {                                 // pending admissions
       "fresh": 2,
@@ -146,15 +150,15 @@ ticks it already rendered.
 | Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active) |
 | Phase color                          | reasoning=blue, tool_call=green, waiting=gray, offloaded_waiting=orange, done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
-| Offload threshold line               | `100 * (1 - admission.threshold_gb / vllm.kv_total_gb)` per tick    |
-| Free-KV pressure badge               | `admission.C`, `admission.threshold_gb`, and `admission.pressure`   |
+| Offload threshold line               | `100 - admission.threshold_percent` per tick                        |
+| Free-KV pressure badge               | `admission.C`, `admission.C_percent`, `admission.threshold_percent`, and `admission.pressure` |
 | vLLM preempt badge                   | `vllm.scheduler_preemptions_total` from vLLM `/metrics`             |
 | OFFLOAD marker (red)                 | `admission.offloads[*]` where `offloaded == true` (KV pushed to CPU) |
 | OFFLOAD_FAIL marker (dashed orange)  | `admission.offloads[*]` where `offloaded == false` (attempt rejected) |
 | ADMIT marker (green)                 | `admission.admissions[*].admitted_at` where `admitted && !previously_offloaded`; falls back to tick `ts` if absent |
 | READMIT marker (cyan)                | `admission.admissions[*].admitted_at` where `admitted && previously_offloaded`; falls back to tick `ts` if absent |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low effective headroom blocks queued agents) |
-| Event tooltip                        | `{ts, tick, C, threshold_gb, pressure, w, s_t, s_prev}` plus event-specific fields |
+| Event tooltip                        | `{ts, tick, C, C_percent, threshold_percent, threshold_gb, pressure, w, s_t, s_prev}` plus event-specific fields |
 | Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick           |
 
 ## Replay

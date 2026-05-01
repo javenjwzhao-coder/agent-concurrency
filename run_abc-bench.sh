@@ -214,6 +214,7 @@ flat_keys = [
     ("SIDECAR_HTTP_PORT",        "sidecar.http_port"),
     ("SIDECAR_HTTP_HOST",        "sidecar.http_host"),
     ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
+    ("SIDECAR_ADMISSION_THRESHOLD_PERCENT", "sidecar.admission_control.threshold_percent"),
     ("SIDECAR_ADMISSION_THRESHOLD_GB", "sidecar.admission_control.threshold_gb"),
     ("SIDECAR_INITIAL_ADMIT_INTERVAL_S", "sidecar.admission_control.initial_admit_interval_s"),
     ("SIDECAR_MAX_FRESH_ADMITS_PER_TICK", "sidecar.admission_control.max_fresh_admits_per_tick"),
@@ -365,7 +366,6 @@ build_runner_cmd() {
         if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
             cmd+=(
                 --sidecar-admission-control
-                --sidecar-admission-threshold-gb "${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
                 --sidecar-initial-admit-interval-s "${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
                 --sidecar-max-fresh-admits-per-tick "${SIDECAR_MAX_FRESH_ADMITS_PER_TICK:-1}"
                 --sidecar-max-active-agents "${SIDECAR_MAX_ACTIVE_AGENTS:-0}"
@@ -373,6 +373,11 @@ build_runner_cmd() {
                 --sidecar-fallback-long-tool-call-s "${SIDECAR_FALLBACK_LONG_TOOL_CALL_S:-30.0}"
                 --sidecar-offload-timeout-s "${SIDECAR_OFFLOAD_TIMEOUT_S:-2.0}"
             )
+            if [[ -n "${SIDECAR_ADMISSION_THRESHOLD_GB:-}" && -z "${SIDECAR_ADMISSION_THRESHOLD_PERCENT:-}" ]]; then
+                cmd+=(--sidecar-admission-threshold-gb "$SIDECAR_ADMISSION_THRESHOLD_GB")
+            else
+                cmd+=(--sidecar-admission-threshold-percent "${SIDECAR_ADMISSION_THRESHOLD_PERCENT:-10.0}")
+            fi
             if [[ -n "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
                 cmd+=(--sidecar-admission-predictor-model "$SIDECAR_ADMISSION_PREDICTOR_MODEL")
             fi
@@ -468,7 +473,11 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
     fi
     echo "    admission_control:  ${SIDECAR_ADMISSION_ENABLED:-false}"
     if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
-        echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB:-0.1}"
+        if [[ -n "${SIDECAR_ADMISSION_THRESHOLD_GB:-}" && -z "${SIDECAR_ADMISSION_THRESHOLD_PERCENT:-}" ]]; then
+            echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB} (deprecated)"
+        else
+            echo "    threshold_percent:  ${SIDECAR_ADMISSION_THRESHOLD_PERCENT:-10.0}"
+        fi
         echo "    initial_admit_s:    ${SIDECAR_INITIAL_ADMIT_INTERVAL_S:-2.0}"
         echo "    fresh_admits/tick:  ${SIDECAR_MAX_FRESH_ADMITS_PER_TICK:-1}"
         echo "    max_active_agents:  ${SIDECAR_MAX_ACTIVE_AGENTS:-0}"

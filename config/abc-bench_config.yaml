@@ -41,7 +41,7 @@ sidecar:
 
   admission_control:
     enabled: true
-    threshold_gb: 3.2
+    threshold_percent: 15.0
     initial_admit_interval_s: 1.0
     max_fresh_admits_per_tick: 1
     max_active_agents: 20

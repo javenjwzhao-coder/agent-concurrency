@@ -351,7 +351,8 @@ class DynamicAdmissionController:
         self,
         *,
         enabled: bool = False,
-        threshold_gb: float = 0.1,
+        threshold_percent: float = 10.0,
+        threshold_gb: Optional[float] = None,
         initial_admit_interval_s: float = 2.0,
         max_fresh_admits_per_tick: int = 1,
         max_active_agents: int = 0,
@@ -374,7 +375,10 @@ class DynamicAdmissionController:
         session: Optional[requests.Session] = None,
     ) -> None:
         self.enabled = bool(enabled)
-        self.threshold_gb = max(0.0, float(threshold_gb))
+        self.threshold_percent = min(100.0, max(0.0, float(threshold_percent)))
+        self._legacy_threshold_gb = (
+            None if threshold_gb is None else max(0.0, float(threshold_gb))
+        )
         self.initial_admit_interval_s = max(0.0, float(initial_admit_interval_s))
         self.max_fresh_admits_per_tick = max(1, int(max_fresh_admits_per_tick))
         self.max_active_agents = max(0, int(max_active_agents))
@@ -601,23 +605,35 @@ class DynamicAdmissionController:
         """Apply one admission-control decision tick and return log metadata."""
         with self._lock:
             free_gb = self._kv_free_gb(vllm_info, bytes_per_blk)
+            total_gb = self._kv_total_gb(vllm_info, bytes_per_blk)
+            free_percent = self._kv_free_percent(free_gb, total_gb)
+            threshold_gb = self._pressure_threshold_gb(total_gb)
+            threshold_percent = self._pressure_threshold_percent(total_gb)
             avg_gb, avg_count = self._average_active_kv_gb(agents, bytes_per_blk)
             active_agents = self._active_agent_count(agents)
             prev_avg_gb = self._prev_avg_gb
             w = self._headroom(free_gb, avg_gb, prev_avg_gb)
+            pressure = (
+                threshold_gb is not None
+                and free_gb is not None
+                and free_gb <= threshold_gb
+            )
             report: dict[str, Any] = {
                 "enabled": self.enabled,
                 "tick": tick,
                 "C": self._round(free_gb),
+                "C_percent": self._round(free_percent),
+                "kv_total_gb": self._round(total_gb),
                 "s_t": self._round(avg_gb),
                 "s_prev": self._round(prev_avg_gb),
                 "active_agent_samples": avg_count,
                 "w": self._round(w),
-                "threshold_gb": self.threshold_gb,
-                "pressure": (
-                    free_gb is not None
-                    and free_gb <= self.threshold_gb
+                "threshold_percent": self._round(threshold_percent),
+                "threshold_gb": self._round(threshold_gb),
+                "threshold_source": (
+                    "gb_legacy" if self._legacy_threshold_gb is not None else "percent"
                 ),
+                "pressure": pressure,
                 "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
                 "first_saturation_seen": self._first_saturation_seen,
                 "initial_admit_interval_s": self.initial_admit_interval_s,
@@ -669,7 +685,11 @@ class DynamicAdmissionController:
 
             current_free_gb = free_gb
             current_free_blocks = self._kv_free_blocks(vllm_info)
-            while current_free_gb <= self.threshold_gb and heap:
+            while (
+                threshold_gb is not None
+                and current_free_gb <= threshold_gb
+                and heap
+            ):
                 _, _, cand = heapq.heappop(heap)
                 offload_result = self._offload_candidate(cand)
                 report["offloads"].append(offload_result)
@@ -705,7 +725,9 @@ class DynamicAdmissionController:
                 elif "offload_attempt_failed" not in report["reasons"]:
                     report["reasons"].append("offload_attempt_failed")
 
-            if current_free_gb <= self.threshold_gb:
+            if threshold_gb is None:
+                report["reasons"].append("missing_kv_total_gb")
+            elif current_free_gb <= threshold_gb:
                 report["reasons"].append("pressure_threshold")
 
             effective_w = self._headroom(current_free_gb, avg_gb, prev_avg_gb)
@@ -769,6 +791,55 @@ class DynamicAdmissionController:
         if total is not None and used is not None:
             return max(0.0, total - used)
         return None
+
+    def _kv_total_gb(
+        self, vllm_info: dict[str, Any], bytes_per_blk: int
+    ) -> Optional[float]:
+        if self.total_gpu_blocks > 0:
+            return self.total_gpu_blocks * bytes_per_blk / 1e9
+
+        total_blocks = _finite_float(vllm_info.get("num_gpu_blocks_total"))
+        if total_blocks is not None and total_blocks > 0:
+            return total_blocks * bytes_per_blk / 1e9
+
+        total = _finite_float(vllm_info.get("kv_total_gb"))
+        if total is not None and total > 0:
+            return total
+
+        free = _finite_float(vllm_info.get("kv_free_gb"))
+        used = _finite_float(vllm_info.get("kv_used_gb"))
+        if free is not None and used is not None and free + used > 0:
+            return free + used
+
+        pct = _finite_float(vllm_info.get("kv_cache_used_pct"))
+        if pct is not None and free is not None:
+            used_ratio = pct / 100.0 if pct > 1.0 else pct
+            if 0.0 <= used_ratio < 1.0:
+                return free / (1.0 - used_ratio)
+        return None
+
+    def _kv_free_percent(
+        self, free_gb: Optional[float], total_gb: Optional[float]
+    ) -> Optional[float]:
+        if free_gb is None or total_gb is None or total_gb <= 0:
+            return None
+        return max(0.0, min(100.0, 100.0 * free_gb / total_gb))
+
+    def _pressure_threshold_gb(self, total_gb: Optional[float]) -> Optional[float]:
+        if self._legacy_threshold_gb is not None:
+            return self._legacy_threshold_gb
+        if total_gb is None or total_gb <= 0:
+            return None
+        return total_gb * self.threshold_percent / 100.0
+
+    def _pressure_threshold_percent(
+        self, total_gb: Optional[float]
+    ) -> Optional[float]:
+        if self._legacy_threshold_gb is None:
+            return self.threshold_percent
+        if total_gb is None or total_gb <= 0:
+            return None
+        return min(100.0, max(0.0, 100.0 * self._legacy_threshold_gb / total_gb))
 
     def _kv_free_blocks(self, vllm_info: dict[str, Any]) -> Optional[int]:
         free_blocks = _finite_float(vllm_info.get("num_gpu_blocks_free"))
@@ -1425,8 +1496,10 @@ def parse_args() -> argparse.Namespace:
     ac = p.add_argument_group("dynamic admission control")
     ac.add_argument("--admission-control", action="store_true",
                     help="Enable admission/offload policy decisions in the sidecar.")
-    ac.add_argument("--admission-threshold-gb", type=float, default=0.1,
-                    help="Free KV-cache GB threshold that triggers pressure offload.")
+    ac.add_argument("--admission-threshold-percent", type=float, default=10.0,
+                    help="Free KV-cache percent threshold that triggers pressure offload.")
+    ac.add_argument("--admission-threshold-gb", type=float, default=None,
+                    help=argparse.SUPPRESS)
     ac.add_argument("--initial-admit-interval-s", type=float, default=2.0,
                     help="Before first SAT, admit at most one fresh task per interval.")
     ac.add_argument("--max-fresh-admits-per-tick", type=int, default=1,
@@ -1474,6 +1547,7 @@ def main() -> int:
     if args.admission_control:
         admission_controller = DynamicAdmissionController(
             enabled=True,
+            threshold_percent=args.admission_threshold_percent,
             threshold_gb=args.admission_threshold_gb,
             initial_admit_interval_s=args.initial_admit_interval_s,
             max_fresh_admits_per_tick=args.max_fresh_admits_per_tick,
