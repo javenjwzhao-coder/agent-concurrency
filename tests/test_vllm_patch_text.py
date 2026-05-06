@@ -48,6 +48,14 @@ def test_custom_connector_holds_and_releases_finished_agent_requests():
     assert "_release_stale_holds" in CONNECTOR_TEXT
 
 
+def test_custom_connector_reports_resident_and_offloadable_blocks_separately():
+    assert "resident_kv_blocks" in CONNECTOR_TEXT
+    assert "offloadable_kv_blocks" in CONNECTOR_TEXT
+    assert "resident_blocks = len(block_ids)" in CONNECTOR_TEXT
+    assert "offloadable_blocks = len(block_hashes)" in CONNECTOR_TEXT
+    assert '"kv_blocks": total_resident_blocks' in CONNECTOR_TEXT
+
+
 def test_vllm_patch_has_v013_engine_forwarding_anchors():
     assert "reset_running_requests: bool = False, reset_connector: bool = False" in PATCH_TEXT
     assert "return self.engine_core.reset_prefix_cache(" in PATCH_TEXT

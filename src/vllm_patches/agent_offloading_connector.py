@@ -305,7 +305,8 @@ class AgentAwareOffloadingScheduler:
 
         snapshots = self._agent_snapshots.get(agent_id, {})
         requests: list[dict[str, Any]] = []
-        total_blocks = 0
+        total_resident_blocks = 0
+        total_offloadable_blocks = 0
         scoped_req_ids = active_req_ids | held_req_ids
         for req_id in sorted(scoped_req_ids):
             active = req_id in active_req_ids
@@ -314,12 +315,17 @@ class AgentAwareOffloadingScheduler:
                 self._held_request_snapshots.get(req_id)
                 if held else snapshots.get(req_id)
             )
+            block_ids = list((snapshot or {}).get("block_ids") or ())
             block_hashes = list((snapshot or {}).get("block_hashes") or ())
-            blocks = len(block_hashes)
-            total_blocks += blocks
+            resident_blocks = len(block_ids)
+            offloadable_blocks = len(block_hashes)
+            total_resident_blocks += resident_blocks
+            total_offloadable_blocks += offloadable_blocks
             requests.append({
                 "request_id": req_id,
-                "kv_blocks": blocks,
+                "kv_blocks": resident_blocks,
+                "resident_kv_blocks": resident_blocks,
+                "offloadable_kv_blocks": offloadable_blocks,
                 "active": active,
                 "held": held,
             })
@@ -331,8 +337,10 @@ class AgentAwareOffloadingScheduler:
         return {
             "agent_id": agent_id,
             "available": True,
-            "kv_blocks": total_blocks,
-            "kv_blocks_used": total_blocks,
+            "kv_blocks": total_resident_blocks,
+            "kv_blocks_used": total_resident_blocks,
+            "resident_kv_blocks": total_resident_blocks,
+            "offloadable_kv_blocks": total_offloadable_blocks,
             "active_requests": len(active_req_ids),
             "held_requests": len(held_req_ids),
             "pending_offload": agent_id in self._pending_agent_offloads,
@@ -471,21 +479,20 @@ class AgentAwareOffloadingScheduler:
         else:
             block_ids = list(block_ids)
 
-        num_blocks = min(
+        if not block_ids:
+            self._drop_snapshot(agent_id, req_id)
+            return
+
+        num_offloadable_blocks = min(
             len(block_ids) // self._base.block_size_factor,
             len(getattr(request, "block_hashes", ()))
             // self._base.block_size_factor,
             getattr(request, "num_tokens", 0) // self._base.offloaded_block_size,
         )
-        if num_blocks <= 0:
-            self._drop_snapshot(agent_id, req_id)
-            return
-
-        block_hashes = list(self._base._get_block_hashes(
-            request, end_idx=num_blocks))
-        if not block_hashes:
-            self._drop_snapshot(agent_id, req_id)
-            return
+        block_hashes: list[Any] = []
+        if num_offloadable_blocks > 0:
+            block_hashes = list(self._base._get_block_hashes(
+                request, end_idx=num_offloadable_blocks))
 
         self._agent_snapshots[agent_id][req_id] = {
             "block_ids": block_ids,

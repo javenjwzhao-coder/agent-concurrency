@@ -855,8 +855,13 @@ class DynamicAdmissionController:
                 payload = resp.json()
                 if payload.get("available") is False:
                     raise RuntimeError(str(payload.get("reason") or "usage unavailable"))
-                blocks = payload.get("kv_blocks")
+                block_source = "resident_kv_blocks"
+                blocks = payload.get("resident_kv_blocks")
                 if blocks is None:
+                    block_source = "kv_blocks"
+                    blocks = payload.get("kv_blocks")
+                if blocks is None:
+                    block_source = "kv_blocks_used"
                     blocks = payload.get("kv_blocks_used")
                 if not isinstance(blocks, int):
                     blocks = int(blocks)
@@ -873,6 +878,11 @@ class DynamicAdmissionController:
                         "held_requests": int(payload.get("held_requests") or 0),
                         "pending_offload": bool(payload.get("pending_offload")),
                         "offload_jobs": int(payload.get("offload_jobs") or 0),
+                        "resident_kv_blocks": blocks,
+                        "offloadable_kv_blocks": int(
+                            payload.get("offloadable_kv_blocks") or 0
+                        ),
+                        "block_source": block_source,
                     },
                 }
                 agent.update(patch)

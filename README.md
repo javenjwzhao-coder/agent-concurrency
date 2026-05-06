@@ -297,7 +297,9 @@ Aggregate:
 - vLLM runs through vllm-ascend on Ascend NPUs.
 - `agent_id` is propagated through `litellm_extra_body`.
 - Per-agent response KV fields remain summary telemetry; live admission/offload
-  sizing should use the scheduler-backed usage endpoint.
+  sizing should use the scheduler-backed usage endpoint. The sidecar uses
+  native resident block counts (`resident_kv_blocks` / `kv_blocks`) rather than
+  hash-backed offload block counts when estimating current NPU memory.
 - Actual offload must happen inside vLLM's scheduler/block pool.
 - Dynamic admission is opt-in to preserve baseline benchmark behavior.
 - Tool-call prediction estimates remaining wall-clock tool time, not full task

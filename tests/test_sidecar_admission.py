@@ -229,6 +229,42 @@ def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
     assert offloaded == [("stale-small", 5.0)]
 
 
+def test_scheduler_usage_prefers_resident_kv_blocks_for_memory_sizing():
+    session = FakeUsageSession({
+        "running": {
+            "available": True,
+            "kv_blocks": 2,
+            "resident_kv_blocks": 7,
+            "offloadable_kv_blocks": 2,
+            "active_requests": 1,
+            "held_requests": 0,
+            "pending_offload": False,
+            "offload_jobs": 0,
+        },
+    })
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        session=session,
+        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
+    )
+    agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 5.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["s_t"] == 7.0
+    assert agents["running"]["kv_blocks"] == 7
+    assert agents["running"]["kv_gb"] == 7.0
+    assert agents["running"]["last_kv_usage"]["resident_kv_blocks"] == 7
+    assert agents["running"]["last_kv_usage"]["offloadable_kv_blocks"] == 2
+    assert agents["running"]["last_kv_usage"]["block_source"] == "resident_kv_blocks"
+
+
 def test_scheduler_usage_failure_preserves_live_kv_snapshot():
     session = FakeUsageSession({
         "running": FakeUsageResponse(status_code=500, text="boom"),
