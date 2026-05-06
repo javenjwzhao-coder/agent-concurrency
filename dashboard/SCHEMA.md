@@ -163,7 +163,6 @@ ticks it already rendered.
 | Free-KV pressure badge               | `admission.C`, `admission.C_percent`, `admission.threshold_percent`, and `admission.pressure` |
 | vLLM preempt badge                   | `vllm.scheduler_preemptions_total` from vLLM `/metrics`             |
 | OFFLOAD marker (red)                 | `admission.offloads[*]` where `offloaded == true` (KV pushed to CPU) |
-| OFFLOAD_FAIL marker (dashed orange)  | `admission.offloads[*]` where `offloaded == false` (attempt rejected) |
 | ADMIT marker (green)                 | `admission.admissions[*].admitted_at` where `admitted && !previously_offloaded`; falls back to tick `ts` if absent |
 | READMIT marker (cyan)                | `admission.admissions[*].admitted_at` where `admitted && previously_offloaded`; falls back to tick `ts` if absent |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low effective headroom blocks queued agents) |
@@ -172,7 +171,7 @@ ticks it already rendered.
 
 ## Replay
 
-Two ways to view a finished `sidecar.log`:
+Three ways to view a finished `sidecar.log`:
 
 1. **Server replay**: `python -m sidecar_http --replay path/to/sidecar.log [--speed 1.0]`
    starts the same server but the publisher reads ticks from the file at the
@@ -184,4 +183,10 @@ Two ways to view a finished `sidecar.log`:
    file and don't want to start a Python server. SSE is disconnected while
    in replay mode; click *Back to live* to reconnect.
 
-Both paths consume the exact same JSON contract above.
+3. **Standalone snapshot**: after loading live history or replaying a log,
+   click *Save standalone HTML*. The browser downloads a single `.html` file
+   with the currently loaded tick records plus dashboard assets embedded. That
+   file opens on another machine without `/state`, `/stream`, or a separate
+   `sidecar.log`.
+
+All paths consume the exact same JSON contract above.

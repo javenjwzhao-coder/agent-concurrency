@@ -67,6 +67,11 @@ button:hover {
   color: #e8f0ff;
 }
 
+button:disabled {
+  cursor: progress;
+  opacity: 0.62;
+}
+
 #pauseBtn.paused {
   background: #3a1f08;
   border-color: #7a4a14;
@@ -263,7 +268,6 @@ main {
 /* Colors match the vertical event lines exactly */
 
 .event-offload      { background: #ef4444; color: #1a0000; }
-.event-offload-fail { background: #fb923c; color: #1a0b00; border: 1px dashed #fed7aa; }
 .event-admit        { background: #22c55e; color: #001a0a; }
 .event-readmit      { background: #38bdf8; color: #00131d; }
 .event-sat          { background: #fde047; color: #3a2e00; }
@@ -305,12 +309,6 @@ main {
 }
 
 .event-line-offload { background: #ef4444; box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.32); }
-.event-line-offload-fail {
-  background: repeating-linear-gradient(
-    to bottom, #fb923c 0 5px, transparent 5px 10px
-  );
-  box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.32);
-}
 .event-line-admit   { background: #22c55e; box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.32); }
 .event-line-readmit { background: #38bdf8; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.32); }
 .event-line-sat {

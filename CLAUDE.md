@@ -317,13 +317,16 @@ an HTTP/SSE server alongside the tick loop and serves the dashboard at
 - Vertical event markers for admission decisions: OFFLOAD (red), ADMIT (green),
   READMIT (purple), and SAT (dashed yellow, when `w < 1`).
 
-Two ways to view a finished run:
+Three ways to view a finished run:
 
 1. `python -m sidecar_http --replay path/to/sidecar.log [--speed 1.0]` — same
    server, but the publisher reads ticks from the log file at the chosen speed.
 2. In-browser: open the dashboard, click *Open sidecar.log…* and pick a
    JSONL file. The browser parses it client-side; SSE is disconnected while in
    replay mode.
+3. After either live viewing or in-browser replay, click *Save standalone HTML*
+   to download a single self-contained snapshot. The saved file embeds the
+   loaded tick records and opens on another machine without `sidecar.log`.
 
 The JSON contract for `/state` and `/stream` is documented in
 [dashboard/SCHEMA.md](dashboard/SCHEMA.md). Both endpoints emit the existing

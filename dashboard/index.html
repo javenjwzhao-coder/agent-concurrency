@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>Agent Concurrency · Live</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
+  <link id="dashboardCssAsset" rel="stylesheet" href="/static/dashboard.css">
   <!--
     vis-timeline (includes both Timeline and Graph2D) is loaded from a CDN.
     If the dashboard host has no internet, download these two files into
@@ -11,15 +11,16 @@
       https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css
       https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js
   -->
-  <link rel="stylesheet"
+  <link id="visCssAsset" rel="stylesheet"
         href="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css">
 </head>
 <body>
   <header>
-    <h1>Agent Concurrency · Live</h1>
+    <h1 id="dashboardTitle">Agent Concurrency · Live</h1>
     <div class="controls">
       <button id="pauseBtn" type="button">Pause auto-scroll</button>
       <button id="replayBtn" type="button">Open sidecar.log…</button>
+      <button id="saveSnapshotBtn" type="button">Save standalone HTML</button>
       <button id="liveBtn" type="button" hidden>Back to live</button>
       <input id="logFile" type="file" accept=".log,.jsonl,.json,text/plain"
              style="display:none">
@@ -42,7 +43,6 @@
       <span class="chip phase-done">done</span>
       <span class="legend-title">Event</span>
       <span class="chip event-offload">OFFLOAD <span id="eventCountOffload" class="event-count">0</span></span>
-      <span class="chip event-offload-fail">OFFLOAD_FAIL <span id="eventCountOffloadFail" class="event-count">0</span></span>
       <span class="chip event-admit">ADMIT <span id="eventCountAdmit" class="event-count">0</span></span>
       <span class="chip event-readmit">READMIT <span id="eventCountReadmit" class="event-count">0</span></span>
       <span class="chip event-sat">SAT <span id="eventCountSat" class="event-count">0</span></span>
@@ -57,7 +57,7 @@
     <div id="timeline"></div>
   </main>
 
-  <script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
-  <script src="/static/dashboard.js"></script>
+  <script id="visJsAsset" src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+  <script id="dashboardJsAsset" src="/static/dashboard.js"></script>
 </body>
 </html>

@@ -10,15 +10,13 @@ def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
-def test_dashboard_renders_success_and_failed_offload_markers():
+def test_dashboard_renders_successful_offload_markers_only():
     js = _read("dashboard/dashboard.js")
     html = _read("dashboard/index.html")
     css = _read("dashboard/dashboard.css")
 
     assert "OFFLOAD: ${ev.agent_id}" in js
-    assert "OFFLOAD_FAIL: ${ev.agent_id}" in js
     assert "adm.offloads || []" in js
-    assert 'addEvent(ts, "offload-fail"' in js
     assert "freed_gb: ${fmt(ev.freed_gb)}" in js
     assert "freed_blocks: ${fmt(ev.freed_blocks)}" in js
     assert "free_blocks: ${fmt(ev.free_blocks_before)} -> ${fmt(ev.free_blocks_after)}" in js
@@ -27,17 +25,15 @@ def test_dashboard_renders_success_and_failed_offload_markers():
     assert "held_requests: ${fmt(ev.held_requests)}" in js
     assert "known_blocks: ${fmt(ev.known_blocks)}" in js
     assert "offload_jobs: ${fmt(ev.offload_jobs)}" in js
-    assert "status_code: ${fmt(ev.status_code)}" in js
     assert "reason: ${fmt(ev.reason)}" in js
-    assert "timeout_s: ${fmt(ev.timeout_s)}" in js
-    assert "threshold_percent: ${fmt(adm.threshold_percent)}" in js
-    assert "threshold_gb: ${fmt(adm.threshold_gb)}" in js
 
-    assert "OFFLOAD_FAIL" in html
-    assert "event-offload-fail" in css
-    assert "event-line-offload-fail" in css
+    assert "OFFLOAD_FAIL" not in html
+    assert "OFFLOAD_FAIL: ${ev.agent_id}" not in js
+    assert 'addEvent(ts, "offload-fail"' not in js
+    assert "event-offload-fail" not in css
+    assert "event-line-offload-fail" not in css
     assert "eventCountOffload" in html
-    assert "eventCountOffloadFail" in html
+    assert "eventCountOffloadFail" not in html
     assert "event-count" in css
 
 
@@ -118,3 +114,19 @@ def test_dashboard_agent_labels_show_elapsed_then_fixed_e2e_time():
     assert 'agent.state === "done"' in js
     assert "started_at" in schema
     assert "finished_at" in schema
+
+
+def test_dashboard_exports_standalone_html_snapshots():
+    js = _read("dashboard/dashboard.js")
+    html = _read("dashboard/index.html")
+    schema = _read("dashboard/SCHEMA.md")
+
+    assert "saveSnapshotBtn" in html
+    assert "Save standalone HTML" in html
+    assert "dashboardSnapshotData" in js
+    assert "records: []" in js
+    assert "buildStandaloneHtml" in js
+    assert "safeScriptJson(payload)" in js
+    assert "loadSnapshotRecords(embedded.ticks, embedded.meta)" in js
+    assert "assetTextForExport" in js
+    assert "without `/state`, `/stream`, or a separate" in schema

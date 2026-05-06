@@ -13,6 +13,9 @@
  *             client-side and replay every tick into the same render path.
  *             SSE is disconnected and auto-scroll is paused; the viewport
  *             snaps to the full extent of the loaded log.
+ *   snapshot— a standalone saved HTML file embeds tick records in a
+ *             <script type="application/json"> block and opens directly in
+ *             replay-style mode without /state, /stream, or a sidecar.log.
  *
  * Rendering is incremental: per tick we extend the active phase item per
  * agent (or close it and open a new one when state changes), append vertical
@@ -29,9 +32,10 @@
   const EVENT_LINE_HIT_PX = 4;
   const AGENT_LABEL_PANEL_MIN_PX = 220;
   const AGENT_LABEL_PANEL_PADDING_PX = 28;
+  const SNAPSHOT_DATA_ID = "dashboardSnapshotData";
+  const SNAPSHOT_VERSION = 1;
   const EVENT_COUNT_IDS = {
     offload: "eventCountOffload",
-    "offload-fail": "eventCountOffloadFail",
     admit: "eventCountAdmit",
     readmit: "eventCountReadmit",
     sat: "eventCountSat",
@@ -53,12 +57,13 @@
     eventPoints: [],     // [{id, ts: epochMs, type, label, text}] for event lines + tooltips
     eventCounts: {},
     tickHistory: [],     // [{ts: epoch_ms, count: active_agent_count}]
+    records: [],         // rendered tick records, used for standalone export
     latestTick: -1,
     latestTs: null,
     paused: false,
     eventSource: null,
-    mode: "live",       // "live" | "replay"
-    replayBounds: null, // {start, end} when in replay mode
+    mode: "live",       // "live" | "replay" | "snapshot"
+    replayBounds: null, // {start, end} when in replay/snapshot mode
   };
 
   // ── hover tooltip (used for event lines) ───────────────────────────────
@@ -101,6 +106,13 @@
     const el = $("#connStatus");
     el.textContent = text;
     el.className = "status " + cls;
+  }
+
+  function setDashboardTitle(modeLabel) {
+    const text = `Agent Concurrency · ${modeLabel}`;
+    const h1 = $("#dashboardTitle");
+    if (h1) h1.textContent = text;
+    document.title = text;
   }
 
   function setTickInfo(tick, ts) {
@@ -534,20 +546,6 @@
           `kv_gb:    ${fmt(ev.kv_gb)}\n` +
           `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
           tooltipBase);
-      } else {
-        addEvent(ts, "offload-fail", `OFFLOAD_FAIL: ${ev.agent_id}`,
-          `agent: ${ev.agent_id}\n` +
-          `status_code: ${fmt(ev.status_code)}\n` +
-          `reason: ${fmt(ev.reason)}\n` +
-          `timeout_s: ${fmt(ev.timeout_s)}\n` +
-          `error: ${fmt(ev.error)}\n` +
-          `offloaded: ${fmt(ev.offloaded)}\n` +
-          `freed_gb: ${fmt(ev.freed_gb)}\n` +
-          `kv_gb: ${fmt(ev.kv_gb)}\n` +
-          `C: ${fmt(adm.C)}\n` +
-          `threshold_percent: ${fmt(adm.threshold_percent)}\n` +
-          `threshold_gb: ${fmt(adm.threshold_gb)}`,
-          tooltipBase);
       }
     }
     for (const ad of (adm.admissions || [])) {
@@ -876,6 +874,7 @@
       if (record.tick <= state.latestTick) return; // dedupe / out-of-order
       state.latestTick = record.tick;
     }
+    state.records.push(record);
     state.latestTs = record.ts;
     setTickInfo(record.tick, record.ts);
 
@@ -892,7 +891,7 @@
     updateBadges(tickMs);
     if (state.mode === "live") {
       autoScroll(new Date(recordTs));
-    } else if (state.mode === "replay") {
+    } else if (state.mode === "replay" || state.mode === "snapshot") {
       // Track replay window so we can fit-to-data at the end.
       const t = new Date(recordTs).getTime();
       if (state.replayBounds === null) {
@@ -969,6 +968,7 @@
     state.latestTs = null;
     state.replayBounds = null;
     state.tickHistory = [];
+    state.records = [];
     state.eventPoints = [];
     for (const id of [
       "liveCount",
@@ -984,6 +984,17 @@
     }
   }
 
+  function fitReplayWindow() {
+    if (!state.replayBounds) return;
+    const span = state.replayBounds.end - state.replayBounds.start;
+    const pad = Math.max(1000, span * 0.02);
+    const s = new Date(state.replayBounds.start - pad);
+    const e = new Date(state.replayBounds.end   + pad);
+    state.timeline.setWindow(s, e, { animation: false });
+    state.kvChart.setWindow(s, e, { animation: false });
+    scheduleEventLineRender();
+  }
+
   async function loadReplayFile(file) {
     setStatus(`replay: parsing ${file.name}…`, "status-pending");
     let text;
@@ -994,6 +1005,7 @@
       return;
     }
     state.mode = "replay";
+    setDashboardTitle("Replay");
     setPaused(true);
     resetCharts();
 
@@ -1007,13 +1019,7 @@
       try { applyTick(rec); parsed++; }
       catch (err) { skipped++; }
     }
-    if (state.replayBounds) {
-      const pad = Math.max(1000, (state.replayBounds.end - state.replayBounds.start) * 0.02);
-      const s = new Date(state.replayBounds.start - pad);
-      const e = new Date(state.replayBounds.end   + pad);
-      state.timeline.setWindow(s, e, { animation: false });
-      state.kvChart.setWindow(s, e, { animation: false });
-    }
+    fitReplayWindow();
     setStatus(
       `replay · ${parsed} tick(s)` + (skipped ? ` · ${skipped} skipped` : ""),
       "status-live",
@@ -1021,8 +1027,198 @@
     $("#liveBtn").hidden = false;
   }
 
+  function loadSnapshotRecords(ticks, meta) {
+    state.mode = "snapshot";
+    setDashboardTitle("Snapshot");
+    setPaused(true);
+    resetCharts();
+
+    let parsed = 0;
+    let skipped = 0;
+    for (const rec of ticks || []) {
+      try { applyTick(rec); parsed++; }
+      catch (err) { skipped++; }
+    }
+    fitReplayWindow();
+    const label = meta && (meta.source || meta.source_mode)
+      ? ` · ${meta.source || meta.source_mode}`
+      : "";
+    setStatus(
+      `snapshot · ${parsed} tick(s)` + (skipped ? ` · ${skipped} skipped` : "") + label,
+      "status-live",
+    );
+    $("#liveBtn").hidden = true;
+  }
+
+  function readEmbeddedSnapshot() {
+    const el = document.getElementById(SNAPSHOT_DATA_ID);
+    if (!el) return null;
+    try {
+      const payload = JSON.parse(el.textContent || "null");
+      if (Array.isArray(payload)) return { ticks: payload, meta: {} };
+      if (payload && Array.isArray(payload.ticks)) {
+        return { ticks: payload.ticks, meta: payload.meta || {} };
+      }
+    } catch (err) {
+      console.error("bad embedded dashboard snapshot", err);
+    }
+    return { ticks: [], meta: { source: "invalid embedded data" } };
+  }
+
+  // ── standalone snapshot export ─────────────────────────────────────────
+
+  async function saveStandaloneHtml() {
+    if (!state.records.length) {
+      setStatus("snapshot: no ticks loaded", "status-error");
+      return;
+    }
+
+    const btn = $("#saveSnapshotBtn");
+    if (btn) btn.disabled = true;
+    setStatus(`snapshot: bundling ${state.records.length} tick(s)…`, "status-pending");
+    try {
+      const html = await buildStandaloneHtml();
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = snapshotFilename();
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      setStatus(`snapshot saved · ${state.records.length} tick(s)`, "status-live");
+    } catch (err) {
+      console.error("snapshot export failed", err);
+      const msg = err && err.message ? err.message : String(err);
+      setStatus(`snapshot save failed: ${msg}`, "status-error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function buildStandaloneHtml() {
+    const [visCss, dashboardCss, visJs, dashboardJs] = await Promise.all([
+      assetTextForExport(
+        "#visCssAsset",
+        "https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css",
+      ),
+      assetTextForExport("#dashboardCssAsset", "/static/dashboard.css"),
+      assetTextForExport(
+        "#visJsAsset",
+        "https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js",
+      ),
+      assetTextForExport("#dashboardJsAsset", "/static/dashboard.js"),
+    ]);
+
+    const payload = {
+      version: SNAPSHOT_VERSION,
+      meta: {
+        created_at: new Date().toISOString(),
+        source_mode: state.mode,
+        tick_count: state.records.length,
+        first_ts: state.records[0] && state.records[0].ts,
+        last_ts: state.records[state.records.length - 1] &&
+          state.records[state.records.length - 1].ts,
+      },
+      ticks: state.records,
+    };
+
+    return "<!DOCTYPE html>\n" +
+      "<html lang=\"en\">\n" +
+      "<head>\n" +
+      "  <meta charset=\"utf-8\">\n" +
+      "  <title>Agent Concurrency · Snapshot</title>\n" +
+      "  <style id=\"visCssAsset\">\n" + safeInlineStyle(visCss) + "\n  </style>\n" +
+      "  <style id=\"dashboardCssAsset\">\n" + safeInlineStyle(dashboardCss) + "\n  </style>\n" +
+      "</head>\n" +
+      "<body>\n" +
+      currentDashboardShellHtml() + "\n" +
+      "  <script id=\"" + SNAPSHOT_DATA_ID + "\" type=\"application/json\">" +
+        safeScriptJson(payload) + "</script>\n" +
+      "  <script id=\"visJsAsset\">\n" + safeInlineScript(visJs) + "\n  </script>\n" +
+      "  <script id=\"dashboardJsAsset\">\n" + safeInlineScript(dashboardJs) + "\n  </script>\n" +
+      "</body>\n" +
+      "</html>\n";
+  }
+
+  async function assetTextForExport(selector, fallbackUrl) {
+    const el = document.querySelector(selector);
+    const attr = el && (el.getAttribute("href") || el.getAttribute("src"));
+    if (attr) {
+      try {
+        return await fetchAssetText(new URL(attr, window.location.href).href);
+      } catch (err) {
+        console.warn("asset fetch failed", attr, err);
+      }
+    }
+    if (el && el.textContent && el.textContent.trim()) return el.textContent;
+    if (fallbackUrl) return fetchAssetText(new URL(fallbackUrl, window.location.href).href);
+    throw new Error(`missing asset ${selector}`);
+  }
+
+  async function fetchAssetText(url) {
+    const resp = await fetch(url, { cache: "no-store" });
+    if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+    return resp.text();
+  }
+
+  function currentDashboardShellHtml() {
+    const header = document.querySelector("header").cloneNode(true);
+    const title = header.querySelector("#dashboardTitle");
+    if (title) title.textContent = "Agent Concurrency · Snapshot";
+    const status = header.querySelector("#connStatus");
+    if (status) {
+      status.textContent = "loading snapshot…";
+      status.className = "status status-pending";
+    }
+    const liveBtn = header.querySelector("#liveBtn");
+    if (liveBtn) liveBtn.hidden = true;
+    const pauseBtn = header.querySelector("#pauseBtn");
+    if (pauseBtn) {
+      pauseBtn.classList.add("paused");
+      pauseBtn.textContent = "Resume auto-scroll";
+    }
+    const saveBtn = header.querySelector("#saveSnapshotBtn");
+    if (saveBtn) saveBtn.disabled = false;
+    return "  " + header.outerHTML + "\n\n" +
+      "  <main>\n" +
+      "    <div id=\"kvChart\"></div>\n" +
+      "    <div id=\"timeline\"></div>\n" +
+      "  </main>";
+  }
+
+  function snapshotFilename() {
+    const rec = state.records[state.records.length - 1];
+    const source = rec && rec.ts ? rec.ts : new Date().toISOString();
+    const stamp = new Date(parseTimeMs(source) ?? Date.now())
+      .toISOString()
+      .replace(/[:.]/g, "-");
+    return `agent-concurrency-dashboard-${stamp}.html`;
+  }
+
+  function safeScriptJson(value) {
+    return JSON.stringify(value)
+      .replace(/[<>&\u2028\u2029]/g, (ch) => ({
+        "<": "\\u003c",
+        ">": "\\u003e",
+        "&": "\\u0026",
+        "\u2028": "\\u2028",
+        "\u2029": "\\u2029",
+      }[ch]));
+  }
+
+  function safeInlineScript(text) {
+    return String(text).replace(/<\/script/gi, "<\\/script");
+  }
+
+  function safeInlineStyle(text) {
+    return String(text).replace(/<\/style/gi, "<\\/style");
+  }
+
   function backToLive() {
     state.mode = "live";
+    setDashboardTitle("Live");
     setPaused(false);
     resetCharts();
     $("#liveBtn").hidden = true;
@@ -1046,6 +1242,7 @@
       if (f) loadReplayFile(f);
       ev.target.value = "";
     });
+    $("#saveSnapshotBtn").addEventListener("click", saveStandaloneHtml);
     $("#liveBtn").addEventListener("click", backToLive);
   }
 
@@ -1115,6 +1312,12 @@
   document.addEventListener("DOMContentLoaded", async () => {
     buildCharts();
     wireControls();
+    const embedded = readEmbeddedSnapshot();
+    if (embedded) {
+      loadSnapshotRecords(embedded.ticks, embedded.meta);
+      return;
+    }
+    setDashboardTitle("Live");
     await bootstrapLive();
     connectStream();
   });
