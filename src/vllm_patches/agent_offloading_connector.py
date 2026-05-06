@@ -615,7 +615,6 @@ class AgentAwareOffloadingWorker(OffloadingConnectorWorker):
     def __init__(self, spec: Any):
         super().__init__(spec)
         self._agent_store_real_req_jobs: dict[str, set[str]] = defaultdict(set)
-        self._agent_store_real_req_done: set[str] = set()
 
     def start_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
@@ -654,7 +653,6 @@ class AgentAwareOffloadingWorker(OffloadingConnectorWorker):
                             if not real_req_jobs:
                                 self._agent_store_real_req_jobs.pop(
                                     real_req_id, None)
-                                self._agent_store_real_req_done.discard(real_req_id)
                                 self._finished_reqs_waiting_for_store.discard(
                                     real_req_id)
                                 finished_sending.add(real_req_id)
@@ -677,8 +675,5 @@ class AgentAwareOffloadingWorker(OffloadingConnectorWorker):
             elif pending_req_jobs is not None:
                 finished_sending.add(req_id)
                 del self._store_jobs[req_id]
-            elif req_id in self._agent_store_real_req_done:
-                self._agent_store_real_req_done.remove(req_id)
-                finished_sending.add(req_id)
 
         return finished_sending, finished_recving

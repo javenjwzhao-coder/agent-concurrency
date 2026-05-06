@@ -1,11 +1,15 @@
 .venv/
+.bench-venv/
 .vllm-src/
 .vllm-ascend-src/
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 .env
 abc_results/
+abc_runs/
+sidecar.log
 *.joblib
 predictions.csv
 prediction_metrics.json

@@ -328,13 +328,6 @@ class ToolCallTraceCollector:
             "csv": self.write_csv(out_dir),
         }
 
-    def write_trace_artifacts(self, out_dir: Path) -> dict[str, Path]:
-        """Write the runner-facing trace artifacts using ``*_trace`` filenames."""
-        return {
-            "jsonl": self.write_jsonl(out_dir, f"{self.agent_id}_trace.jsonl"),
-            "csv": self.write_csv(out_dir, f"{self.agent_id}_trace.csv"),
-        }
-
     def _make_record(
         self,
         pending: PendingToolCall,

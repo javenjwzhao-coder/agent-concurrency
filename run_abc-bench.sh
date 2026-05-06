@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# run_with_config.sh
+# run_abc-bench.sh
 # ─────────────────────────────────────────────────────────────────────────────
 # Launch the instrumented ABC-Bench runner from a single YAML config file.
 #
@@ -13,15 +13,15 @@
 #   • Optionally runs build_tool_predictor.py after agents finish.
 #
 # Usage:
-#   bash run_with_config.sh --config abc_bench_config.yaml
-#   bash run_with_config.sh --config abc_bench_config.yaml --dry-run
-#   bash run_with_config.sh --config abc_bench_config.yaml \
+#   bash run_abc-bench.sh --config config/abc-bench_config.yaml
+#   bash run_abc-bench.sh --config config/abc-bench_config.yaml --dry-run
+#   bash run_abc-bench.sh --config config/abc-bench_config.yaml \
 #       --override dataset.max_tasks=2 \
 #       --override launch.randomise=false
 #
 # Requirements:
 #   • Python 3 with PyYAML installed (used only for YAML parsing)
-#   • run_abc_bench_instrumented.py in the same directory as this script
+#   • src/run_abc_bench_instrumented.py
 #   • src/build_tool_predictor.py (if prediction enabled)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -62,9 +62,9 @@ Options:
   --help, -h              Show this help
 
 Examples:
-  $(basename "$0") --config abc_bench_config.yaml
-  $(basename "$0") -c abc_bench_config.yaml --dry-run
-  $(basename "$0") -c abc_bench_config.yaml -o dataset.max_tasks=2 -o launch.randomise=false
+  $(basename "$0") --config config/abc-bench_config.yaml
+  $(basename "$0") -c config/abc-bench_config.yaml --dry-run
+  $(basename "$0") -c config/abc-bench_config.yaml -o dataset.max_tasks=2 -o launch.randomise=false
 EOF
 }
 
@@ -402,7 +402,8 @@ build_runner_cmd() {
         fi
     fi
 
-    echo "${cmd[@]}"
+    printf "%q " "${cmd[@]}"
+    printf "\n"
 }
 
 build_predictor_cmd() {
@@ -419,7 +420,8 @@ build_predictor_cmd() {
     if [[ -n "${PREDICTION_LONG_THRESHOLD_S:-}" ]]; then
         cmd+=(--long-threshold "$PREDICTION_LONG_THRESHOLD_S")
     fi
-    echo "${cmd[@]}"
+    printf "%q " "${cmd[@]}"
+    printf "\n"
 }
 
 # ─────────────────────────── display config ──────────────────────────────────

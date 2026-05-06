@@ -430,16 +430,6 @@ class AgentPhaseTracker:
                 self._open_phase("waiting", event_dt)
                 return
 
-    # ── tool metadata extraction ──
-
-    @staticmethod
-    def _extract_tool_args(event: ActionEvent) -> dict[str, Any]:
-        """
-        Pull whatever argument dict the SDK exposes.  Attribute names vary
-        across SDK versions, so we try several.
-        """
-        return ToolCallTraceCollector.extract_tool_args(event)
-
     @staticmethod
     def _extract_observation_content(event: Any) -> str:
         """Best-effort string content from an ObservationEvent."""
@@ -497,14 +487,6 @@ class AgentPhaseTracker:
             lines.append("    (no content)")
         lines.append("")
         self._event_log_lines.extend(lines)
-
-    @staticmethod
-    def _extract_terminal_command(event: ActionEvent, args: dict) -> str:
-        """
-        If the tool is ``terminal``, try to extract the shell command string.
-        This is the single most predictive feature for duration estimation.
-        """
-        return ToolCallTraceCollector.extract_terminal_command(event, args)
 
     # ── persistence ──
 

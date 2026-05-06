@@ -1008,34 +1008,6 @@ def group_train_test_indices(
     return np.where(~te_mask)[0], np.where(te_mask)[0]
 
 
-def group_train_test_split(
-    X: pd.DataFrame,
-    y: pd.Series,
-    groups: pd.Series,
-    tool_names: pd.Series,
-    test_fraction: float,
-    seed: int,
-    is_long: Optional[np.ndarray] = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
-    """
-    Split by unique agent_id values so no agent's rows appear in both
-    train and test.  Falls back to a stratified row split when there is
-    only one agent (and ``is_long`` is provided).
-    """
-    tr_idx, te_idx = group_train_test_indices(
-        groups, test_fraction, seed, is_long=is_long
-    )
-
-    return (
-        X.iloc[tr_idx].reset_index(drop=True),
-        X.iloc[te_idx].reset_index(drop=True),
-        y.iloc[tr_idx].reset_index(drop=True),
-        y.iloc[te_idx].reset_index(drop=True),
-        groups.iloc[tr_idx].reset_index(drop=True),
-        tool_names.iloc[te_idx].reset_index(drop=True),
-    )
-
-
 # ─────────────────────────── realtime inference ──────────────────────────────
 
 class RealtimePredictor:
