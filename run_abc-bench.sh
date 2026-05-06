@@ -226,6 +226,7 @@ flat_keys = [
     ("SIDECAR_OFFLOAD_ENDPOINT", "sidecar.admission_control.offload_endpoint"),
     ("SIDECAR_RESTORE_ENDPOINT", "sidecar.admission_control.restore_endpoint"),
     ("SIDECAR_RELEASE_ENDPOINT", "sidecar.admission_control.release_endpoint"),
+    ("SIDECAR_USAGE_ENDPOINT", "sidecar.admission_control.usage_endpoint"),
     ("SIDECAR_OFFLOAD_TIMEOUT_S", "sidecar.admission_control.offload_timeout_s"),
     ("SIDECAR_EXACT_FREED_GB_TIMEOUT_S", "sidecar.admission_control.exact_freed_gb_timeout_s"),
 ]
@@ -395,6 +396,9 @@ build_runner_cmd() {
             if [[ -n "${SIDECAR_RELEASE_ENDPOINT:-}" ]]; then
                 cmd+=(--sidecar-release-endpoint "$SIDECAR_RELEASE_ENDPOINT")
             fi
+            if [[ -n "${SIDECAR_USAGE_ENDPOINT:-}" ]]; then
+                cmd+=(--sidecar-usage-endpoint "$SIDECAR_USAGE_ENDPOINT")
+            fi
         fi
     fi
 
@@ -496,6 +500,7 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
         echo "    offload_endpoint:   ${SIDECAR_OFFLOAD_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload}"
         echo "    restore_endpoint:   ${SIDECAR_RESTORE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/restore}"
         echo "    release_endpoint:   ${SIDECAR_RELEASE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/release}"
+        echo "    usage_endpoint:     ${SIDECAR_USAGE_ENDPOINT:-${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/usage}"
         echo "    offload_timeout_s:  ${SIDECAR_OFFLOAD_TIMEOUT_S:-10.0}"
         echo "    exact_free_wait_s:  ${SIDECAR_EXACT_FREED_GB_TIMEOUT_S:-5.0}"
     fi

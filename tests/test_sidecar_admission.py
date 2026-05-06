@@ -43,6 +43,30 @@ class FakePredictor:
         return self.values.get(agent.get("agent_id", ""), 0.0)
 
 
+class FakeUsageResponse:
+    def __init__(self, payload: dict | None = None, status_code: int = 200, text: str = ""):
+        self._payload = payload or {}
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return dict(self._payload)
+
+
+class FakeUsageSession:
+    def __init__(self, payloads: dict[str, dict | FakeUsageResponse]):
+        self.payloads = payloads
+        self.calls: list[str] = []
+
+    def get(self, url, params=None, timeout=None):
+        agent_id = (params or {}).get("agent_id", "")
+        self.calls.append(agent_id)
+        payload = self.payloads[agent_id]
+        if isinstance(payload, FakeUsageResponse):
+            return payload
+        return FakeUsageResponse(payload)
+
+
 def test_headroom_bootstrap_and_memoized_average():
     admitted: list[str] = []
     controller = DynamicAdmissionController(
@@ -147,6 +171,88 @@ def test_poll_vllm_reports_scheduler_preemption_count():
     info = poll_vllm(_Session(), "http://vllm.invalid", BYTES_PER_GB)
 
     assert info["scheduler_preemptions_total"] == 5
+
+
+def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
+    offloaded: list[tuple[str, float]] = []
+    session = FakeUsageSession({
+        "stale-large": {
+            "available": True,
+            "kv_blocks": 2,
+            "active_requests": 1,
+            "held_requests": 0,
+            "pending_offload": False,
+            "offload_jobs": 0,
+        },
+        "stale-small": {
+            "available": True,
+            "kv_blocks": 5,
+            "active_requests": 1,
+            "held_requests": 0,
+            "pending_offload": False,
+            "offload_jobs": 0,
+        },
+    })
+
+    def offload(cand):
+        offloaded.append((cand.agent_id, cand.kv_gb))
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        predictor=FakePredictor({"stale-large": 10.0, "stale-small": 10.0}),
+        offload_callback=offload,
+        session=session,
+        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
+    )
+    agents = {
+        "stale-large": {"agent_id": "stale-large", "state": "tool_call", "kv_blocks": 99},
+        "stale-small": {"agent_id": "stale-small", "state": "tool_call", "kv_blocks": 1},
+    }
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert session.calls == ["stale-large", "stale-small"]
+    assert report["s_t"] == 3.5
+    assert report["scheduler_usage"]["updated"] == 2
+    assert agents["stale-large"]["kv_blocks"] == 2
+    assert agents["stale-small"]["kv_blocks"] == 5
+    assert agents["stale-small"]["kv_usage_source"] == "scheduler_usage"
+    assert report["offloads"][0]["agent_id"] == "stale-small"
+    assert report["offloads"][0]["kv_gb"] == 5.0
+    assert offloaded == [("stale-small", 5.0)]
+
+
+def test_scheduler_usage_failure_preserves_live_kv_snapshot():
+    session = FakeUsageSession({
+        "running": FakeUsageResponse(status_code=500, text="boom"),
+    })
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        session=session,
+        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
+    )
+    agents = {"running": {"state": "reasoning", "kv_blocks": 4}}
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 5.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["s_t"] == 4.0
+    assert report["scheduler_usage"]["errors"] == 1
+    assert "scheduler_usage_unavailable" in report["reasons"]
+    assert agents["running"]["kv_blocks"] == 4
+    assert "kv_usage_source" not in agents["running"]
 
 
 def test_saturation_guard_blocks_admission_when_headroom_below_one():

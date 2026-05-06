@@ -48,6 +48,7 @@ ticks it already rendered.
       "finished_at": null,                     // optional ISO-8601|null — fixed when state becomes done
       "kv_gb":   0.34,                         // float | null
       "kv_blocks": 1024,                       // int   | null
+      "kv_usage_source": "scheduler_usage",     // optional str — set when refreshed from vLLM usage API
       "admission_state": "admitted",           // "admitted"|"offloaded_pending_tool"|"offloaded_ready"
       "kv_policy": "idle_short",               // optional: "idle_short"|"idle_long"|"readmitted"|...
       "tool_name": "execute_bash"              // present only during "tool_call"
@@ -75,6 +76,11 @@ ticks it already rendered.
     "max_active_agents": 32,                   // int — active-agent cap, 0 means unlimited
     "active_agents": 16,                       // int — agents in reasoning|tool_call|waiting
     "active_agent_slots": 16,                  // int|null — remaining cap slots, null when uncapped
+    "scheduler_usage": {                       // sidecar usage refresh status
+      "enabled": true,                         // bool — usage endpoint configured
+      "updated": 4,                            // int — agents refreshed from scheduler
+      "errors": 0                              // int — endpoint/query failures this tick
+    },
     "next_initial_admit_in_s": null,           // float|null — seconds until next ramped fresh admit
     "active_agent_samples": 4,                 // int
     "pressure": true,                          // bool — pressure gate, C_percent <= threshold_percent

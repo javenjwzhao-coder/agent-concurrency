@@ -243,10 +243,11 @@ State naming in telemetry:
 
 ## 6. Public Interfaces
 
-The vLLM patch adds three control endpoints:
+The vLLM patch adds scheduler-backed telemetry plus three control endpoints:
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /agent_kv_cache/usage?agent_id=...` | Return current scheduler-owned KV block counts for an agent, using active and held request snapshots rather than stale LiteLLM callback telemetry. |
 | `POST /agent_kv_cache/offload` | Queue held snapshots for async CPU KV offload. |
 | `POST /agent_kv_cache/release` | Release held KV without CPU offload. Used for short calls, tool completion, final messages, errors, cancellation, and TTL cleanup. |
 | `POST /agent_kv_cache/restore` | Notify readmission. Offloaded KV is loaded by normal OffloadingConnector prefix lookup on the next request. |
@@ -263,6 +264,7 @@ Important sidecar fields:
 | `held_requests` | Number of held request snapshots for the agent. |
 | `known_blocks` | Number of known offloadable KV block hashes from held snapshots. |
 | `offload_jobs` | Number of async store jobs already pending for the candidate. |
+| `scheduler_usage` | Per-tick status for sidecar `GET /agent_kv_cache/usage` refreshes. Successful refreshes set agent `kv_usage_source: scheduler_usage`. |
 
 ## 7. Accounting and Failure Modes
 
@@ -323,5 +325,6 @@ The system is easiest to reason about as two loops:
    free. Held KV is either released directly or copied to CPU by the existing
    async connector path before the real request id is allowed to finish.
 
-Those loops meet at the three control endpoints, but the invariant remains
-inside vLLM: blocks are never copied after entering the free queue.
+Those loops meet at the scheduler-backed usage endpoint and three control
+endpoints, but the invariant remains inside vLLM: blocks are never copied after
+entering the free queue.

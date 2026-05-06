@@ -135,6 +135,25 @@ def _strip_old_offload_aliases(text: str) -> tuple[str, bool]:
     return text, changed
 
 
+def _strip_agent_kv_methods(text: str) -> tuple[str, bool]:
+    changed = False
+    for name in (
+        "register_agent_request",
+        "register_agent_request_async",
+        "offload_agent_kv",
+        "offload_agent_kv_async",
+        "restore_agent_kv",
+        "restore_agent_kv_async",
+        "release_agent_kv",
+        "release_agent_kv_async",
+        "get_agent_kv_usage",
+        "get_agent_kv_usage_async",
+    ):
+        text, removed = _strip_function_block(text, name)
+        changed = changed or removed
+    return text, changed
+
+
 def _patch_via_regex_usage_block(
     text: str,
     usage_var: str,
@@ -383,10 +402,14 @@ def _patch_async_llm() -> None:
         return
     txt = ASYNC_LLM.read_text()
     txt, removed_old = _strip_old_offload_aliases(txt)
+    if "get_agent_kv_usage" not in txt:
+        txt, removed_agent_methods = _strip_agent_kv_methods(txt)
+        removed_old = removed_old or removed_agent_methods
     if (
         "async def restore_agent_kv" in txt
         and "async def offload_agent_kv" in txt
         and "async def release_agent_kv" in txt
+        and "async def get_agent_kv_usage" in txt
     ):
         if removed_old:
             ASYNC_LLM.write_text(txt)
@@ -413,6 +436,9 @@ def _patch_async_llm() -> None:
                 self, agent_id: str, reason: str = "release") -> dict:
             return await self.engine_core.release_agent_kv_async(
                 str(agent_id), str(reason))
+
+        async def get_agent_kv_usage(self, agent_id: str) -> dict:
+            return await self.engine_core.get_agent_kv_usage_async(str(agent_id))
     """, leading_newline=True)
     txt, ok = _insert_before_anchor(
         txt,
@@ -434,6 +460,9 @@ def _patch_core_client() -> None:
         return
     txt = CORE_CLIENT.read_text()
     txt, changed = _strip_old_offload_aliases(txt)
+    if "get_agent_kv_usage" not in txt:
+        txt, removed_agent_methods = _strip_agent_kv_methods(txt)
+        changed = changed or removed_agent_methods
 
     if "def release_agent_kv" not in txt:
         abstract_sync = _code_block(4, """\
@@ -449,6 +478,9 @@ def _patch_core_client() -> None:
 
             def release_agent_kv(
                     self, agent_id: str, reason: str = "release") -> dict:
+                raise NotImplementedError
+
+            def get_agent_kv_usage(self, agent_id: str) -> dict:
                 raise NotImplementedError
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
@@ -482,6 +514,9 @@ def _patch_core_client() -> None:
             async def release_agent_kv_async(
                     self, agent_id: str, reason: str = "release") -> dict:
                 raise NotImplementedError
+
+            async def get_agent_kv_usage_async(self, agent_id: str) -> dict:
+                raise NotImplementedError
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -514,6 +549,9 @@ def _patch_core_client() -> None:
             def release_agent_kv(
                     self, agent_id: str, reason: str = "release") -> dict:
                 return self.engine_core.release_agent_kv(agent_id, reason)
+
+            def get_agent_kv_usage(self, agent_id: str) -> dict:
+                return self.engine_core.get_agent_kv_usage(agent_id)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -548,6 +586,9 @@ def _patch_core_client() -> None:
             def release_agent_kv(
                     self, agent_id: str, reason: str = "release") -> dict:
                 return self.call_utility("release_agent_kv", agent_id, reason)
+
+            def get_agent_kv_usage(self, agent_id: str) -> dict:
+                return self.call_utility("get_agent_kv_usage", agent_id)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -585,6 +626,10 @@ def _patch_core_client() -> None:
                     self, agent_id: str, reason: str = "release") -> dict:
                 return await self.call_utility_async(
                     "release_agent_kv", agent_id, reason)
+
+            async def get_agent_kv_usage_async(self, agent_id: str) -> dict:
+                return await self.call_utility_async(
+                    "get_agent_kv_usage", agent_id)
         """, leading_newline=True)
         txt, ok = _insert_after_anchor(
             txt,
@@ -616,10 +661,14 @@ def _patch_engine_core() -> None:
         return
     txt = ENGINE_CORE.read_text()
     txt, removed_old = _strip_old_offload_aliases(txt)
+    if "get_agent_kv_usage" not in txt:
+        txt, removed_agent_methods = _strip_agent_kv_methods(txt)
+        removed_old = removed_old or removed_agent_methods
     if (
         "def restore_agent_kv(" in txt
         and "def offload_agent_kv(" in txt
         and "def release_agent_kv(" in txt
+        and "def get_agent_kv_usage(" in txt
     ):
         if removed_old:
             ENGINE_CORE.write_text(txt)
@@ -641,6 +690,9 @@ def _patch_engine_core() -> None:
         def release_agent_kv(
                 self, agent_id: str, reason: str = "release") -> dict:
             return self.scheduler.release_agent_kv(agent_id, reason)
+
+        def get_agent_kv_usage(self, agent_id: str) -> dict:
+            return self.scheduler.get_agent_kv_usage(agent_id)
     """, leading_newline=True)
     txt, ok = _insert_after_anchor(
         txt,
@@ -673,9 +725,13 @@ def _patch_scheduler() -> None:
         return
     txt = SCHEDULER.read_text()
     txt, removed_old = _strip_old_offload_aliases(txt)
+    if "get_agent_kv_usage" not in txt:
+        txt, removed_agent_methods = _strip_agent_kv_methods(txt)
+        removed_old = removed_old or removed_agent_methods
     if (
         "def restore_agent_kv(self, agent_id: str) -> dict:" in txt
         and "def release_agent_kv(" in txt
+        and "def get_agent_kv_usage(" in txt
     ):
         if removed_old:
             SCHEDULER.write_text(txt)
@@ -726,6 +782,16 @@ def _patch_scheduler() -> None:
                 if request_id in self.requests:
                     self._free_blocks(self.requests[request_id])
             return result
+
+        def get_agent_kv_usage(self, agent_id: str) -> dict:
+            scheduler = self._agent_kv_connector_scheduler()
+            if scheduler is None or not hasattr(scheduler, "get_agent_kv_usage"):
+                return {
+                    "agent_id": str(agent_id or ""),
+                    "available": False,
+                    "reason": "agent-aware KV connector is not configured",
+                }
+            return scheduler.get_agent_kv_usage(agent_id)
     """)
     txt, ok = _insert_before_anchor(
         txt,
@@ -792,6 +858,33 @@ async def offload_agent_kv_cache(raw_request: Request):
     result = await _agent_kv_maybe_await(result)
     return _agent_kv_response(result or {
         "offloaded": False,
+        "reason": "engine returned no result",
+    })
+
+
+@router.get("/agent_kv_cache/usage")
+async def get_agent_kv_cache_usage(raw_request: Request):
+    agent_id = str(raw_request.query_params.get("agent_id") or "")
+    if not agent_id:
+        return _agent_kv_response(
+            {"agent_id": "", "available": False, "reason": "missing agent_id"},
+            status_code=400,
+        )
+    client = engine_client(raw_request)
+    if not hasattr(client, "get_agent_kv_usage"):
+        return _agent_kv_response(
+            {
+                "agent_id": agent_id,
+                "available": False,
+                "reason": "engine client missing get_agent_kv_usage",
+            },
+            status_code=501,
+        )
+    result = client.get_agent_kv_usage(agent_id)
+    result = await _agent_kv_maybe_await(result)
+    return _agent_kv_response(result or {
+        "agent_id": agent_id,
+        "available": False,
         "reason": "engine returned no result",
     })
 
@@ -863,7 +956,7 @@ async def release_agent_kv_cache(raw_request: Request):
         txt = txt.replace(anchor, anchor + route + "\n", 1)
         API_SERVER.write_text(txt)
         action = "repositioned" if removed else "added"
-        print(f"[OK] api_server.py: agent offload/restore/release routes {action}")
+        print(f"[OK] api_server.py: agent KV routes {action}")
         return
 
     print("[WARN] Could not find module-level router anchor; trying route anchors", file=sys.stderr)
@@ -883,7 +976,7 @@ async def release_agent_kv_cache(raw_request: Request):
                               1)
             API_SERVER.write_text(txt)
             action = "repositioned" if removed else "added"
-            print(f"[OK] api_server.py: agent offload/restore/release routes {action}")
+            print(f"[OK] api_server.py: agent KV routes {action}")
             return
     print("[WARN] Could not find API route anchor; skipping routes", file=sys.stderr)
 
@@ -900,6 +993,7 @@ def _validate_agent_kv_api_routes(errors: list[str]) -> None:
 
     for route_path in (
         '"/agent_kv_cache/offload"',
+        '"/agent_kv_cache/usage"',
         '"/agent_kv_cache/restore"',
         '"/agent_kv_cache/release"',
     ):
@@ -940,15 +1034,20 @@ def validate() -> None:
         (SERVING, "_compute_kv_blocks", "serving_chat.py missing KV telemetry helper"),
         (SERVING, "register_agent_request", "serving_chat.py missing agent request registration"),
         (CONNECTOR_DST, "class AgentAwareOffloadingConnector", "custom connector not installed"),
+        (CONNECTOR_DST, "get_agent_kv_usage", "custom connector missing get_agent_kv_usage"),
         (ASYNC_LLM, "async def offload_agent_kv", "async_llm.py missing offload_agent_kv"),
         (ASYNC_LLM, "async def restore_agent_kv", "async_llm.py missing restore_agent_kv"),
         (ASYNC_LLM, "async def release_agent_kv", "async_llm.py missing release_agent_kv"),
+        (ASYNC_LLM, "async def get_agent_kv_usage", "async_llm.py missing get_agent_kv_usage"),
         (CORE_CLIENT, "restore_agent_kv", "core_client.py missing restore forwarding"),
         (CORE_CLIENT, "release_agent_kv", "core_client.py missing release forwarding"),
+        (CORE_CLIENT, "get_agent_kv_usage", "core_client.py missing usage forwarding"),
         (ENGINE_CORE, "def restore_agent_kv", "core.py missing restore_agent_kv"),
         (ENGINE_CORE, "def release_agent_kv", "core.py missing release_agent_kv"),
+        (ENGINE_CORE, "def get_agent_kv_usage", "core.py missing get_agent_kv_usage"),
         (SCHEDULER, "def restore_agent_kv", "scheduler.py missing restore_agent_kv"),
         (SCHEDULER, "def release_agent_kv", "scheduler.py missing release_agent_kv"),
+        (SCHEDULER, "def get_agent_kv_usage", "scheduler.py missing get_agent_kv_usage"),
     ]
     for path, needle, message in checks:
         if path.exists() and needle not in path.read_text():

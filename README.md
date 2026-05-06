@@ -103,11 +103,13 @@ the benchmark runner preserves the original launch behavior.
 
 ## vllm-ascend Patch
 
-The vLLM patch provides two capabilities needed for the control loop:
+The vLLM patch provides three capabilities needed for the control loop:
 
 1. Telemetry: OpenAI responses include `kv_blocks_used` and
    `kv_blocks_size_gb` when the request carries `agent_id`.
-2. Control: `POST /agent_kv_cache/offload` marks held agent KV for
+2. Live usage: `GET /agent_kv_cache/usage?agent_id=...` reports scheduler-owned
+   active and held KV blocks for sidecar decisions.
+3. Control: `POST /agent_kv_cache/offload` marks held agent KV for
    connector-backed CPU offload, `POST /agent_kv_cache/release` frees held KV
    without offload, and `POST /agent_kv_cache/restore` notifies readmission.
 
@@ -294,8 +296,9 @@ Aggregate:
 
 - vLLM runs through vllm-ascend on Ascend NPUs.
 - `agent_id` is propagated through `litellm_extra_body`.
-- Per-agent KV response fields are telemetry. Actual offload must happen
-  inside vLLM's scheduler/block pool.
+- Per-agent response KV fields remain summary telemetry; live admission/offload
+  sizing should use the scheduler-backed usage endpoint.
+- Actual offload must happen inside vLLM's scheduler/block pool.
 - Dynamic admission is opt-in to preserve baseline benchmark behavior.
 - Tool-call prediction estimates remaining wall-clock tool time, not full task
   completion time.

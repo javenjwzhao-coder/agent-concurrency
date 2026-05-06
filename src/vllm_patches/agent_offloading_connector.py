@@ -124,6 +124,17 @@ class AgentAwareOffloadingConnector(OffloadingConnector):
             return {"released": False, "reason": "agent-aware scheduler is unavailable"}
         return scheduler.release_agent_kv(agent_id, reason=reason)
 
+    def get_agent_kv_usage(self, agent_id: str) -> dict[str, Any]:
+        assert self.connector_scheduler is not None
+        scheduler = self.connector_scheduler
+        if not hasattr(scheduler, "get_agent_kv_usage"):
+            return {
+                "agent_id": str(agent_id or ""),
+                "available": False,
+                "reason": "agent-aware scheduler is unavailable",
+            }
+        return scheduler.get_agent_kv_usage(agent_id)
+
 
 class AgentAwareOffloadingScheduler:
     """Scheduler-side policy wrapper around OffloadingConnectorScheduler."""
@@ -266,6 +277,69 @@ class AgentAwareOffloadingScheduler:
             ),
         }
 
+    def get_agent_kv_usage(self, agent_id: str) -> dict[str, Any]:
+        if not agent_id:
+            return {
+                "agent_id": "",
+                "available": False,
+                "reason": "missing agent_id",
+            }
+
+        agent_id = str(agent_id)
+        self._release_stale_holds()
+
+        active_req_ids = set(self._agent_to_requests.get(agent_id, ()))
+        held_req_ids = set(self._held_agent_requests.get(agent_id, ()))
+
+        for req_id in list(active_req_ids):
+            req = self._base._requests.get(req_id)
+            if req is None:
+                active_req_ids.discard(req_id)
+                self._agent_to_requests[agent_id].discard(req_id)
+                if not self._agent_to_requests.get(agent_id):
+                    self._agent_to_requests.pop(agent_id, None)
+                self._request_to_agent.pop(req_id, None)
+                self._drop_snapshot(agent_id, req_id)
+                continue
+            self._snapshot_request(req_id, req)
+
+        snapshots = self._agent_snapshots.get(agent_id, {})
+        requests: list[dict[str, Any]] = []
+        total_blocks = 0
+        scoped_req_ids = active_req_ids | held_req_ids
+        for req_id in sorted(scoped_req_ids):
+            active = req_id in active_req_ids
+            held = req_id in held_req_ids
+            snapshot = (
+                self._held_request_snapshots.get(req_id)
+                if held else snapshots.get(req_id)
+            )
+            block_hashes = list((snapshot or {}).get("block_hashes") or ())
+            blocks = len(block_hashes)
+            total_blocks += blocks
+            requests.append({
+                "request_id": req_id,
+                "kv_blocks": blocks,
+                "active": active,
+                "held": held,
+            })
+
+        offload_jobs = sum(
+            len(self._agent_real_req_pending_jobs.get(req_id, ()))
+            for req_id in scoped_req_ids
+        )
+        return {
+            "agent_id": agent_id,
+            "available": True,
+            "kv_blocks": total_blocks,
+            "kv_blocks_used": total_blocks,
+            "active_requests": len(active_req_ids),
+            "held_requests": len(held_req_ids),
+            "pending_offload": agent_id in self._pending_agent_offloads,
+            "offload_jobs": offload_jobs,
+            "requests": requests,
+        }
+
     def update_state_after_alloc(
         self,
         request: Any,
@@ -404,17 +478,27 @@ class AgentAwareOffloadingScheduler:
             getattr(request, "num_tokens", 0) // self._base.offloaded_block_size,
         )
         if num_blocks <= 0:
+            self._drop_snapshot(agent_id, req_id)
             return
 
         block_hashes = list(self._base._get_block_hashes(
             request, end_idx=num_blocks))
         if not block_hashes:
+            self._drop_snapshot(agent_id, req_id)
             return
 
         self._agent_snapshots[agent_id][req_id] = {
             "block_ids": block_ids,
             "block_hashes": block_hashes,
         }
+
+    def _drop_snapshot(self, agent_id: str, req_id: str) -> None:
+        snapshots = self._agent_snapshots.get(agent_id)
+        if snapshots is None:
+            return
+        snapshots.pop(req_id, None)
+        if not snapshots:
+            self._agent_snapshots.pop(agent_id, None)
 
     def _next_agent_store_job_id(self, agent_id: str, req_id: str) -> str:
         self._job_seq += 1

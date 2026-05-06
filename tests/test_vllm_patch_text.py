@@ -7,6 +7,7 @@ CONNECTOR_TEXT = Path("src/vllm_patches/agent_offloading_connector.py").read_tex
 
 def test_vllm_patch_exposes_offload_restore_routes():
     assert '"/agent_kv_cache/offload"' in PATCH_TEXT
+    assert '"/agent_kv_cache/usage"' in PATCH_TEXT
     assert '"/agent_kv_cache/restore"' in PATCH_TEXT
     assert '"/agent_kv_cache/release"' in PATCH_TEXT
     legacy_method = "evi" + "ct_agent_kv"
@@ -15,6 +16,8 @@ def test_vllm_patch_exposes_offload_restore_routes():
     assert "offload_agent_kv" in PATCH_TEXT
     assert "restore_agent_kv" in PATCH_TEXT
     assert "release_agent_kv" in PATCH_TEXT
+    assert "get_agent_kv_usage" in PATCH_TEXT
+    assert "get_agent_kv_usage" in CONNECTOR_TEXT
     assert '"router = APIRouter()\\n"' in PATCH_TEXT
     assert "agent KV route is not module-level" in PATCH_TEXT
     assert "api_server.py syntax error" in PATCH_TEXT

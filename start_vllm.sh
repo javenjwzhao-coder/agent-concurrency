@@ -941,6 +941,7 @@ assert hasattr(connector, "AgentAwareOffloadingConnector")
 route_paths = {getattr(route, "path", "") for route in api_server.router.routes}
 missing_routes = {
     "/agent_kv_cache/offload",
+    "/agent_kv_cache/usage",
     "/agent_kv_cache/restore",
     "/agent_kv_cache/release",
 } - route_paths

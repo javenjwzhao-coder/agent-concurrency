@@ -179,7 +179,7 @@ until the sidecar re-admits it.
 
 - vLLM Prometheus metrics for total/used/free KV blocks.
 - Live per-agent state from the runner.
-- Per-agent KV telemetry mirrored from vLLM responses.
+- Scheduler-backed per-agent KV usage from `/agent_kv_cache/usage`.
 
 Dynamic admission computes:
 
@@ -233,6 +233,8 @@ Telemetry:
 
 - Adds `agent_id` to chat requests.
 - Adds `kv_blocks_used` and `kv_blocks_size_gb` to usage responses.
+- Adds `GET /agent_kv_cache/usage?agent_id=...` for scheduler-backed
+  per-agent live KV usage.
 
 Control:
 
@@ -277,7 +279,7 @@ sidecar:
 ```
 
 Omitted admission values use wrapper defaults. `predictor_model` defaults to
-`prediction.save_model`, offload/restore/release endpoints default under
+`prediction.save_model`, usage/offload/restore/release endpoints default under
 `sidecar.vllm_url`, and `sidecar.vllm_url` is derived from `llm.base_url` when
 it is not set explicitly. Accepted async offloads may report
 `freed_gb_source: pending_async` until vLLM reports the exact free-block delta.
@@ -364,7 +366,7 @@ bash -n run_abc-bench.sh
   fallback.
 - Each agent runs in its own thread; live state and callbacks require locks.
 - Dynamic admission is opt-in to preserve baseline behavior.
-- Per-agent KV telemetry is approximate from the sidecar's perspective; exact
-  block ownership lives inside vLLM.
+- Per-agent response KV telemetry is approximate; sidecar admission should prefer
+  scheduler-backed `/agent_kv_cache/usage` when available.
 - Offloaded agents finish their current tool call, then block before the next LLM
   call until re-admitted.

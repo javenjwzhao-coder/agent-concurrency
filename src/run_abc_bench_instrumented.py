@@ -1157,6 +1157,8 @@ def parse_args() -> argparse.Namespace:
                     help="vLLM admin endpoint to notify agent KV readmission.")
     sc.add_argument("--sidecar-release-endpoint", default=None,
                     help="vLLM admin endpoint to release held agent KV without offload.")
+    sc.add_argument("--sidecar-usage-endpoint", default=None,
+                    help="vLLM admin endpoint for live per-agent KV usage.")
     sc.add_argument("--sidecar-offload-timeout-s", type=float, default=None,
                     help="HTTP timeout for one offload request.")
     sc.add_argument("--sidecar-exact-freed-gb-timeout-s", type=float, default=None,
@@ -1241,6 +1243,10 @@ def main() -> int:
                 release_endpoint=(
                     args.sidecar_release_endpoint
                     or _sidecar.default_release_endpoint(args.sidecar_vllm_url)
+                ),
+                usage_endpoint=(
+                    args.sidecar_usage_endpoint
+                    or _sidecar.default_usage_endpoint(args.sidecar_vllm_url)
                 ),
                 offload_timeout_s=(
                     args.sidecar_offload_timeout_s

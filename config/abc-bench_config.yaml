@@ -111,6 +111,10 @@ sidecar:
     # treated as long/offloadable.
     fallback_long_tool_call_s: 5.0
 
+    # Optional override for GET /agent_kv_cache/usage. Leave unset to derive it
+    # from sidecar.vllm_url.
+    # usage_endpoint:
+
     # HTTP timeout for POST /agent_kv_cache/offload. This should be long enough
     # for vLLM's engine/core path to acknowledge the request under pressure.
     # A timeout is reported as offload_request_timeout.
