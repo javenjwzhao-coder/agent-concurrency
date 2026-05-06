@@ -11,6 +11,7 @@ calls.
 
 For the deeper control-loop and connector design, see
 [docs/agent_kv_offload_architecture.md](docs/agent_kv_offload_architecture.md).
+Detailed component docs live in [docs/README.md](docs/README.md).
 
 ## Repository Map
 
