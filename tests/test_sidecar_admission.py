@@ -1014,6 +1014,76 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
     assert admitted == []
 
 
+def test_long_tool_call_release_removes_idle_candidate_without_offload():
+    state_updates: dict[str, dict] = {}
+    offloaded: list[str] = []
+    released: list[tuple[str, str]] = []
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    def release(agent_id, reason):
+        released.append((agent_id, reason))
+        return {"released": True, "held_requests": 1}
+
+    def update(agent_id, patch):
+        state_updates.setdefault(agent_id, {}).update(patch)
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        predictor=FakePredictor({"long-agent": 5.0}),
+        offload_callback=offload,
+        release_callback=release,
+        state_update_callback=update,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    policy = controller.on_tool_call_start(
+        "long-agent",
+        {
+            "agent_id": "long-agent",
+            "state": "tool_call",
+            "kv_blocks": 3,
+        },
+    )
+
+    assert policy["policy"] == "idle_long"
+    assert controller.pending_counts()["idle_long"] == 1
+
+    result = controller.release_agent_kv("long-agent", "tool_complete")
+
+    assert result["released"] is True
+    assert released == [("long-agent", "tool_complete")]
+    assert controller.pending_counts()["idle_long"] == 0
+    assert state_updates["long-agent"]["kv_policy"] == "released"
+    assert state_updates["long-agent"]["kv_policy_reason"] == "tool_complete"
+    assert state_updates["long-agent"]["kv_offloaded"] is False
+    assert state_updates["long-agent"]["admission_state"] == "admitted"
+
+    pressure = controller.on_tick(
+        tick=1,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "long-agent": {
+                "agent_id": "long-agent",
+                "state": "tool_call",
+                "kv_blocks": 3,
+                "kv_policy": "idle_long",
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert offloaded == []
+    assert pressure["offloads"] == []
+    assert pressure["skipped_candidates"] == [
+        {"agent_id": "long-agent", "reason": "kv_released"}
+    ]
+
+
 def test_pressure_offload_can_create_one_fresh_admission_slot():
     admitted: list[str] = []
     offloaded: list[str] = []

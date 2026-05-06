@@ -150,7 +150,7 @@ flowchart TD
     offloaded{Was agent offloaded?}
     wait[Wait if offloaded<br/>block before next LLM call]
     restore[Sidecar readmits<br/>POST restore endpoint]
-    release[Release held KV<br/>tool complete reason]
+    release[Release held KV<br/>tool complete reason<br/>clear idle candidate state]
     reason[Open reasoning phase]
 
     obs --> record --> offloaded
@@ -158,6 +158,10 @@ flowchart TD
     offloaded -- no --> release --> reason
 ```
 
+For non-offloaded long calls, `release_agent_kv()` also removes the agent from
+the idle/offload candidate sets and marks its KV policy as `released` before
+the runner opens the next reasoning phase. That prevents a concurrent pressure
+tick from offloading a tool call whose pinned blocks were already released.
 Cleanup paths call `release_agent_kv()` on final assistant messages, run end,
 errors, and cancellation. That prevents stale held KV when the normal
 Action/Observation sequence is interrupted.
@@ -222,7 +226,7 @@ stateDiagram-v2
 
     ToolCall --> IdleLong: predicted long
     IdleLong --> OffloadedPendingTool: pressure offload accepted
-    IdleLong --> Reasoning: tool result + release
+    IdleLong --> Reasoning: tool result + release + clear candidate
 
     OffloadedPendingTool --> OffloadedReady: ObservationEvent
     OffloadedReady --> Admitted: readmit + restore

@@ -435,6 +435,7 @@ class DynamicAdmissionController:
         self._offloaded_pending: set[str] = set()
         self._idle_short: set[str] = set()
         self._idle_long: set[str] = set()
+        self._released_agents: set[str] = set()
         self._kv_policy_events: deque[dict[str, Any]] = deque(maxlen=1024)
         self._prev_avg_gb: Optional[float] = None
         self._first_saturation_seen = False
@@ -485,6 +486,7 @@ class DynamicAdmissionController:
                 "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
                 "reason": "",
             }
+            self._released_agents.discard(agent_id)
             if not self.enabled:
                 event["reason"] = "disabled"
                 self._record_kv_policy_event_locked(event)
@@ -621,9 +623,18 @@ class DynamicAdmissionController:
         """Release any held vLLM KV blocks for an agent that was not offloaded."""
         with self._lock:
             result = self._release_agent_locked(agent_id, reason)
+            self._idle_short.discard(agent_id)
+            self._idle_long.discard(agent_id)
+            self._released_agents.add(agent_id)
             self._update_agent_state_locked(
                 agent_id,
-                {"last_release_result": result},
+                {
+                    "kv_offloaded": False,
+                    "kv_policy": "released",
+                    "kv_policy_reason": reason,
+                    "admission_state": "admitted",
+                    "last_release_result": result,
+                },
             )
             return result
 
@@ -1040,6 +1051,12 @@ class DynamicAdmissionController:
             ):
                 skipped.append({"agent_id": agent_id, "reason": "idle_short"})
                 continue
+            if (
+                agent_id in self._released_agents
+                or agent.get("kv_policy") == "released"
+            ):
+                skipped.append({"agent_id": agent_id, "reason": "kv_released"})
+                continue
             kv_gb = _agent_kv_gb(agent, bytes_per_blk)
             if kv_gb is None or kv_gb <= 0:
                 continue
@@ -1364,6 +1381,7 @@ class DynamicAdmissionController:
             self._offloaded_events[agent_id] = event
         self._offloaded_pending.add(agent_id)
         self._idle_long.discard(agent_id)
+        self._released_agents.discard(agent_id)
         self._update_agent_state_locked(
             agent_id,
             {
@@ -1489,6 +1507,7 @@ class DynamicAdmissionController:
         self._readmitted_at.pop(agent_id, None)
         self._idle_short.discard(agent_id)
         self._idle_long.discard(agent_id)
+        self._released_agents.discard(agent_id)
         if self._offloaded_ready:
             self._offloaded_ready = deque(
                 aid for aid in self._offloaded_ready if aid != agent_id
