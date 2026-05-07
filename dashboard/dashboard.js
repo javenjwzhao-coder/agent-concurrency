@@ -1062,7 +1062,9 @@
       `replay · ${parsed} tick(s)` + (skipped ? ` · ${skipped} skipped` : ""),
       "status-live",
     );
-    $("#liveBtn").hidden = false;
+    // Saved standalone files have no /state to return to; keep the button
+    // hidden even after a replay so users can't dead-end on file://.
+    $("#liveBtn").hidden = isStandaloneFile();
   }
 
   function loadSnapshotRecords(ticks, meta) {
@@ -1086,6 +1088,14 @@
       "status-live",
     );
     $("#liveBtn").hidden = true;
+  }
+
+  // True when this page was opened from a saved standalone HTML snapshot.
+  // Detected by the presence of the embedded JSON payload, which is added by
+  // buildStandaloneHtml() and never injected into the live-served index.html.
+  // Used to gate "Back to live" — there is no /state to return to from file://.
+  function isStandaloneFile() {
+    return !!document.getElementById(SNAPSHOT_DATA_ID);
   }
 
   function readEmbeddedSnapshot() {
@@ -1288,15 +1298,9 @@
 
   async function buildStandaloneHtml() {
     const [visCss, dashboardCss, visJs, dashboardJs] = await Promise.all([
-      assetTextForExport(
-        "#visCssAsset",
-        "https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css",
-      ),
+      assetTextForExport("#visCssAsset", "/static/vis-timeline-graph2d.min.css"),
       assetTextForExport("#dashboardCssAsset", "/static/dashboard.css"),
-      assetTextForExport(
-        "#visJsAsset",
-        "https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js",
-      ),
+      assetTextForExport("#visJsAsset", "/static/vis-timeline-graph2d.min.js"),
       assetTextForExport("#dashboardJsAsset", "/static/dashboard.js"),
     ]);
     validateStandaloneAsset("vis-timeline CSS", visCss);
@@ -1431,6 +1435,12 @@
   }
 
   function backToLive() {
+    if (isStandaloneFile()) {
+      // Saved standalone files have no live server. Hide the button instead
+      // of firing fetch("/state") which would just error out.
+      $("#liveBtn").hidden = true;
+      return;
+    }
     state.mode = "live";
     setDashboardTitle("Live");
     setPaused(false);

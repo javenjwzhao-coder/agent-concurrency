@@ -160,3 +160,34 @@ def test_dashboard_exports_standalone_html_snapshots():
     assert "dashboard assets unavailable" in js
     assert "offline-fallback" in css
     assert "without `/state`, `/stream`, or a separate" in schema
+
+
+def test_dashboard_vendors_vis_timeline_for_offline_save():
+    # The unpkg path standalone/umd/vis-timeline-graph2d.min.css is a 404.
+    # Vendoring under dashboard/ keeps both the live <link>/<script> tags and
+    # the standalone exporter (which re-fetches the same paths) working with
+    # no network at run/save time.
+    html = _read("dashboard/index.html")
+    js = _read("dashboard/dashboard.js")
+
+    assert (REPO_ROOT / "dashboard/vis-timeline-graph2d.min.css").is_file()
+    assert (REPO_ROOT / "dashboard/vis-timeline-graph2d.min.js").is_file()
+    assert 'href="static/vis-timeline-graph2d.min.css"' in html
+    assert 'src="static/vis-timeline-graph2d.min.js"' in html
+    # Live tags must not reference the broken upstream URL anymore.
+    assert 'href="https://unpkg.com' not in html
+    assert 'src="https://unpkg.com' not in html
+    # Exporter fallback URLs must point at the vendored copies, not unpkg.
+    assert '"/static/vis-timeline-graph2d.min.css"' in js
+    assert '"/static/vis-timeline-graph2d.min.js"' in js
+    assert "unpkg.com" not in js
+
+
+def test_dashboard_hides_back_to_live_in_standalone_snapshots():
+    # Saved standalone HTML opened over file:// has no /state to return to,
+    # so the "Back to live" button must stay hidden even after a replay.
+    js = _read("dashboard/dashboard.js")
+
+    assert "function isStandaloneFile()" in js
+    assert "$(\"#liveBtn\").hidden = isStandaloneFile();" in js
+    assert "if (isStandaloneFile())" in js

@@ -5,15 +5,15 @@
   <title>Agent Concurrency · Live</title>
   <link id="dashboardCssAsset" rel="stylesheet" href="static/dashboard.css">
   <!--
-    vis-timeline (includes both Timeline and Graph2D) is loaded from a CDN.
-    The CSS lives under /styles/ on unpkg; the JS lives under /standalone/umd/.
-    If the dashboard host has no internet, download these two files into
-    ./static/ and change the two URLs below to /static/<filename>:
+    vis-timeline (Timeline + Graph2D) is vendored under dashboard/ and served
+    via /static/ alongside dashboard.{css,js}. Vendoring keeps the live
+    dashboard and the "Save standalone HTML" exporter working with no
+    internet access. The upstream sources are:
       https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css
       https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js
   -->
   <link id="visCssAsset" rel="stylesheet"
-        href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
+        href="static/vis-timeline-graph2d.min.css">
   <script>
     (function () {
       function showAssetError(asset) {
@@ -85,7 +85,7 @@
     <div id="timeline"></div>
   </main>
 
-  <script id="visJsAsset" src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+  <script id="visJsAsset" src="static/vis-timeline-graph2d.min.js"></script>
   <script id="dashboardJsAsset" src="static/dashboard.js"></script>
 </body>
 </html>
