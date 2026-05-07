@@ -245,7 +245,7 @@ flowchart TB
     tool -.->|run abort| done
 
     short -->|tool result / error| reasoning
-    short -->|fallback age| long
+    short -.->|still running<br/>+ resident KV| long
 
     long -->|tool result / error + release| reasoning
     long -->|KV pressure| offloaded
@@ -264,6 +264,11 @@ flowchart TB
     class offloaded,ready offload
     class done terminal
 ```
+
+The `Idle short` to `Idle long` edge is an exceptional correction path: it only
+matters when a short prediction ages badly and the agent still appears to have
+resident KV. If release cleared the KV as expected, the agent stays on the short
+path until the tool result arrives.
 
 Tool-call failures are not terminal by themselves. A failed, rejected, or
 cancelled tool call is delivered back to the agent as an observation, then the
