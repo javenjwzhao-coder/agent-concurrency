@@ -558,16 +558,44 @@ VLLM_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
     -H "Authorization: Bearer ${LLM_API_KEY}" \
     "$VLLM_HEALTH_URL" 2>/dev/null || echo "000")
 
+VLLM_START_SCRIPT="${SCRIPT_DIR}/start_vllm.sh"
+VLLM_STARTED_BY_THIS_SCRIPT=false
+
+# Stop the vLLM instance we started, including its NPU worker subprocesses.
+# Idempotent so it's safe to invoke from both the signal trap and the EXIT trap.
+stop_started_vllm() {
+    if [[ "$VLLM_STARTED_BY_THIS_SCRIPT" != "true" ]]; then
+        return 0
+    fi
+    VLLM_STARTED_BY_THIS_SCRIPT=false
+    if [[ ! -x "$VLLM_START_SCRIPT" && ! -f "$VLLM_START_SCRIPT" ]]; then
+        return 0
+    fi
+    echo -e "${YELLOW}Stopping vLLM (started by this run) ...${RESET}" >&2
+    bash "$VLLM_START_SCRIPT" --stop || true
+}
+
+# On Ctrl+C / SIGTERM we want to also tear down the vLLM (and its NPU workers)
+# that this script started. Capture $? before running cleanup so the original
+# exit code propagates.
+on_interrupt() {
+    local rc=$?
+    trap - INT TERM EXIT
+    stop_started_vllm
+    exit "${rc:-130}"
+}
+trap on_interrupt INT TERM
+
 if [[ "$VLLM_HTTP_CODE" == "200" ]]; then
     echo -e "${GREEN}  vLLM is already running.${RESET}"
 else
     echo -e "${YELLOW}  vLLM not responding (HTTP ${VLLM_HTTP_CODE}). Starting via start_vllm.sh ...${RESET}"
-    VLLM_START_SCRIPT="${SCRIPT_DIR}/start_vllm.sh"
     if [[ ! -f "$VLLM_START_SCRIPT" ]]; then
         echo -e "${RED}ERROR: start_vllm.sh not found: ${VLLM_START_SCRIPT}${RESET}" >&2
         exit 2
     fi
     bash "$VLLM_START_SCRIPT"
+    VLLM_STARTED_BY_THIS_SCRIPT=true
 fi
 
 # ── Benchmark venv (Python 3.12, separate from the vLLM .venv) ──────────────

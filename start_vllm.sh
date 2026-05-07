@@ -3,7 +3,27 @@
 # Usage: ./start_vllm.sh [config.yaml]
 set -euo pipefail
 
-CONFIG="${1:-config/vllm_config.yaml}"
+ACTION="start"
+CONFIG="config/vllm_config.yaml"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --stop|stop)
+            ACTION="stop"; shift ;;
+        --start|start)
+            ACTION="start"; shift ;;
+        --config|-c)
+            CONFIG="$2"; shift 2 ;;
+        --help|-h)
+            echo "Usage: $0 [--start|--stop] [--config <path>] [<config>]"
+            exit 0 ;;
+        --*)
+            echo "[ERROR] Unknown option: $1" >&2
+            exit 2 ;;
+        *)
+            CONFIG="$1"; shift ;;
+    esac
+done
 
 if [ ! -f "$CONFIG" ]; then
     echo "[ERROR] Config file not found: $CONFIG"
@@ -49,6 +69,24 @@ wait_for_ready() {
         sleep "$RETRY_INTERVAL"
     done
     echo "[ERROR] Timed out. Last status: ${code}"
+    return 1
+}
+
+is_vllm_pid() {
+    local pid="$1"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    local cmdline=""
+    if [ -r "/proc/$pid/cmdline" ]; then
+        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+    elif command -v ps >/dev/null 2>&1; then
+        cmdline=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    fi
+    case "$cmdline" in
+        *vllm*) return 0 ;;
+    esac
     return 1
 }
 
@@ -962,9 +1000,18 @@ print(f"[INFO] agent KV routes -> {sorted(p for p in route_paths if 'agent_kv' i
 PY
 
     # ── 5. Skip if already running ────────────────────────────────────────────
-    if [ -f "$PID_FILE" ] && kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
-        echo "[INFO] vLLM already running (PID $(cat $PID_FILE)). Skipping launch."
-        return
+    # Verify the recorded PID is actually a vLLM process before assuming the
+    # service is up. A bare `kill -0` only checks PID existence, which can
+    # match a recycled PID belonging to an unrelated process and leave us
+    # waiting forever on a port that will never open.
+    if [ -f "$PID_FILE" ]; then
+        EXISTING_PID=$(cat "$PID_FILE" 2>/dev/null || true)
+        if is_vllm_pid "$EXISTING_PID"; then
+            echo "[INFO] vLLM already running (PID $EXISTING_PID). Skipping launch."
+            return
+        fi
+        echo "[WARN] Stale vLLM PID file at $PID_FILE (PID '${EXISTING_PID:-<empty>}' is not a running vllm process). Removing." >&2
+        rm -f "$PID_FILE" "${PID_FILE}.workers.before"
     fi
 
     # ── 6. Launch vllm serve natively ────────────────────────────────────────
@@ -1011,6 +1058,13 @@ PY
 # =============================================================================
 HOST_PORT=$(cfg native.port)
 VLLM_API_KEY=$(cfg native.api_key)
+
+if [ "$ACTION" = "stop" ]; then
+    stop_vllm_from_pid_file
+    clear_vllm_worker_snapshot
+    exit 0
+fi
+
 start_native
 
 if ! wait_for_ready; then
