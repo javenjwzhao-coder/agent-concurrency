@@ -9,7 +9,7 @@ native:
   devices: "0,1"
 
   # vllm serve arguments — mirrors existing reasoning: block
-  model_path:           /root/jwzhao/Qwen3-32B-ABC
+  model_path:           /opt/data/Model/Qwen3/Qwen3-32B
   served_model_name:    qwen3-32b
   host:                 127.0.0.1
   port:                 8027
