@@ -623,7 +623,6 @@ echo -e "${CYAN}  Using $(python3 --version) from ${BENCH_VENV}${RESET}"
 # ─────────────────────────── execute ─────────────────────────────────────────
 
 # Create output directories.
-git pull
 rm -rf ../abc_runs ../abc_results
 mkdir -p "${WORKSPACE_ROOT:-./abc_runs}"
 mkdir -p "${RESULTS_ROOT:-./abc_results}"
