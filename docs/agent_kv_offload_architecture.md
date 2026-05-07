@@ -222,27 +222,56 @@ not "recover blocks after ref count reaches zero"; it is "hold before free."
 ## 5. Agent State Machine
 
 ```mermaid
-stateDiagram-v2
-    [*] --> FreshQueue
-    FreshQueue --> Admitted: launch
-    Admitted --> Reasoning: LLM request
-    Reasoning --> ToolCall: ActionEvent
-    Reasoning --> Done: final or error
+flowchart TD
+    queued([Fresh queue])
+    admitted([Admitted])
+    reasoning([Reasoning<br/>LLM owns the turn])
+    tool([Tool call<br/>tool is running])
+    short([Idle short<br/>release held KV])
+    long([Idle long<br/>offload candidate])
+    offloaded([Offloaded pending tool<br/>KV stored / agent still in tool])
+    ready([Offloaded ready<br/>tool result is waiting])
+    done([Done<br/>run terminal])
 
-    ToolCall --> IdleShort: predicted short
-    IdleShort --> IdleLong: fallback age reached while KV is still resident
-    IdleShort --> Reasoning: release + tool result
+    queued -->|launch| admitted
+    admitted -->|LLM request| reasoning
 
-    ToolCall --> IdleLong: predicted long
-    IdleLong --> OffloadedPendingTool: pressure offload accepted
-    IdleLong --> Reasoning: tool result + release + clear candidate
+    reasoning -->|ActionEvent| tool
+    reasoning -->|final assistant message| done
+    reasoning -.->|agent thread error<br/>or external cancel| done
 
-    OffloadedPendingTool --> OffloadedReady: ObservationEvent
-    OffloadedReady --> Admitted: readmit + restore
+    tool -->|predict short| short
+    short -->|tool result, error,<br/>reject, or cancel observation| reasoning
+    short -->|fallback age reached<br/>while KV remains resident| long
 
-    ToolCall --> Done: error or cancel
-    Done --> [*]
+    tool -->|predict long| long
+    long -->|tool result, error,<br/>reject, or cancel observation<br/>+ release| reasoning
+    long -->|pressure offload accepted| offloaded
+
+    offloaded -->|tool result, error,<br/>reject, or cancel observation| ready
+    ready -->|readmit + restore| admitted
+
+    tool -.->|whole run abort<br/>before observation| done
+    done --> terminal([End])
+
+    classDef queue fill:#eef2ff,stroke:#6366f1,color:#111827
+    classDef active fill:#ecfeff,stroke:#0891b2,color:#111827
+    classDef idle fill:#fef9c3,stroke:#ca8a04,color:#111827
+    classDef offload fill:#f5f3ff,stroke:#7c3aed,color:#111827
+    classDef terminal fill:#fee2e2,stroke:#dc2626,color:#111827
+
+    class queued,admitted queue
+    class reasoning,tool active
+    class short,long idle
+    class offloaded,ready offload
+    class done,terminal terminal
 ```
+
+Tool-call failures are not terminal by themselves. A failed, rejected, or
+cancelled tool call is delivered back to the agent as an observation, then the
+agent resumes `reasoning` with that result. `done` is reserved for run-level
+termination: final assistant completion, an agent/thread-level error, or an
+external cancellation before normal observation handling can continue.
 
 State naming in telemetry:
 
