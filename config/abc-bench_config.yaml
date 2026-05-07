@@ -100,7 +100,7 @@ sidecar:
 
     # Hard cap on active admitted agents. Set 0 to disable this cap and let KV
     # pressure/headroom be the only admission limit.
-    max_active_agents: 25
+    max_active_agents: 30
 
     # Fallback offload eligibility when no predictor model is available or a
     # prediction cannot be produced. A tool call older than this many seconds is
