@@ -222,46 +222,46 @@ not "recover blocks after ref count reaches zero"; it is "hold before free."
 ## 5. Agent State Machine
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 34, "rankSpacing": 38}} }%%
 flowchart LR
-    queued([Queued])
+    queued([Fresh queue])
     admitted([Admitted])
-    reasoning([Reasoning])
-    tool([Tool])
-    short([Short idle])
-    long([Long idle])
-    offloaded([Offloaded])
-    ready([Ready])
-    done([Done])
+    reasoning([Reasoning<br/>LLM turn])
+    tool([Tool call<br/>running])
+    done([Done<br/>run terminal])
 
-    queued -->|launch| admitted
-    admitted -->|LLM| reasoning
+    short([Idle short<br/>release KV])
+    long([Idle long<br/>offload candidate])
+    offloaded([KV offloaded<br/>tool still running])
+    ready([Ready<br/>await readmit])
 
-    reasoning -->|action| tool
-    reasoning -->|final| done
-    reasoning -.->|abort| done
+    queued -->|launch| admitted -->|LLM request| reasoning
+    reasoning -->|ActionEvent| tool
+    reasoning -->|final response| done
+    reasoning -.->|run error / cancel| done
 
-    tool -->|short| short
-    short -->|result / error| reasoning
-    short -->|ages out| long
+    tool -->|short prediction| short
+    tool -->|long prediction| long
+    tool -.->|run abort| done
 
-    tool -->|long| long
-    long -->|result / error| reasoning
-    long -->|pressure| offloaded
+    short -->|tool result / error| reasoning
+    short -->|fallback age| long
 
-    offloaded -->|result / error| ready
-    ready -->|readmit| admitted
+    long -->|tool result / error + release| reasoning
+    long -->|KV pressure| offloaded
 
-    tool -.->|abort| done
+    offloaded -->|tool result / error| ready
+    ready -->|readmit + restore| admitted
 
-    classDef queue fill:#eef2ff,stroke:#6366f1,color:#111827
-    classDef active fill:#ecfeff,stroke:#0891b2,color:#111827
-    classDef idle fill:#fef9c3,stroke:#ca8a04,color:#111827
-    classDef offload fill:#f5f3ff,stroke:#7c3aed,color:#111827
-    classDef terminal fill:#fee2e2,stroke:#dc2626,color:#111827
+    classDef queue fill:#eef2ff,stroke:#4f46e5,stroke-width:1.4px,color:#111827
+    classDef active fill:#ecfeff,stroke:#0891b2,stroke-width:1.4px,color:#111827
+    classDef policy fill:#fffbeb,stroke:#d97706,stroke-width:1.4px,color:#111827
+    classDef offload fill:#f5f3ff,stroke:#7c3aed,stroke-width:1.4px,color:#111827
+    classDef terminal fill:#fff1f2,stroke:#e11d48,stroke-width:1.4px,color:#111827
 
     class queued,admitted queue
     class reasoning,tool active
-    class short,long idle
+    class short,long policy
     class offloaded,ready offload
     class done terminal
 ```
