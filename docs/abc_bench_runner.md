@@ -124,9 +124,8 @@ values into `_LIVE_AGENTS`.
 
 The callback is removed in `finally`. The global LiteLLM callback list is
 guarded by `_litellm_cb_lock` because many agents can start concurrently.
-
-Scheduler-owned usage from `/agent_kv_cache/usage` can later overwrite these
-values through the sidecar. That path is more authoritative for held requests.
+The embedded sidecar consumes these `_LIVE_AGENTS` values directly for
+admission sizing and idle-tool-call offload scoring.
 
 ## Sidecar Hooks
 

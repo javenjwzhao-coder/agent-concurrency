@@ -18,7 +18,7 @@ Detailed component docs live in [docs/README.md](docs/README.md).
 | Path | Purpose |
 | --- | --- |
 | `src/run_abc_bench_instrumented.py` | Runs ABC-Bench tasks through OpenHands, records tool traces, publishes live agent state, and embeds the sidecar when enabled. |
-| `src/sidecar.py` | Polls vLLM metrics, refreshes per-agent KV usage, applies admission/offload policy, and writes JSONL ticks. |
+| `src/sidecar.py` | Polls vLLM metrics, reads live per-agent KV usage, applies admission/offload policy, and writes JSONL ticks. |
 | `src/build_tool_predictor.py` | Trains or loads a tool duration / remaining-time predictor from trace CSVs. |
 | `src/collect_tool_trace.py` | Duck-typed ActionEvent -> ObservationEvent trace collector used by the runner. |
 | `src/sidecar_http.py` | Small stdlib HTTP/SSE server for live and replay dashboard data. |
@@ -107,7 +107,6 @@ The patch adds:
 
 - `agent_id` on chat requests.
 - `kv_blocks_used` and `kv_blocks_size_gb` on usage telemetry.
-- `GET /agent_kv_cache/usage?agent_id=...`.
 - `POST /agent_kv_cache/offload`, `/release`, and `/restore`.
 - `AgentAwareOffloadingConnector`, which holds finished agent requests before
   their KV blocks enter vLLM's free queue.

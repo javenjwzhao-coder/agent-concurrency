@@ -256,11 +256,10 @@ State naming in telemetry:
 
 ## 6. Public Interfaces
 
-The vLLM patch adds scheduler-backed telemetry plus three control endpoints:
+The vLLM patch adds response-level KV telemetry plus three control endpoints:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /agent_kv_cache/usage?agent_id=...` | Return current scheduler-owned KV block counts for an agent, using active and held request snapshots rather than stale LiteLLM callback telemetry. `kv_blocks` / `resident_kv_blocks` count native NPU-resident blocks tracked by block ids; `offloadable_kv_blocks` counts complete hash-backed blocks eligible for connector offload. |
 | `POST /agent_kv_cache/offload` | Queue held snapshots for async CPU KV offload. |
 | `POST /agent_kv_cache/release` | Release held KV without CPU offload. Used for short calls, tool completion, final run cleanup, errors, cancellation, and TTL cleanup. |
 | `POST /agent_kv_cache/restore` | Notify readmission. Offloaded KV is loaded by normal OffloadingConnector prefix lookup on the next request. |
@@ -276,12 +275,12 @@ Important sidecar fields:
 | `admissions[*].w` | Per-admission copy of the gate value used when the event was emitted. |
 | `offloads[*].pending` | The endpoint accepted async connector work, but the free-block delta may not be visible yet. |
 | `freed_gb_source` | Source of freed-memory accounting: `vllm_free_blocks_delta`, `offload_endpoint`, `pending_async`, or `unavailable_exact`. |
-| `resident_kv_blocks` | Native accelerator KV blocks still owned by active or held agent requests and not in vLLM's free queue. Sidecar admission sizing uses this value. |
+| `kv_blocks` / `kv_gb` | Latest per-agent KV usage mirrored into `_LIVE_AGENTS` from patched vLLM response usage. Sidecar admission sizing uses these values. |
+| `resident_kv_blocks` | Native accelerator KV blocks still owned by active or held agent requests and not in vLLM's free queue, reported by connector control responses when available. |
 | `offloadable_kv_blocks` | Complete hash-backed connector blocks that can be copied to CPU. This may be lower than resident blocks when the final native block is only partially filled or when connector block coalescing is active. |
 | `held_requests` | Number of held request snapshots for the agent. |
 | `known_blocks` | Number of known offloadable KV block hashes from held snapshots. |
 | `offload_jobs` | Number of async store jobs already pending for the candidate. |
-| `scheduler_usage` | Per-tick status for sidecar `GET /agent_kv_cache/usage` refreshes. Successful refreshes set agent `kv_usage_source: scheduler_usage`. |
 
 ## 7. Accounting and Failure Modes
 

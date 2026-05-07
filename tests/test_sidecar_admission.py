@@ -43,55 +43,6 @@ class FakePredictor:
         return self.values.get(agent.get("agent_id", ""), 0.0)
 
 
-class FakeUsageResponse:
-    def __init__(self, payload: dict | None = None, status_code: int = 200, text: str = ""):
-        self._payload = payload or {}
-        self.status_code = status_code
-        self.text = text
-
-    def json(self):
-        return dict(self._payload)
-
-
-class FakeUsageSession:
-    def __init__(self, payloads: dict[str, dict | FakeUsageResponse]):
-        self.payloads = payloads
-        self.calls: list[str] = []
-
-    def get(self, url, params=None, timeout=None):
-        agent_id = (params or {}).get("agent_id", "")
-        self.calls.append(agent_id)
-        payload = self.payloads[agent_id]
-        if isinstance(payload, FakeUsageResponse):
-            return payload
-        return FakeUsageResponse(payload)
-
-
-class SlowUsageSession(FakeUsageSession):
-    def __init__(
-        self,
-        payloads: dict[str, dict | FakeUsageResponse],
-        *,
-        delay_s: float = 0.03,
-    ):
-        super().__init__(payloads)
-        self.delay_s = delay_s
-        self._lock = threading.Lock()
-        self._in_flight = 0
-        self.max_in_flight = 0
-
-    def get(self, url, params=None, timeout=None):
-        with self._lock:
-            self._in_flight += 1
-            self.max_in_flight = max(self.max_in_flight, self._in_flight)
-        try:
-            time.sleep(self.delay_s)
-            return super().get(url, params=params, timeout=timeout)
-        finally:
-            with self._lock:
-                self._in_flight -= 1
-
-
 def test_headroom_bootstrap_and_memoized_average():
     admitted: list[str] = []
     controller = DynamicAdmissionController(
@@ -198,26 +149,16 @@ def test_poll_vllm_reports_scheduler_preemption_count():
     assert info["scheduler_preemptions_total"] == 5
 
 
-def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
+def test_live_agent_kv_snapshot_drives_scoring_without_usage_refresh():
+    class NoUsageSession:
+        get_calls = 0
+
+        def get(self, *args, **kwargs):
+            self.get_calls += 1
+            raise AssertionError("unexpected per-agent usage refresh")
+
     offloaded: list[tuple[str, float]] = []
-    session = FakeUsageSession({
-        "stale-large": {
-            "available": True,
-            "kv_blocks": 2,
-            "active_requests": 1,
-            "held_requests": 0,
-            "pending_offload": False,
-            "offload_jobs": 0,
-        },
-        "stale-small": {
-            "available": True,
-            "kv_blocks": 5,
-            "active_requests": 1,
-            "held_requests": 0,
-            "pending_offload": False,
-            "offload_jobs": 0,
-        },
-    })
+    session = NoUsageSession()
 
     def offload(cand):
         offloaded.append((cand.agent_id, cand.kv_gb))
@@ -226,14 +167,23 @@ def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
-        predictor=FakePredictor({"stale-large": 10.0, "stale-small": 10.0}),
+        predictor=FakePredictor({"live-large": 10.0, "live-small": 10.0}),
         offload_callback=offload,
         session=session,
-        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
     )
     agents = {
-        "stale-large": {"agent_id": "stale-large", "state": "tool_call", "kv_blocks": 99},
-        "stale-small": {"agent_id": "stale-small", "state": "tool_call", "kv_blocks": 1},
+        "live-large": {
+            "agent_id": "live-large",
+            "state": "tool_call",
+            "kv_blocks": 5,
+            "kv_usage_source": "llm_response",
+        },
+        "live-small": {
+            "agent_id": "live-small",
+            "state": "tool_call",
+            "kv_blocks": 2,
+            "kv_usage_source": "llm_response",
+        },
     }
 
     report = controller.on_tick(
@@ -243,39 +193,25 @@ def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    assert set(session.calls) == {"stale-large", "stale-small"}
+    assert session.get_calls == 0
+    assert "scheduler_usage" not in report
     assert report["s_t"] == 3.5
-    assert report["scheduler_usage"]["updated"] == 2
-    assert agents["stale-large"]["kv_blocks"] == 2
-    assert agents["stale-small"]["kv_blocks"] == 5
-    assert agents["stale-small"]["kv_usage_source"] == "scheduler_usage"
-    assert report["offloads"][0]["agent_id"] == "stale-small"
+    assert report["offloads"][0]["agent_id"] == "live-large"
     assert report["offloads"][0]["kv_gb"] == 5.0
-    assert offloaded == [("stale-small", 5.0)]
+    assert offloaded == [("live-large", 5.0)]
 
 
-def test_scheduler_usage_queries_active_agents_in_parallel():
-    session = SlowUsageSession({
-        f"agent-{idx}": {
-            "available": True,
-            "kv_blocks": idx + 1,
-            "active_requests": 1,
-            "held_requests": 0,
-            "pending_offload": False,
-            "offload_jobs": 0,
-        }
-        for idx in range(4)
-    })
+def test_live_agent_kv_gb_is_used_when_blocks_are_missing():
     controller = DynamicAdmissionController(
         enabled=True,
         threshold_gb=0.1,
-        max_active_agents=2,
-        session=session,
-        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
     )
     agents = {
-        f"agent-{idx}": {"state": "reasoning", "kv_blocks": 1}
-        for idx in range(4)
+        "running": {
+            "state": "reasoning",
+            "kv_gb": 2.5,
+            "kv_usage_source": "llm_response",
+        },
     }
 
     report = controller.on_tick(
@@ -285,13 +221,9 @@ def test_scheduler_usage_queries_active_agents_in_parallel():
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    usage = report["scheduler_usage"]
-    assert usage["queried_agents"] == 4
-    assert usage["workers"] == 2
-    assert usage["updated"] == 4
-    assert session.max_in_flight > 1
-    assert session.max_in_flight <= 2
-    assert set(session.calls) == set(agents)
+    assert "scheduler_usage" not in report
+    assert report["s_t"] == 2.5
+    assert report["active_agent_samples"] == 1
 
 
 def test_stale_tool_call_snapshot_is_not_offloaded_after_live_state_changes():
@@ -337,83 +269,9 @@ def test_stale_tool_call_snapshot_is_not_offloaded_after_live_state_changes():
     ]
 
 
-def test_scheduler_usage_prefers_resident_kv_blocks_for_memory_sizing():
-    session = FakeUsageSession({
-        "running": {
-            "available": True,
-            "kv_blocks": 2,
-            "resident_kv_blocks": 7,
-            "offloadable_kv_blocks": 2,
-            "active_requests": 1,
-            "held_requests": 0,
-            "pending_offload": False,
-            "offload_jobs": 0,
-        },
-    })
-    controller = DynamicAdmissionController(
-        enabled=True,
-        threshold_gb=0.1,
-        session=session,
-        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
-    )
-    agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
-
-    report = controller.on_tick(
-        tick=0,
-        vllm_info={"kv_free_gb": 5.0},
-        agents=agents,
-        bytes_per_blk=BYTES_PER_GB,
-    )
-
-    assert report["s_t"] == 7.0
-    assert agents["running"]["kv_blocks"] == 7
-    assert agents["running"]["kv_gb"] == 7.0
-    assert agents["running"]["last_kv_usage"]["resident_kv_blocks"] == 7
-    assert agents["running"]["last_kv_usage"]["offloadable_kv_blocks"] == 2
-    assert agents["running"]["last_kv_usage"]["block_source"] == "resident_kv_blocks"
-
-
-def test_scheduler_usage_failure_preserves_live_kv_snapshot():
-    session = FakeUsageSession({
-        "running": FakeUsageResponse(status_code=500, text="boom"),
-    })
-    controller = DynamicAdmissionController(
-        enabled=True,
-        threshold_gb=0.1,
-        session=session,
-        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
-    )
-    agents = {"running": {"state": "reasoning", "kv_blocks": 4}}
-
-    report = controller.on_tick(
-        tick=0,
-        vllm_info={"kv_free_gb": 5.0},
-        agents=agents,
-        bytes_per_blk=BYTES_PER_GB,
-    )
-
-    assert report["s_t"] == 4.0
-    assert report["scheduler_usage"]["errors"] == 1
-    assert "scheduler_usage_unavailable" in report["reasons"]
-    assert agents["running"]["kv_blocks"] == 4
-    assert "kv_usage_source" not in agents["running"]
-
-
-def test_zero_scheduler_usage_preserves_tool_call_live_kv_for_fallback_offload():
+def test_live_tool_call_kv_snapshot_is_used_for_fallback_offload():
     offloaded: list[tuple[str, float]] = []
     old_ts = iso_utc(now_utc() - timedelta(seconds=45))
-    session = FakeUsageSession({
-        "tool": {
-            "available": True,
-            "resident_kv_blocks": 0,
-            "kv_blocks": 0,
-            "offloadable_kv_blocks": 0,
-            "active_requests": 0,
-            "held_requests": 0,
-            "pending_offload": False,
-            "offload_jobs": 0,
-        },
-    })
 
     def offload(cand):
         offloaded.append((cand.agent_id, cand.kv_gb))
@@ -424,8 +282,6 @@ def test_zero_scheduler_usage_preserves_tool_call_live_kv_for_fallback_offload()
         threshold_gb=0.1,
         fallback_long_tool_call_s=30.0,
         offload_callback=offload,
-        session=session,
-        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
     )
     agents = {
         "tool": {
@@ -434,7 +290,7 @@ def test_zero_scheduler_usage_preserves_tool_call_live_kv_for_fallback_offload()
             "state_since": old_ts,
             "kv_blocks": 4,
             "kv_gb": 4.0,
-            "kv_usage_source": "litellm_usage",
+            "kv_usage_source": "llm_response",
         },
     }
 
@@ -445,14 +301,10 @@ def test_zero_scheduler_usage_preserves_tool_call_live_kv_for_fallback_offload()
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    assert report["scheduler_usage"]["preserved_agents"] == ["tool"]
+    assert "scheduler_usage" not in report
     assert agents["tool"]["kv_blocks"] == 4
     assert agents["tool"]["kv_gb"] == 4.0
-    assert (
-        agents["tool"]["kv_usage_source"]
-        == "live_snapshot_preserved_after_zero_scheduler_usage"
-    )
-    assert agents["tool"]["last_kv_usage"]["zero_scheduler_usage_preserved"] is True
+    assert agents["tool"]["kv_usage_source"] == "llm_response"
     assert report["heap_candidates"][0]["agent_id"] == "tool"
     assert report["heap_candidates"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
     assert report["offloads"][0]["agent_id"] == "tool"
@@ -472,7 +324,7 @@ def test_zero_kv_tool_call_has_explicit_skipped_reason():
             "state_since": iso_utc(now_utc() - timedelta(seconds=45)),
             "kv_blocks": 0,
             "kv_gb": 0.0,
-            "kv_usage_source": "scheduler_usage",
+            "kv_usage_source": "llm_response",
         },
     }
 
@@ -494,11 +346,11 @@ def test_zero_kv_tool_call_has_explicit_skipped_reason():
         "reason": "missing_or_zero_kv",
         "kv_blocks": 0,
         "kv_gb": 0.0,
-        "kv_usage_source": "scheduler_usage",
+        "kv_usage_source": "llm_response",
         "last_kv_updated": None,
         "last_kv_usage": None,
     }
-    assert report["scheduler_usage"].get("zero_kv_during_tool_call") == 1
+    assert report["zero_kv_tool_call_candidates"] == 1
 
 
 def test_saturation_guard_blocks_admission_when_headroom_below_one():

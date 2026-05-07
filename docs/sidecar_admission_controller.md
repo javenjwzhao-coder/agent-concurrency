@@ -241,27 +241,19 @@ Common reasons:
 Release removes the agent from idle candidate sets and marks its live state as
 `kv_policy = "released"`.
 
-## Scheduler Usage Refresh
+## Live KV Usage
 
-When `usage_endpoint` is configured, `_refresh_agent_kv_usage_locked()` queries
-vLLM for each active, non-offloaded agent. Requests are issued in a bounded
-parallel pool capped by `max_active_agents` when that cap is configured. If
-`max_active_agents` is `0`, the pool spans the current active targets:
-
-```text
-GET /agent_kv_cache/usage?agent_id=<id>
-```
-
-The response updates live state with scheduler-owned usage:
+Admission sizing uses the agent state passed into `on_tick()`. In embedded
+mode this is the runner's in-memory `_LIVE_AGENTS` dict, where the LiteLLM
+success callback mirrors the latest patched vLLM response usage:
 
 - `kv_blocks`
 - `kv_gb`
-- `kv_usage_source = "scheduler_usage"`
-- active/held request counts
-- resident/offloadable block counts
+- `kv_usage_source = "llm_response"`
+- `last_kv_updated`
 
-This is preferred over callback usage because the connector can report held
-finished requests that no longer look active to normal response telemetry.
+The sidecar no longer performs per-agent HTTP usage refreshes during the
+admission tick.
 
 ## Tick Log Shape
 
@@ -291,7 +283,6 @@ log file.
 | `default_offload_endpoint()` | Build default offload URL from vLLM base URL. |
 | `default_restore_endpoint()` | Build default restore URL. |
 | `default_release_endpoint()` | Build default release URL. |
-| `default_usage_endpoint()` | Build default usage URL. |
 
 ## Failure Behavior
 

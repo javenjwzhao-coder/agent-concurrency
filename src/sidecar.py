@@ -44,7 +44,6 @@ import sys
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -321,24 +320,8 @@ def default_release_endpoint(vllm_url: str) -> str:
     return urljoin(base, "agent_kv_cache/release")
 
 
-def default_usage_endpoint(vllm_url: str) -> str:
-    """Return the default local vLLM agent-KV usage endpoint."""
-    base = vllm_url.rstrip("/") + "/"
-    return urljoin(base, "agent_kv_cache/usage")
-
-
 def _make_http_session(pool_maxsize: int = 64) -> requests.Session:
-    """Build a session whose connection pool can hold many concurrent requests.
-
-    urllib3's default pool_maxsize is 10. Under pressure the sidecar fires
-    one HTTP call per active agent (usage refresh runs in parallel via a
-    ThreadPoolExecutor) plus offload / release / restore / metrics polls
-    against the same vLLM host. Exceeding the pool floods stderr with
-    "Connection pool is full, discarding connection" warnings and forces
-    urllib3 to reopen connections every tick, which adds enough latency to
-    stall the admission loop. Size the pool to comfortably cover all the
-    concurrent calls a tick can issue.
-    """
+    """Build a session with enough pooled connections for sidecar control calls."""
     session = requests.Session()
     pool = max(10, int(pool_maxsize))
     adapter_cls = getattr(getattr(requests, "adapters", None), "HTTPAdapter", None)
@@ -428,7 +411,6 @@ class DynamicAdmissionController:
         offload_endpoint: Optional[str] = None,
         restore_endpoint: Optional[str] = None,
         release_endpoint: Optional[str] = None,
-        usage_endpoint: Optional[str] = None,
         offload_timeout_s: float = DEFAULT_OFFLOAD_TIMEOUT_S,
         exact_freed_gb_timeout_s: float = DEFAULT_EXACT_FREED_GB_TIMEOUT_S,
         exact_freed_gb_poll_interval_s: float = 0.05,
@@ -458,7 +440,6 @@ class DynamicAdmissionController:
         self.offload_endpoint = str(offload_endpoint or "")
         self.restore_endpoint = str(restore_endpoint) if restore_endpoint else ""
         self.release_endpoint = str(release_endpoint) if release_endpoint else ""
-        self.usage_endpoint = str(usage_endpoint) if usage_endpoint else ""
         self.offload_timeout_s = max(0.1, float(offload_timeout_s))
         self.exact_freed_gb_timeout_s = max(0.0, float(exact_freed_gb_timeout_s))
         self.exact_freed_gb_poll_interval_s = max(
@@ -472,10 +453,8 @@ class DynamicAdmissionController:
         self._offload_callback = offload_callback
         self._restore_callback = restore_callback
         self._release_callback = release_callback
-        # Size the pool to comfortably cover one connection per active agent
-        # (usage refresh runs all of them in parallel) plus offload / release /
-        # restore / metrics calls. max_active_agents=0 means uncapped, so fall
-        # back to a large default in that case.
+        # Size the pool to cover concurrent offload / release / restore calls
+        # from runner threads plus the sidecar's metrics polling.
         if self.max_active_agents:
             session_pool = max(32, self.max_active_agents * 2 + 8)
         else:
@@ -723,10 +702,6 @@ class DynamicAdmissionController:
             free_percent = self._kv_free_percent(free_gb, total_gb, vllm_info)
             threshold_gb = self._pressure_threshold_gb(total_gb)
             threshold_percent = self._pressure_threshold_percent(total_gb)
-            usage_report = (
-                self._refresh_agent_kv_usage_locked(agents, bytes_per_blk)
-                if self.enabled else {"enabled": False, "reason": "admission_disabled"}
-            )
             active_agents = self._active_agent_count(agents)
             resident_active_agents = self._resident_active_agent_count(agents)
             avg_gb, avg_count = self._average_active_kv_gb(agents, bytes_per_blk)
@@ -771,7 +746,6 @@ class DynamicAdmissionController:
                 "max_active_agents": self.max_active_agents,
                 "active_agents": active_agents,
                 "active_agent_slots": self._active_agent_slots(active_agents),
-                "scheduler_usage": usage_report,
                 "next_initial_admit_in_s": None,
                 "queue": self.pending_counts(),
                 "heap_candidates": [],
@@ -788,8 +762,6 @@ class DynamicAdmissionController:
 
             if self._predictor_error:
                 report["reasons"].append(f"predictor_error: {self._predictor_error}")
-            if usage_report.get("errors"):
-                report["reasons"].append("scheduler_usage_unavailable")
             if not self.enabled:
                 report["reasons"].append("disabled")
                 self._prev_avg_gb = avg_gb
@@ -817,7 +789,7 @@ class DynamicAdmissionController:
                 1 for s in skipped if s.get("reason") == "missing_or_zero_kv"
             )
             if zero_kv_during_tool_call:
-                usage_report["zero_kv_during_tool_call"] = zero_kv_during_tool_call
+                report["zero_kv_tool_call_candidates"] = zero_kv_during_tool_call
             report["heap_candidates"] = [
                 {
                     "agent_id": cand.agent_id,
@@ -976,175 +948,6 @@ class DynamicAdmissionController:
             report["first_saturation_seen"] = self._first_saturation_seen
             self._prev_avg_gb = avg_gb
             return report
-
-    def _refresh_agent_kv_usage_locked(
-        self,
-        agents: dict[str, dict[str, Any]],
-        bytes_per_blk: int,
-    ) -> dict[str, Any]:
-        report: dict[str, Any] = {
-            "enabled": bool(self.usage_endpoint),
-            "updated": 0,
-            "errors": 0,
-            "queried_agents": 0,
-            "workers": 0,
-            "updated_agents": [],
-            "preserved_agents": [],
-            "failed_agents": [],
-        }
-        if not self.usage_endpoint:
-            report["reason"] = "missing_usage_endpoint"
-            return report
-
-        targets: list[str] = []
-        for agent_id, agent in agents.items():
-            if agent.get("state") not in self.ACTIVE_STATES:
-                continue
-            if agent.get("kv_offloaded") or agent_id in self._offloaded_events:
-                continue
-            targets.append(agent_id)
-
-        report["queried_agents"] = len(targets)
-        if not targets:
-            return report
-
-        worker_cap = (
-            self.max_active_agents if self.max_active_agents > 0 else len(targets)
-        )
-        workers = min(worker_cap, len(targets))
-        report["workers"] = workers
-        if workers == 1:
-            results = {
-                agent_id: self._fetch_agent_kv_usage(agent_id, bytes_per_blk)
-                for agent_id in targets
-            }
-        else:
-            results = {}
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_agent = {
-                    executor.submit(
-                        self._fetch_agent_kv_usage, agent_id, bytes_per_blk
-                    ): agent_id
-                    for agent_id in targets
-                }
-                for future in as_completed(future_to_agent):
-                    agent_id = future_to_agent[future]
-                    try:
-                        results[agent_id] = future.result()
-                    except Exception as exc:
-                        results[agent_id] = {
-                            "agent_id": agent_id,
-                            "error": str(exc)[:200],
-                        }
-
-        for agent_id in targets:
-            result = results[agent_id]
-            error = result.get("error")
-            if error:
-                report["errors"] += 1
-                report["failed_agents"].append({
-                    "agent_id": agent_id,
-                    "reason": str(error)[:200],
-                })
-                continue
-
-            patch = result["patch"]
-            agent = agents.get(agent_id)
-            preserved = self._preserve_live_tool_kv_on_zero_usage(
-                agent, patch, bytes_per_blk
-            )
-            if agent is not None:
-                agent.update(patch)
-            self._update_agent_state_locked(agent_id, patch)
-            report["updated"] += 1
-            report["updated_agents"].append(agent_id)
-            if preserved:
-                report["preserved_agents"].append(agent_id)
-        return report
-
-    def _preserve_live_tool_kv_on_zero_usage(
-        self,
-        agent: Optional[dict[str, Any]],
-        patch: dict[str, Any],
-        bytes_per_blk: int,
-    ) -> bool:
-        """Keep a nonzero tool-call KV snapshot when scheduler usage races to 0."""
-        if not agent or agent.get("state") != "tool_call":
-            return False
-        if patch.get("kv_blocks") != 0:
-            return False
-        previous_blocks = agent.get("kv_blocks")
-        if not isinstance(previous_blocks, int) or previous_blocks <= 0:
-            return False
-
-        preserved_gb = previous_blocks * bytes_per_blk / 1e9
-        last_usage = dict(patch.get("last_kv_usage") or {})
-        last_usage.update({
-            "scheduler_reported_kv_blocks": patch.get("kv_blocks"),
-            "preserved_live_kv_blocks": previous_blocks,
-            "preserved_live_kv_gb": preserved_gb,
-            "zero_scheduler_usage_preserved": True,
-        })
-        patch.update({
-            "kv_blocks": previous_blocks,
-            "kv_gb": preserved_gb,
-            "kv_usage_source": "live_snapshot_preserved_after_zero_scheduler_usage",
-            "last_kv_usage": last_usage,
-        })
-        return True
-
-    def _fetch_agent_kv_usage(
-        self,
-        agent_id: str,
-        bytes_per_blk: int,
-    ) -> dict[str, Any]:
-        try:
-            resp = self._session.get(
-                self.usage_endpoint,
-                params={"agent_id": agent_id},
-                timeout=self.offload_timeout_s,
-            )
-            status_code = int(getattr(resp, "status_code", 200))
-            if status_code >= 400:
-                raise RuntimeError(
-                    f"HTTP {status_code}: {getattr(resp, 'text', '')[:200]}"
-                )
-            payload = resp.json()
-            if payload.get("available") is False:
-                raise RuntimeError(str(payload.get("reason") or "usage unavailable"))
-            block_source = "resident_kv_blocks"
-            blocks = payload.get("resident_kv_blocks")
-            if blocks is None:
-                block_source = "kv_blocks"
-                blocks = payload.get("kv_blocks")
-            if blocks is None:
-                block_source = "kv_blocks_used"
-                blocks = payload.get("kv_blocks_used")
-            if not isinstance(blocks, int):
-                blocks = int(blocks)
-            if blocks < 0:
-                raise ValueError(f"negative kv_blocks: {blocks}")
-
-            patch = {
-                "kv_blocks": blocks,
-                "kv_gb": blocks * bytes_per_blk / 1e9,
-                "kv_usage_source": "scheduler_usage",
-                "last_kv_updated": iso_utc(now_utc()),
-                "last_kv_usage": {
-                    "active_requests": int(payload.get("active_requests") or 0),
-                    "held_requests": int(payload.get("held_requests") or 0),
-                    "pending_offload": bool(payload.get("pending_offload")),
-                    "offload_jobs": int(payload.get("offload_jobs") or 0),
-                    "resident_kv_blocks": blocks,
-                    "offloadable_kv_blocks": int(
-                        payload.get("offloadable_kv_blocks") or 0
-                    ),
-                    "block_source": block_source,
-                },
-            }
-            return {"agent_id": agent_id, "patch": patch}
-        except Exception as exc:
-            return {"agent_id": agent_id, "error": str(exc)[:200]}
 
     def _load_predictor(self, path: Path) -> None:
         try:
@@ -2175,9 +1978,6 @@ def parse_args() -> argparse.Namespace:
     ac.add_argument("--release-endpoint", default=None,
                     help="vLLM admin endpoint to release held agent KV without "
                          "offload. Defaults to <vllm-url>/agent_kv_cache/release.")
-    ac.add_argument("--usage-endpoint", default=None,
-                    help="vLLM admin endpoint for live per-agent KV usage. "
-                         "Defaults to <vllm-url>/agent_kv_cache/usage.")
     ac.add_argument("--offload-timeout-s", type=float, default=None,
                     help="HTTP timeout for one offload request.")
     ac.add_argument("--exact-freed-gb-timeout-s", type=float, default=None,
@@ -2220,7 +2020,6 @@ def main() -> int:
             offload_endpoint=args.offload_endpoint or default_offload_endpoint(args.vllm_url),
             restore_endpoint=args.restore_endpoint or default_restore_endpoint(args.vllm_url),
             release_endpoint=args.release_endpoint or default_release_endpoint(args.vllm_url),
-            usage_endpoint=args.usage_endpoint or default_usage_endpoint(args.vllm_url),
             offload_timeout_s=(
                 args.offload_timeout_s
                 if args.offload_timeout_s is not None

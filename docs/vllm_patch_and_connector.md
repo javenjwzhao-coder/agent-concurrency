@@ -74,7 +74,7 @@ The patch adds:
 
 | Endpoint | Method | Payload | Purpose |
 | --- | --- | --- | --- |
-| `/agent_kv_cache/usage` | GET | query `agent_id` | Return scheduler-owned agent KV usage. |
+| `/agent_kv_cache/usage` | GET | query `agent_id` | Diagnostic scheduler-owned agent KV usage. The sidecar admission loop uses `_LIVE_AGENTS` response telemetry instead. |
 | `/agent_kv_cache/offload` | POST | `{"agent_id": "...", "only_ref_cnt_zero": true}` | Queue held agent KV for async CPU offload. |
 | `/agent_kv_cache/release` | POST | `{"agent_id": "...", "reason": "..."}` | Release held KV without CPU offload. |
 | `/agent_kv_cache/restore` | POST | `{"agent_id": "..."}` | Clear pending offload/readmit state. Next request restores by prefix lookup. |
@@ -171,11 +171,11 @@ This is the central safety invariant: finished agent request blocks are held
 before they can enter vLLM's free queue.
 
 Resident and offloadable accounting are intentionally separate. Resident
-`block_ids` make `/agent_kv_cache/usage` report nonzero KV and allow admission
-sizing to see the held request. `block_hashes` are required only for CPU
-offload. If a held request has resident blocks but no hash-backed blocks, the
-offload endpoint rejects the attempt as `no offloadable held KV blocks for
-agent` while still reporting the resident block count.
+`block_ids` let connector control responses report nonzero native KV while
+`block_hashes` are required only for CPU offload. If a held request has
+resident blocks but no hash-backed blocks, the offload endpoint rejects the
+attempt as `no offloadable held KV blocks for agent` while still reporting the
+resident block count.
 
 ## Offload Flow
 
@@ -231,8 +231,9 @@ Restore does not directly copy blocks during the HTTP request.
 - offload job count
 - per-request active/held details
 
-The sidecar prefers `resident_kv_blocks`, then `kv_blocks`, then
-`kv_blocks_used` when refreshing live state.
+The sidecar admission loop no longer refreshes live state through this route;
+it scores agents from `_LIVE_AGENTS`, which is updated from response usage
+telemetry after each LLM call.
 
 ## Synthetic Job IDs
 
