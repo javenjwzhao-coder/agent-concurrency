@@ -222,37 +222,36 @@ not "recover blocks after ref count reaches zero"; it is "hold before free."
 ## 5. Agent State Machine
 
 ```mermaid
-flowchart TD
-    queued([Fresh queue])
+flowchart LR
+    queued([Queued])
     admitted([Admitted])
-    reasoning([Reasoning<br/>LLM owns the turn])
-    tool([Tool call<br/>tool is running])
-    short([Idle short<br/>release held KV])
-    long([Idle long<br/>offload candidate])
-    offloaded([Offloaded pending tool<br/>KV stored / agent still in tool])
-    ready([Offloaded ready<br/>tool result is waiting])
-    done([Done<br/>run terminal])
+    reasoning([Reasoning])
+    tool([Tool])
+    short([Short idle])
+    long([Long idle])
+    offloaded([Offloaded])
+    ready([Ready])
+    done([Done])
 
     queued -->|launch| admitted
-    admitted -->|LLM request| reasoning
+    admitted -->|LLM| reasoning
 
-    reasoning -->|ActionEvent| tool
-    reasoning -->|final assistant message| done
-    reasoning -.->|agent thread error<br/>or external cancel| done
+    reasoning -->|action| tool
+    reasoning -->|final| done
+    reasoning -.->|abort| done
 
-    tool -->|predict short| short
-    short -->|tool result, error,<br/>reject, or cancel observation| reasoning
-    short -->|fallback age reached<br/>while KV remains resident| long
+    tool -->|short| short
+    short -->|result / error| reasoning
+    short -->|ages out| long
 
-    tool -->|predict long| long
-    long -->|tool result, error,<br/>reject, or cancel observation<br/>+ release| reasoning
-    long -->|pressure offload accepted| offloaded
+    tool -->|long| long
+    long -->|result / error| reasoning
+    long -->|pressure| offloaded
 
-    offloaded -->|tool result, error,<br/>reject, or cancel observation| ready
-    ready -->|readmit + restore| admitted
+    offloaded -->|result / error| ready
+    ready -->|readmit| admitted
 
-    tool -.->|whole run abort<br/>before observation| done
-    done --> terminal([End])
+    tool -.->|abort| done
 
     classDef queue fill:#eef2ff,stroke:#6366f1,color:#111827
     classDef active fill:#ecfeff,stroke:#0891b2,color:#111827
@@ -264,7 +263,7 @@ flowchart TD
     class reasoning,tool active
     class short,long idle
     class offloaded,ready offload
-    class done,terminal terminal
+    class done terminal
 ```
 
 Tool-call failures are not terminal by themselves. A failed, rejected, or
