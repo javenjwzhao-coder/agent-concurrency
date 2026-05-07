@@ -400,6 +400,7 @@
       activeItemId: null,
       activeStart: null,
       activePhase: null,
+      lastRecordTs: null,
       lastKvGb: null,
     };
     state.agents.set(agentId, entry);
@@ -494,6 +495,7 @@
     updateAgentRuntimeLabel(entry, agentId, agent, recordTs);
     const phase = agent.state || "waiting";
     const phaseStart = agent.state_since || recordTs;
+    const previousRecordTs = entry.lastRecordTs;
     entry.lastKvGb = (agent.kv_gb !== undefined) ? agent.kv_gb : entry.lastKvGb;
 
     if (entry.activeItemId !== null
@@ -504,14 +506,27 @@
         end: new Date(recordTs),
         title: phaseTooltip(agentId, agent, phaseStart, recordTs),
       });
+      entry.lastRecordTs = recordTs;
       return;
     }
+
+    const bridgeMissedReasoning =
+      entry.activeItemId !== null
+      && entry.activePhase === "waiting"
+      && phase === "tool_call"
+      && previousRecordTs !== null
+      && parseTimeMs(previousRecordTs) !== null
+      && parseTimeMs(phaseStart) !== null
+      && parseTimeMs(previousRecordTs) < parseTimeMs(phaseStart);
 
     if (entry.activeItemId !== null) {
       state.items.update({
         id: entry.activeItemId,
-        end: new Date(phaseStart),
+        end: new Date(bridgeMissedReasoning ? previousRecordTs : phaseStart),
       });
+      if (bridgeMissedReasoning) {
+        addSyntheticReasoningBridge(entry, agentId, agent, previousRecordTs, phaseStart);
+      }
     }
     const itemId = `phase::${agentId}::${++state.itemCounter}`;
     state.items.add({
@@ -526,6 +541,21 @@
     entry.activeItemId = itemId;
     entry.activeStart = phaseStart;
     entry.activePhase = phase;
+    entry.lastRecordTs = recordTs;
+  }
+
+  function addSyntheticReasoningBridge(entry, agentId, agent, startTs, endTs) {
+    const itemId = `phase::${agentId}::${++state.itemCounter}`;
+    const bridgeAgent = Object.assign({}, agent, { state: "reasoning" });
+    state.items.add({
+      id: itemId,
+      group: entry.groupId,
+      start: new Date(startTs),
+      end: new Date(endTs),
+      content: "reasoning",
+      className: "phase-reasoning",
+      title: phaseTooltip(agentId, bridgeAgent, startTs, endTs),
+    });
   }
 
   function phaseTooltip(agentId, agent, phaseStart, recordTs) {

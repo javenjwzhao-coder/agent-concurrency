@@ -135,6 +135,17 @@ def test_dashboard_agent_labels_show_elapsed_then_fixed_e2e_time():
     assert "finished_at" in schema
 
 
+def test_dashboard_bridges_sampled_waiting_to_tool_call_jumps_with_reasoning():
+    js = _read("dashboard/dashboard.js")
+    schema = _read("dashboard/SCHEMA.md")
+
+    assert "lastRecordTs" in js
+    assert 'entry.activePhase === "waiting"' in js
+    assert 'phase === "tool_call"' in js
+    assert "addSyntheticReasoningBridge(" in js
+    assert "misses a short reasoning span" in schema
+
+
 def test_dashboard_exports_standalone_html_snapshots():
     js = _read("dashboard/dashboard.js")
     html = _read("dashboard/index.html")

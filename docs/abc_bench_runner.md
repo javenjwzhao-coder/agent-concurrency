@@ -50,9 +50,9 @@ events and infers phase transitions:
 | `MessageEvent` from user | If waiting, opens `reasoning`. |
 | `ActionEvent` | Closes `reasoning`, opens `tool_call`, records pending tool metadata, notifies sidecar. |
 | `ObservationEvent` or `UserRejectObservation` | Finalizes the tool call, optionally waits for readmission, opens `reasoning`. |
-| `MessageEvent` from agent | Releases held KV through sidecar, closes reasoning, opens waiting. |
+| `MessageEvent` from agent | Marks a possible terminal response, but keeps `reasoning` live because an SDK `ActionEvent` may still follow from the same model turn. |
 | `AgentErrorEvent` | Releases held KV, closes current phase, moves to waiting. |
-| `run_end()` | Finalizes unfinished tool calls, marks the live agent done, releases held KV. |
+| `run_end()` | Finalizes unfinished tool calls or pending terminal text, marks the live agent done, releases held KV. |
 
 Live phase names are consumed by the sidecar and dashboard. Important values are
 `waiting`, `reasoning`, `tool_call`, `offloaded_waiting`, and `done`.

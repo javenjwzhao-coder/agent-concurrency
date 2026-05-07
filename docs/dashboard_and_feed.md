@@ -159,6 +159,12 @@ Phase segments are derived from:
 - current tick `ts`
 - optional `kv_gb` for tooltips
 
+Because ticks are sampled, the browser can observe `waiting` on one tick and
+`tool_call` on the next even though a short reasoning span happened between
+them. In that case the dashboard keeps `waiting` only through the last tick
+that actually observed it and inserts a reasoning bridge up to the tool-call
+start.
+
 Supported phase colors are tested in `tests/test_dashboard_events.py`.
 
 ## Events

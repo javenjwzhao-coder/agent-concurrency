@@ -148,11 +148,11 @@ class AgentPhaseTracker:
     │      → open REASONING phase (LLM processes tool output)            │
     │                                                                    │
     │  on_event(MessageEvent source=agent)                               │
-    │      → close current REASONING phase                               │
-    │      → open WAITING phase (agent done for this turn)               │
+    │      → remember a possible terminal response                       │
+    │      → keep REASONING open; a tool ActionEvent may follow          │
     │                                                                    │
     │  run_end()                                                         │
-    │      → close whatever phase is open as WAITING                     │
+    │      → finalize pending phases and mark the live agent DONE        │
     └─────────────────────────────────────────────────────────────────────┘
     """
 
@@ -173,6 +173,7 @@ class AgentPhaseTracker:
         self._phase_counts: dict[str, int] = defaultdict(int)
         self._current_phase: Optional[str] = None
         self._phase_start_dt: Optional[datetime] = None
+        self._pending_agent_message_dt: Optional[datetime] = None
         self.tool_collector = ToolCallTraceCollector(
             agent_id=agent_id,
             task_id=task_id,
@@ -278,6 +279,19 @@ class AgentPhaseTracker:
                 for rec in finalized:
                     self._phase_durations["tool_call"] += rec.duration_s
                     self._phase_counts["tool_call"] += 1
+            elif (
+                self._current_phase == "reasoning"
+                and self._pending_agent_message_dt is not None
+                and outcome == "run_complete"
+            ):
+                message_dt = self._pending_agent_message_dt
+                self._pending_agent_message_dt = None
+                self._close_phase(message_dt, outcome="agent_message",
+                                  detail="assistant text message")
+                wait_dur = (end_dt - message_dt).total_seconds()
+                if wait_dur > 0.01:
+                    self._phase_durations["waiting"] += max(0.0, wait_dur)
+                    self._phase_counts["waiting"] += 1
             self._close_phase(end_dt, outcome=outcome, detail=detail)
 
     def on_event(self, event: Event):
@@ -299,18 +313,16 @@ class AgentPhaseTracker:
                     return
 
                 if source == "agent":
-                    # Agent emitted a text message (not a tool call).
-                    # Close the reasoning phase; the agent is now idle.
-                    if self.admission_controller is not None:
-                        self.admission_controller.release_agent_kv(
-                            self.agent_id, "final")
-                    self._close_phase(event_dt, outcome="agent_message",
-                                      detail="assistant text message")
-                    self._open_phase("waiting", event_dt)
+                    # The SDK can emit assistant text immediately before the
+                    # corresponding ActionEvent for a tool call. Treat this as
+                    # provisional until run_end() confirms the turn is done.
+                    if self._current_phase == "reasoning":
+                        self._pending_agent_message_dt = event_dt
                     return
 
             # ── action event: agent issues a tool call ──
             if isinstance(event, ActionEvent):
+                self._pending_agent_message_dt = None
                 tool_name = getattr(event, "tool_name", "unknown") or "unknown"
 
                 # Close the reasoning phase that preceded this tool call.

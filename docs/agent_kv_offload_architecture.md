@@ -54,7 +54,7 @@ flowchart TB
 
 | Layer | Responsibility |
 | --- | --- |
-| Runner | Publishes live agent phase/KV state and calls sidecar hooks on `ActionEvent`, `ObservationEvent`, final messages, run end, and errors. |
+| Runner | Publishes live agent phase/KV state and calls sidecar hooks on `ActionEvent`, `ObservationEvent`, run end, and errors. Assistant messages are treated as provisional until run end because a tool action may still follow. |
 | Sidecar | Computes pressure/headroom, classifies tool calls, queues offload attempts, and admits queued agents. |
 | vLLM patch | Exposes control endpoints and forwards them to the scheduler/connector. |
 | Agent connector | Holds finished agent requests, snapshots block ids/hashes, starts async store jobs, releases safe holds, and restores via prefix lookup. |
@@ -257,7 +257,7 @@ The vLLM patch adds scheduler-backed telemetry plus three control endpoints:
 | --- | --- |
 | `GET /agent_kv_cache/usage?agent_id=...` | Return current scheduler-owned KV block counts for an agent, using active and held request snapshots rather than stale LiteLLM callback telemetry. `kv_blocks` / `resident_kv_blocks` count native NPU-resident blocks tracked by block ids; `offloadable_kv_blocks` counts complete hash-backed blocks eligible for connector offload. |
 | `POST /agent_kv_cache/offload` | Queue held snapshots for async CPU KV offload. |
-| `POST /agent_kv_cache/release` | Release held KV without CPU offload. Used for short calls, tool completion, final messages, errors, cancellation, and TTL cleanup. |
+| `POST /agent_kv_cache/release` | Release held KV without CPU offload. Used for short calls, tool completion, final run cleanup, errors, cancellation, and TTL cleanup. |
 | `POST /agent_kv_cache/restore` | Notify readmission. Offloaded KV is loaded by normal OffloadingConnector prefix lookup on the next request. |
 
 Important sidecar fields:

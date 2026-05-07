@@ -20,3 +20,19 @@ def test_tool_observation_leaves_tool_call_before_release_path():
     assert 'live["state"] = "waiting"' in src
     assert 'live["admission_state"] = "tool_complete_pending_release"' in src
     assert "self.admission_controller.wait_if_offloaded(" in src
+
+
+def test_agent_message_does_not_publish_waiting_before_possible_tool_action():
+    src = (REPO_ROOT / "src/run_abc_bench_instrumented.py").read_text(encoding="utf-8")
+
+    agent_branch = src.split('if source == "agent":', 1)[1].split(
+        "# ── action event", 1
+    )[0]
+    action_prefix = src.split("if isinstance(event, ActionEvent):", 1)[1].split(
+        "tool_name = ", 1
+    )[0]
+
+    assert "self._pending_agent_message_dt = event_dt" in agent_branch
+    assert "release_agent_kv" not in agent_branch
+    assert '_open_phase("waiting", event_dt)' not in agent_branch
+    assert "self._pending_agent_message_dt = None" in action_prefix
