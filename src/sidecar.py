@@ -495,6 +495,8 @@ class DynamicAdmissionController:
         self._prev_avg_gb: Optional[float] = None
         self._first_saturation_seen = False
         self._last_fresh_admit_monotonic: Optional[float] = None
+        self._vllm_unreachable_streak = 0
+        self._vllm_unreachable_warned = False
         self._lock = threading.RLock()
 
         self._predictor = predictor
@@ -792,9 +794,21 @@ class DynamicAdmissionController:
                 self._prev_avg_gb = avg_gb
                 return report
             if free_gb is None:
-                report["reasons"].append("missing_kv_free_gb")
+                # Distinguish "vLLM is unreachable" (no metrics at all) from
+                # "vLLM responded but the free-block metric is missing". The
+                # former is a critical operational state: the runner can't
+                # make LLM calls, agents will block on offloaded events that
+                # never resolve, and emitting saturation_guard would just be
+                # noise.
+                if total_gb is None:
+                    report["reasons"].append("vllm_unreachable")
+                    self._note_vllm_unreachable_locked()
+                else:
+                    report["reasons"].append("missing_kv_free_gb")
+                    self._reset_vllm_unreachable_streak_locked()
                 self._prev_avg_gb = avg_gb
                 return report
+            self._reset_vllm_unreachable_streak_locked()
 
             heap, skipped = self._idle_agent_heap(agents, bytes_per_blk)
             report["skipped_candidates"] = skipped
@@ -1644,6 +1658,32 @@ class DynamicAdmissionController:
             return {**result, **payload, "released": released}
         except Exception as exc:
             return {**result, "released": False, "reason": str(exc)}
+
+    # Threshold (consecutive ticks) before we surface a loud "vLLM unreachable"
+    # warning to stdout. Tick interval is ~5s so this is ~15s of silence.
+    _VLLM_UNREACHABLE_WARN_TICKS = 3
+
+    def _note_vllm_unreachable_locked(self) -> None:
+        self._vllm_unreachable_streak += 1
+        if (
+            not self._vllm_unreachable_warned
+            and self._vllm_unreachable_streak >= self._VLLM_UNREACHABLE_WARN_TICKS
+        ):
+            self._vllm_unreachable_warned = True
+            print(
+                f"[sidecar] WARNING: vLLM appears unreachable for "
+                f"{self._vllm_unreachable_streak} consecutive ticks at "
+                f"{self.vllm_url or '<unknown>'}. Agents in flight will block "
+                f"on LLM calls until the server recovers.",
+                flush=True,
+            )
+
+    def _reset_vllm_unreachable_streak_locked(self) -> None:
+        if self._vllm_unreachable_streak or self._vllm_unreachable_warned:
+            if self._vllm_unreachable_warned:
+                print("[sidecar] vLLM is reachable again.", flush=True)
+        self._vllm_unreachable_streak = 0
+        self._vllm_unreachable_warned = False
 
     def _record_kv_policy_event_locked(self, event: dict[str, Any]) -> None:
         self._kv_policy_events.append(dict(event))

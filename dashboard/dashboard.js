@@ -55,6 +55,7 @@
     itemCounter: 0,
     eventLineRenderPending: false,
     eventLinesVisible: true,
+    lastSatActive: false,
     // Per-type opt-out so users can hide specific kinds of event lines while
     // keeping the rest visible. The master toggle (#eventLinesBtn) overrides
     // this when off.
@@ -591,6 +592,9 @@
     const adm = record.admission || {};
     const ts = record.ts;
     const tooltipBase = baseTooltip(record);
+    const reasons = adm.reasons || [];
+    const isSaturated = reasons.indexOf("saturation_guard") !== -1;
+    const wasSaturated = state.lastSatActive === true;
 
     for (const ev of (adm.offloads || [])) {
       if (ev.offloaded === true) {
@@ -628,11 +632,15 @@
         `admitted_at: ${fmt(ad.admitted_at)}`,
         tooltipBase);
     }
-    if ((adm.reasons || []).indexOf("saturation_guard") !== -1) {
+    // Emit a SAT event only on the rising edge of a saturation streak.
+    // Previously every tick under saturation produced a vertical line on top
+    // of the previous one, drowning the chart in dashed yellow.
+    if (isSaturated && !wasSaturated) {
       addEvent(ts, "sat", "SAT",
-        `reasons: ${(adm.reasons || []).join(", ")}`,
+        `reasons: ${reasons.join(", ")}`,
         tooltipBase);
     }
+    state.lastSatActive = isSaturated;
   }
 
   function baseTooltip(record) {
@@ -1080,6 +1088,7 @@
     state.tickHistory = [];
     state.records = [];
     state.eventPoints = [];
+    state.lastSatActive = false;
     for (const id of [
       "liveCount",
       "offloadedCount",
