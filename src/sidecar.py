@@ -327,6 +327,32 @@ def default_usage_endpoint(vllm_url: str) -> str:
     return urljoin(base, "agent_kv_cache/usage")
 
 
+def _make_http_session(pool_maxsize: int = 64) -> requests.Session:
+    """Build a session whose connection pool can hold many concurrent requests.
+
+    urllib3's default pool_maxsize is 10. Under pressure the sidecar fires
+    one HTTP call per active agent (usage refresh runs in parallel via a
+    ThreadPoolExecutor) plus offload / release / restore / metrics polls
+    against the same vLLM host. Exceeding the pool floods stderr with
+    "Connection pool is full, discarding connection" warnings and forces
+    urllib3 to reopen connections every tick, which adds enough latency to
+    stall the admission loop. Size the pool to comfortably cover all the
+    concurrent calls a tick can issue.
+    """
+    session = requests.Session()
+    pool = max(10, int(pool_maxsize))
+    adapter_cls = getattr(getattr(requests, "adapters", None), "HTTPAdapter", None)
+    if adapter_cls is not None and hasattr(session, "mount"):
+        try:
+            adapter = adapter_cls(pool_connections=pool, pool_maxsize=pool)
+        except TypeError:
+            adapter = None
+        if adapter is not None:
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+    return session
+
+
 def _parse_iso_ts(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -446,7 +472,15 @@ class DynamicAdmissionController:
         self._offload_callback = offload_callback
         self._restore_callback = restore_callback
         self._release_callback = release_callback
-        self._session = session or requests.Session()
+        # Size the pool to comfortably cover one connection per active agent
+        # (usage refresh runs all of them in parallel) plus offload / release /
+        # restore / metrics calls. max_active_agents=0 means uncapped, so fall
+        # back to a large default in that case.
+        if self.max_active_agents:
+            session_pool = max(32, self.max_active_agents * 2 + 8)
+        else:
+            session_pool = 64
+        self._session = session or _make_http_session(session_pool)
 
         self._fresh: deque[AgentLaunchSpec] = deque()
         self._offloaded_ready: deque[str] = deque()
@@ -1899,7 +1933,7 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
+    session = _make_http_session(32)
     tick = 0
 
     print(f"[sidecar] polling every {args.interval}s → {log_path}", flush=True)
