@@ -44,9 +44,11 @@ def test_dashboard_exposes_controller_pressure_badge():
 
     assert "pressureBadge" in html
     assert "pressureBadge" in js
-    assert "W: ${fmtW(s.effectiveW)}" in js
+    assert "W: ${fmtW(s.w)}" in js
+    assert "const wBeforeOffload = finiteNumber(adm.w_before_offload)" in js
     assert "w_threshold: ${fmtW(s.wThreshold)}" in js
-    assert "w_after_offload: ${fmtW(s.wAfterOffload)}" in js
+    assert "w_source: ${fmt(s.wSource)}" in js
+    assert "w_before_offload: ${fmtW(s.wBeforeOffload)}" in js
     assert "controller offloads only when free KV percent <= threshold" in js
     assert "badge-pressure-active" in css
 
@@ -89,6 +91,9 @@ def test_dashboard_uses_event_specific_admission_timestamps():
 
     assert 'eventTimestamp(ts, ad, ["admitted_at", "admitted_since", "ts"])' in js
     assert "previously_offloaded: ${wasOffloaded}" in js
+    assert "w: ${fmt(ad.w)}" in js
+    assert "w_threshold: ${fmt(ad.w_threshold)}" in js
+    assert "w_source: ${fmt(ad.w_source)}" in js
     assert "admitted_at: ${fmt(ad.admitted_at)}" in js
     assert "function eventTimestamp(recordTs, event, keys)" in js
     assert "admissions[*].admitted_at" in schema

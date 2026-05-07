@@ -70,10 +70,11 @@ Key quantities:
 - `C`: free KV capacity in GB.
 - `s_t`: current average KV GB among active agents.
 - `s_prev`: previous tick's active-agent average.
-- `w = C / min(s_t, s_prev)`: conservative admission headroom, using whichever
-  samples are known.
+- `w = C / min(s_t, s_prev)`: effective admission headroom, using whichever
+  samples are known and including exact same-tick offload freeing when observed.
 - `threshold_percent`: pressure-offload threshold.
-- `w_threshold`: strict admission threshold. Agents admit only when `w > w_threshold`.
+- `w_threshold`: strict admission threshold. Agents admit only when `w` is
+  greater than `w_threshold`.
   If pressure is already active and `w` cannot be computed yet, admission stays
   blocked until the sidecar has enough headroom data.
 
@@ -263,9 +264,11 @@ Important sidecar fields:
 
 | Field | Meaning |
 | --- | --- |
-| `w` | Conservative admission headroom before offload. |
-| `w_threshold` | Strict admission threshold. Agents admit only when effective `w > w_threshold`. |
-| `w_after_offload` | Headroom recomputed after exact offload freeing is observed. |
+| `w` | Effective admission headroom used for this tick's admission gate. |
+| `w_threshold` | Strict admission threshold. Agents admit only when `w > w_threshold`. |
+| `w_source` | `current` when `w` is based on the tick's initial free KV, or `after_offload` when exact same-tick offload freeing raised it before admission. |
+| `w_before_offload` | Optional diagnostic pre-offload headroom, present only when it differs from effective `w`. |
+| `admissions[*].w` | Per-admission copy of the gate value used when the event was emitted. |
 | `offloads[*].pending` | The endpoint accepted async connector work, but the free-block delta may not be visible yet. |
 | `freed_gb_source` | Source of freed-memory accounting: `vllm_free_blocks_delta`, `offload_endpoint`, `pending_async`, or `unavailable_exact`. |
 | `resident_kv_blocks` | Native accelerator KV blocks still owned by active or held agent requests and not in vLLM's free queue. Sidecar admission sizing uses this value. |

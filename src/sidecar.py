@@ -685,7 +685,7 @@ class DynamicAdmissionController:
                 if avg_gb is not None:
                     avg_count = resident_active_agents
             prev_avg_gb = self._prev_avg_gb
-            w = self._headroom(free_gb, avg_gb, prev_avg_gb)
+            initial_w = self._headroom(free_gb, avg_gb, prev_avg_gb)
             pressure = (
                 threshold_gb is not None
                 and free_gb is not None
@@ -700,7 +700,8 @@ class DynamicAdmissionController:
                 "s_t": self._round(avg_gb),
                 "s_prev": self._round(prev_avg_gb),
                 "active_agent_samples": avg_count,
-                "w": self._round(w),
+                "w": self._round(initial_w),
+                "w_source": "current",
                 "w_threshold": self._round(self.w_threshold),
                 "threshold_percent": self._round(threshold_percent),
                 "threshold_gb": self._round(threshold_gb),
@@ -757,9 +758,6 @@ class DynamicAdmissionController:
                 for _, _, cand in heap
             ]
 
-            if w is not None and w <= self.w_threshold:
-                report["reasons"].append("headroom_low")
-
             current_free_gb = free_gb
             current_free_blocks = self._kv_free_blocks(vllm_info)
             while (
@@ -812,8 +810,14 @@ class DynamicAdmissionController:
                 report["reasons"].append("pressure_threshold")
 
             effective_w = self._headroom(current_free_gb, avg_gb, prev_avg_gb)
-            if effective_w != w:
-                report["w_after_offload"] = self._round(effective_w)
+            w_source = "after_offload" if effective_w != initial_w else "current"
+            report["w"] = self._round(effective_w)
+            report["w_source"] = w_source
+            if effective_w != initial_w:
+                report["w_before_offload"] = self._round(initial_w)
+
+            if effective_w is not None and effective_w <= self.w_threshold:
+                report["reasons"].append("headroom_low")
 
             effective_pressure = (
                 threshold_gb is not None
@@ -843,14 +847,15 @@ class DynamicAdmissionController:
                 and effective_w <= self.w_threshold
                 and runnable_queue > 0
             ):
-                report["reasons"].append("saturation_guard")
-                report["reasons"].append("admission_blocked_by_headroom")
-                report["reasons"].append("admission_blocked_by_pressure")
-                self._first_saturation_seen = True
-                report["first_saturation_seen"] = True
+                self._mark_admission_blocked_by_headroom_locked(report)
 
             if admit_limit > 0:
-                self._admit_with_limit_locked(admit_limit, report)
+                self._admit_with_limit_locked(
+                    admit_limit,
+                    report,
+                    w=effective_w,
+                    w_source=w_source,
+                )
 
             report["queue"] = self.pending_counts()
             report["first_saturation_seen"] = self._first_saturation_seen
@@ -1545,14 +1550,31 @@ class DynamicAdmissionController:
             return max(0, int(math.floor(w)))
         return max(1, int(math.floor(w / self.w_threshold)))
 
-    def _admit_with_limit_locked(self, admit_limit: int, report: dict[str, Any]) -> None:
+    def _admit_with_limit_locked(
+        self,
+        admit_limit: int,
+        report: dict[str, Any],
+        *,
+        w: Optional[float],
+        w_source: str,
+    ) -> None:
+        if w is not None and w <= self.w_threshold:
+            self._mark_admission_blocked_by_headroom_locked(report)
+            return
+
         admitted = 0
 
         while admitted < admit_limit:
             agent_id = self._pop_next_offloaded_ready_locked()
             if agent_id is None:
                 break
-            report["admissions"].append(self._admit_locked(agent_id))
+            report["admissions"].append(
+                self._annotate_admission_decision(
+                    self._admit_locked(agent_id),
+                    w=w,
+                    w_source=w_source,
+                )
+            )
             admitted += 1
 
         remaining = admit_limit - admitted
@@ -1582,11 +1604,42 @@ class DynamicAdmissionController:
             item = self._pop_next_fresh_locked()
             if item is None:
                 break
-            report["admissions"].append(self._admit_locked(item))
+            report["admissions"].append(
+                self._annotate_admission_decision(
+                    self._admit_locked(item),
+                    w=w,
+                    w_source=w_source,
+                )
+            )
             self._last_fresh_admit_monotonic = time.monotonic()
 
         if not self._first_saturation_seen and self._fresh and self.initial_admit_interval_s > 0:
             report["next_initial_admit_in_s"] = self._round(self.initial_admit_interval_s)
+
+    def _mark_admission_blocked_by_headroom_locked(
+        self, report: dict[str, Any]
+    ) -> None:
+        for reason in (
+            "saturation_guard",
+            "admission_blocked_by_headroom",
+            "admission_blocked_by_pressure",
+        ):
+            if reason not in report["reasons"]:
+                report["reasons"].append(reason)
+        self._first_saturation_seen = True
+        report["first_saturation_seen"] = True
+
+    def _annotate_admission_decision(
+        self,
+        admission: dict[str, Any],
+        *,
+        w: Optional[float],
+        w_source: str,
+    ) -> dict[str, Any]:
+        admission["w"] = self._round(w)
+        admission["w_threshold"] = self._round(self.w_threshold)
+        admission["w_source"] = w_source
+        return admission
 
     def _next_initial_admit_in_s_locked(self, now_mono: float) -> float:
         if self._last_fresh_admit_monotonic is None:

@@ -263,9 +263,9 @@
     const thresholdGb = thresholdGbForRecord(record);
     const freePercent = freeKvPercent(record);
     const w = finiteNumber(adm.w);
+    const wBeforeOffload = finiteNumber(adm.w_before_offload);
     const wThreshold = finiteNumber(adm.w_threshold);
-    const wAfterOffload = finiteNumber(adm.w_after_offload);
-    const effectiveW = wAfterOffload !== null ? wAfterOffload : w;
+    const wSource = adm.w_source || null;
     const pressure = adm.pressure === true
       || (freePercent !== null && threshold !== null && freePercent <= threshold)
       || (C !== null && thresholdGb !== null && C <= thresholdGb);
@@ -279,9 +279,9 @@
       thresholdGb,
       freePercent,
       w,
+      wBeforeOffload,
       wThreshold,
-      wAfterOffload,
-      effectiveW,
+      wSource,
       pressure,
       vllmPreemptions: vllmSchedulerPreemptions(vllm),
     };
@@ -310,6 +310,9 @@
   function updateBadges(timeMs) {
     const s = snapshotAt(timeMs);
     if (!s) return;
+    const wBeforeOffloadText = s.wBeforeOffload === null
+      ? ""
+      : `w_before_offload: ${fmtW(s.wBeforeOffload)}\n`;
     setBadge(
       "liveCount",
       `live: ${s.live}`,
@@ -319,10 +322,11 @@
       "agents whose KV is currently offloaded to CPU (offloaded_waiting)");
     setBadge("heapCount", `heap: ${s.heap}`,
       "agents currently in the offload heap (eligible to be offloaded)");
-    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.effectiveW)} / T: ${fmtPct(s.threshold)}`,
-      "free KV GB / effective headroom W / free-KV threshold percent\n" +
+    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.w)} / T: ${fmtPct(s.threshold)}`,
+      "free KV GB / admission headroom W / free-KV threshold percent\n" +
       `free_pct: ${fmtPct(s.freePercent)}\nthreshold_gb: ${fmtGb(s.thresholdGb)}\n` +
-      `raw w: ${fmtW(s.w)}\nw_threshold: ${fmtW(s.wThreshold)}\nw_after_offload: ${fmtW(s.wAfterOffload)}\n` +
+      `w: ${fmtW(s.w)}\nw_threshold: ${fmtW(s.wThreshold)}\nw_source: ${fmt(s.wSource)}\n` +
+      wBeforeOffloadText +
       "controller offloads only when free KV percent <= threshold");
     const pressureEl = $("#pressureBadge");
     if (pressureEl) {
@@ -576,6 +580,9 @@
       addEvent(adTs, type, tag,
         `agent: ${ad.agent_id}\n` +
         `previously_offloaded: ${wasOffloaded}\n` +
+        `w: ${fmt(ad.w)}\n` +
+        `w_threshold: ${fmt(ad.w_threshold)}\n` +
+        `w_source: ${fmt(ad.w_source)}\n` +
         `admitted_at: ${fmt(ad.admitted_at)}`,
         tooltipBase);
     }
@@ -588,6 +595,7 @@
 
   function baseTooltip(record) {
     const adm = record.admission || {};
+    const wBeforeOffload = finiteNumber(adm.w_before_offload);
     return [
       `ts:     ${record.ts}`,
       `tick:   ${record.tick}`,
@@ -600,6 +608,10 @@
       `s_prev: ${fmt(adm.s_prev)}`,
       `w:      ${fmt(adm.w)}`,
       `w_threshold: ${fmt(adm.w_threshold)}`,
+      `w_source: ${fmt(adm.w_source)}`,
+      ...(wBeforeOffload === null ? [] : [
+        `w_before_offload: ${fmt(adm.w_before_offload)}`,
+      ]),
       `active: ${fmt(adm.active_agents)} / ${fmt(adm.max_active_agents)}`,
       `active_slots: ${fmt(adm.active_agent_slots)}`,
       `queue:  fresh=${fmt(adm.queue && adm.queue.fresh)} ` +

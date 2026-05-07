@@ -533,6 +533,7 @@ def test_pressure_blocks_admission_with_single_headroom_sample():
     assert report["s_t"] == 1.748132
     assert report["s_prev"] is None
     assert report["w"] == 0.191919
+    assert report["w_source"] == "current"
     assert report["active_agents"] == 19
     assert report["active_agent_slots"] == 1
     assert report["admissions"] == []
@@ -557,9 +558,85 @@ def test_pressure_blocks_admission_with_single_headroom_sample():
     assert next_report["s_t"] == 1.748132
     assert next_report["s_prev"] == 1.748132
     assert next_report["w"] < next_report["w_threshold"]
+    assert next_report["w_source"] == "current"
     assert next_report["admissions"] == []
     assert "headroom_low" in next_report["reasons"]
     assert "admission_blocked_by_headroom" in next_report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
+
+
+def test_regression_pressure_does_not_admit_when_effective_w_below_threshold():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_percent=15.0,
+        w_threshold=2.0,
+        initial_admit_interval_s=0.0,
+        max_fresh_admits_per_tick=4,
+        max_active_agents=20,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    warm_agents = {
+        f"running-{idx}": {"state": "reasoning", "kv_gb": 3.4939}
+        for idx in range(16)
+    }
+    pressure_agents = {
+        f"running-{idx}": {"state": "reasoning", "kv_gb": 3.2068}
+        for idx in range(16)
+    }
+
+    controller.on_tick(
+        tick=384,
+        vllm_info={"kv_free_gb": 10.0, "kv_total_gb": 33.554667},
+        agents=warm_agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+    for idx in range(3):
+        controller.enqueue_fresh(AgentLaunchSpec(f"fresh-{idx}"))
+
+    report = controller.on_tick(
+        tick=385,
+        vllm_info={"kv_free_gb": 1.3086, "kv_total_gb": 33.554667},
+        agents=pressure_agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["pressure"] is True
+    assert report["active_agents"] == 16
+    assert report["active_agent_slots"] == 4
+    assert report["s_t"] == 3.2068
+    assert report["s_prev"] == 3.4939
+    assert report["w"] == 0.40807
+    assert report["w"] < report["w_threshold"]
+    assert report["w_source"] == "current"
+    assert report["admissions"] == []
+    assert "headroom_low" in report["reasons"]
+    assert "saturation_guard" in report["reasons"]
+    assert "admission_blocked_by_headroom" in report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 3
+
+
+def test_admit_with_limit_defensively_refuses_low_w():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    controller.enqueue_fresh(AgentLaunchSpec("fresh"))
+    report = {"admissions": [], "reasons": [], "first_saturation_seen": False}
+
+    controller._admit_with_limit_locked(
+        1,
+        report,
+        w=0.5,
+        w_source="current",
+    )
+
+    assert report["admissions"] == []
+    assert "saturation_guard" in report["reasons"]
+    assert "admission_blocked_by_headroom" in report["reasons"]
     assert admitted == []
     assert controller.pending_counts()["fresh"] == 1
 
@@ -1328,10 +1405,14 @@ def test_pressure_offload_can_create_one_fresh_admission_slot():
     )
 
     assert offloaded == ["idle-agent"]
-    assert report["w"] < 1.0
-    assert report["w_after_offload"] > 1.0
+    assert report["w_before_offload"] < 1.0
+    assert report["w"] > 1.0
+    assert report["w_source"] == "after_offload"
     assert "saturation_guard" not in report["reasons"]
     assert [a["agent_id"] for a in report["admissions"]] == ["fresh-after-offload"]
+    assert report["admissions"][0]["w"] == report["w"]
+    assert report["admissions"][0]["w_threshold"] == 1.0
+    assert report["admissions"][0]["w_source"] == "after_offload"
     assert admitted == ["fresh-after-offload"]
 
 

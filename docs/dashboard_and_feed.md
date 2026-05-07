@@ -179,7 +179,7 @@ Tooltip text combines a base controller snapshot with event-specific fields:
 - free KV (`C`, `C_percent`)
 - threshold values
 - pressure boolean
-- headroom (`w`, `w_threshold`, `s_t`, `s_prev`)
+- headroom (`w`, `w_threshold`, `w_source`, `s_t`, `s_prev`)
 - event-specific reason/status values
 
 ## KV Chart
