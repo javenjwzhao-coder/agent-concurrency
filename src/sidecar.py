@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -842,6 +843,8 @@ class DynamicAdmissionController:
             "enabled": bool(self.usage_endpoint),
             "updated": 0,
             "errors": 0,
+            "queried_agents": 0,
+            "workers": 0,
             "updated_agents": [],
             "failed_agents": [],
         }
@@ -849,64 +852,119 @@ class DynamicAdmissionController:
             report["reason"] = "missing_usage_endpoint"
             return report
 
+        targets: list[str] = []
         for agent_id, agent in agents.items():
             if agent.get("state") not in self.ACTIVE_STATES:
                 continue
             if agent.get("kv_offloaded") or agent_id in self._offloaded_events:
                 continue
-            try:
-                resp = self._session.get(
-                    self.usage_endpoint,
-                    params={"agent_id": agent_id},
-                    timeout=self.offload_timeout_s,
-                )
-                status_code = int(getattr(resp, "status_code", 200))
-                if status_code >= 400:
-                    raise RuntimeError(f"HTTP {status_code}: {getattr(resp, 'text', '')[:200]}")
-                payload = resp.json()
-                if payload.get("available") is False:
-                    raise RuntimeError(str(payload.get("reason") or "usage unavailable"))
-                block_source = "resident_kv_blocks"
-                blocks = payload.get("resident_kv_blocks")
-                if blocks is None:
-                    block_source = "kv_blocks"
-                    blocks = payload.get("kv_blocks")
-                if blocks is None:
-                    block_source = "kv_blocks_used"
-                    blocks = payload.get("kv_blocks_used")
-                if not isinstance(blocks, int):
-                    blocks = int(blocks)
-                if blocks < 0:
-                    raise ValueError(f"negative kv_blocks: {blocks}")
+            targets.append(agent_id)
 
-                patch = {
-                    "kv_blocks": blocks,
-                    "kv_gb": blocks * bytes_per_blk / 1e9,
-                    "kv_usage_source": "scheduler_usage",
-                    "last_kv_updated": iso_utc(now_utc()),
-                    "last_kv_usage": {
-                        "active_requests": int(payload.get("active_requests") or 0),
-                        "held_requests": int(payload.get("held_requests") or 0),
-                        "pending_offload": bool(payload.get("pending_offload")),
-                        "offload_jobs": int(payload.get("offload_jobs") or 0),
-                        "resident_kv_blocks": blocks,
-                        "offloadable_kv_blocks": int(
-                            payload.get("offloadable_kv_blocks") or 0
-                        ),
-                        "block_source": block_source,
-                    },
+        report["queried_agents"] = len(targets)
+        if not targets:
+            return report
+
+        worker_cap = (
+            self.max_active_agents if self.max_active_agents > 0 else len(targets)
+        )
+        workers = min(worker_cap, len(targets))
+        report["workers"] = workers
+        if workers == 1:
+            results = {
+                agent_id: self._fetch_agent_kv_usage(agent_id, bytes_per_blk)
+                for agent_id in targets
+            }
+        else:
+            results = {}
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_agent = {
+                    executor.submit(
+                        self._fetch_agent_kv_usage, agent_id, bytes_per_blk
+                    ): agent_id
+                    for agent_id in targets
                 }
-                agent.update(patch)
-                self._update_agent_state_locked(agent_id, patch)
-                report["updated"] += 1
-                report["updated_agents"].append(agent_id)
-            except Exception as exc:
+                for future in as_completed(future_to_agent):
+                    agent_id = future_to_agent[future]
+                    try:
+                        results[agent_id] = future.result()
+                    except Exception as exc:
+                        results[agent_id] = {
+                            "agent_id": agent_id,
+                            "error": str(exc)[:200],
+                        }
+
+        for agent_id in targets:
+            result = results[agent_id]
+            error = result.get("error")
+            if error:
                 report["errors"] += 1
                 report["failed_agents"].append({
                     "agent_id": agent_id,
-                    "reason": str(exc)[:200],
+                    "reason": str(error)[:200],
                 })
+                continue
+
+            patch = result["patch"]
+            agent = agents.get(agent_id)
+            if agent is not None:
+                agent.update(patch)
+            self._update_agent_state_locked(agent_id, patch)
+            report["updated"] += 1
+            report["updated_agents"].append(agent_id)
         return report
+
+    def _fetch_agent_kv_usage(
+        self,
+        agent_id: str,
+        bytes_per_blk: int,
+    ) -> dict[str, Any]:
+        try:
+            resp = self._session.get(
+                self.usage_endpoint,
+                params={"agent_id": agent_id},
+                timeout=self.offload_timeout_s,
+            )
+            status_code = int(getattr(resp, "status_code", 200))
+            if status_code >= 400:
+                raise RuntimeError(
+                    f"HTTP {status_code}: {getattr(resp, 'text', '')[:200]}"
+                )
+            payload = resp.json()
+            if payload.get("available") is False:
+                raise RuntimeError(str(payload.get("reason") or "usage unavailable"))
+            block_source = "resident_kv_blocks"
+            blocks = payload.get("resident_kv_blocks")
+            if blocks is None:
+                block_source = "kv_blocks"
+                blocks = payload.get("kv_blocks")
+            if blocks is None:
+                block_source = "kv_blocks_used"
+                blocks = payload.get("kv_blocks_used")
+            if not isinstance(blocks, int):
+                blocks = int(blocks)
+            if blocks < 0:
+                raise ValueError(f"negative kv_blocks: {blocks}")
+
+            patch = {
+                "kv_blocks": blocks,
+                "kv_gb": blocks * bytes_per_blk / 1e9,
+                "kv_usage_source": "scheduler_usage",
+                "last_kv_updated": iso_utc(now_utc()),
+                "last_kv_usage": {
+                    "active_requests": int(payload.get("active_requests") or 0),
+                    "held_requests": int(payload.get("held_requests") or 0),
+                    "pending_offload": bool(payload.get("pending_offload")),
+                    "offload_jobs": int(payload.get("offload_jobs") or 0),
+                    "resident_kv_blocks": blocks,
+                    "offloadable_kv_blocks": int(
+                        payload.get("offloadable_kv_blocks") or 0
+                    ),
+                    "block_source": block_source,
+                },
+            }
+            return {"agent_id": agent_id, "patch": patch}
+        except Exception as exc:
+            return {"agent_id": agent_id, "error": str(exc)[:200]}
 
     def _load_predictor(self, path: Path) -> None:
         try:

@@ -67,6 +67,31 @@ class FakeUsageSession:
         return FakeUsageResponse(payload)
 
 
+class SlowUsageSession(FakeUsageSession):
+    def __init__(
+        self,
+        payloads: dict[str, dict | FakeUsageResponse],
+        *,
+        delay_s: float = 0.03,
+    ):
+        super().__init__(payloads)
+        self.delay_s = delay_s
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.max_in_flight = 0
+
+    def get(self, url, params=None, timeout=None):
+        with self._lock:
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            time.sleep(self.delay_s)
+            return super().get(url, params=params, timeout=timeout)
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+
+
 def test_headroom_bootstrap_and_memoized_average():
     admitted: list[str] = []
     controller = DynamicAdmissionController(
@@ -218,7 +243,7 @@ def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    assert session.calls == ["stale-large", "stale-small"]
+    assert set(session.calls) == {"stale-large", "stale-small"}
     assert report["s_t"] == 3.5
     assert report["scheduler_usage"]["updated"] == 2
     assert agents["stale-large"]["kv_blocks"] == 2
@@ -227,6 +252,46 @@ def test_scheduler_usage_overrides_stale_live_kv_for_scoring():
     assert report["offloads"][0]["agent_id"] == "stale-small"
     assert report["offloads"][0]["kv_gb"] == 5.0
     assert offloaded == [("stale-small", 5.0)]
+
+
+def test_scheduler_usage_queries_active_agents_in_parallel():
+    session = SlowUsageSession({
+        f"agent-{idx}": {
+            "available": True,
+            "kv_blocks": idx + 1,
+            "active_requests": 1,
+            "held_requests": 0,
+            "pending_offload": False,
+            "offload_jobs": 0,
+        }
+        for idx in range(4)
+    })
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        max_active_agents=2,
+        session=session,
+        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
+    )
+    agents = {
+        f"agent-{idx}": {"state": "reasoning", "kv_blocks": 1}
+        for idx in range(4)
+    }
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 10.0},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    usage = report["scheduler_usage"]
+    assert usage["queried_agents"] == 4
+    assert usage["workers"] == 2
+    assert usage["updated"] == 4
+    assert session.max_in_flight > 1
+    assert session.max_in_flight <= 2
+    assert set(session.calls) == set(agents)
 
 
 def test_scheduler_usage_prefers_resident_kv_blocks_for_memory_sizing():

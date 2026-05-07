@@ -234,7 +234,9 @@ Release removes the agent from idle candidate sets and marks its live state as
 ## Scheduler Usage Refresh
 
 When `usage_endpoint` is configured, `_refresh_agent_kv_usage_locked()` queries
-vLLM for each active, non-offloaded agent:
+vLLM for each active, non-offloaded agent. Requests are issued in a bounded
+parallel pool capped by `max_active_agents` when that cap is configured. If
+`max_active_agents` is `0`, the pool spans the current active targets:
 
 ```text
 GET /agent_kv_cache/usage?agent_id=<id>
