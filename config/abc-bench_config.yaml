@@ -71,6 +71,13 @@ sidecar:
   # vLLM KV block size in tokens. Must match the server-side block size.
   block_size: 128
 
+  # Total KV blocks vLLM allocated. Required only when vLLM's /metrics exposes
+  # the cache-usage percentage but not block counts (e.g. vllm-ascend v0.13).
+  # Look for "# GPU blocks: N" or "# NPU blocks: N" in vLLM's startup log and
+  # set N here. Leave at 0 to disable the fallback when block counts are
+  # already in /metrics.
+  total_gpu_blocks: 0
+
   # Set to 0 or remove to disable the live dashboard.
   http_port: 8765
 

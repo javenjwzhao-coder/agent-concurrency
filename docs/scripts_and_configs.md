@@ -116,6 +116,8 @@ Model geometry fields must match the vLLM server:
 - `head_dim`
 - `block_size`
 - `dtype`
+- `total_gpu_blocks` (only when vLLM's `/metrics` lacks block-count gauges; set
+  to the "# GPU blocks" / "# NPU blocks" value from vLLM's startup log)
 
 If these drift from server settings, sidecar GB values and thresholds will be
 wrong.
@@ -192,7 +194,9 @@ Major fields:
 
 `native.extra_args` must stay consistent with sidecar geometry. In particular,
 `--block-size` must match the sidecar's `block_size`. The total KV block count
-is read live from vLLM's Prometheus metrics, so no override is needed.
+is read live from vLLM's `/metrics` when exposed there; otherwise set
+`sidecar.total_gpu_blocks` to the "# GPU blocks" / "# NPU blocks" value from
+vLLM's startup log.
 
 ## Operational Checks
 

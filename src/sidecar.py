@@ -98,7 +98,7 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _parse_vllm_kv_metrics(text: str) -> dict:
+def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
     """Extract KV-cache block statistics from Prometheus /metrics text.
 
     Covers every known metric-name variant used by standard vLLM and
@@ -227,19 +227,24 @@ def _parse_vllm_kv_metrics(text: str) -> dict:
                 _set_cached(val)
 
     # ── Derive missing values from what we have ────────────────────────────────
-    # Derive total from component gauges when vLLM does not export it directly.
+    # Derive total from component gauges when vLLM exports them. Fall back to
+    # the caller's hint when vLLM only exposes the usage-percent gauge (vLLM v1
+    # / vllm-ascend 0.13 do not export per-block-pool counts in /metrics).
     if "total_blocks" not in m:
         parts = [m.get(k, 0) for k in ("used_blocks", "cached_blocks", "free_blocks")]
         if any(v > 0 for v in parts):
             m["total_blocks"] = sum(parts)
+        elif total_blocks_hint > 0:
+            m["total_blocks"] = total_blocks_hint
 
-    # Always recompute usage_pct from free_blocks / total when both are present
-    # so the dashboard's KV-used line shares a denominator with the admission
-    # controller's free-percent. vllm-ascend's npu_cache_usage_perc gauge is
-    # derived from the worker's pre-scheduler block count and disagrees with
-    # num_npu_blocks_free; preferring the scheduler view keeps both consistent.
-    free  = m.get("free_blocks")
     total = m.get("total_blocks")
+    free = m.get("free_blocks")
+
+    # When both free and total come from /metrics, recompute usage_pct from
+    # them so the dashboard's KV-used line shares a denominator with the
+    # admission controller's free-percent. (vllm-ascend's npu_cache_usage_perc
+    # gauge is derived from the worker's pre-scheduler block count and can
+    # disagree with num_npu_blocks_free.)
     if free is not None and total:
         m["usage_pct"] = max(0.0, min(1.0, 1.0 - free / total))
     elif "usage_pct" not in m:
@@ -247,11 +252,14 @@ def _parse_vllm_kv_metrics(text: str) -> dict:
         if used is not None and total:
             m["usage_pct"] = used / total
 
-    # used_blocks from usage_pct × total (when only the percentage is present).
-    if "used_blocks" not in m:
-        pct = m.get("usage_pct")
-        if pct is not None and total:
-            m["used_blocks"] = round(total * pct)
+    # Derive missing per-pool block counts from usage_pct × total so downstream
+    # GB conversions still work when vLLM only exposes the usage gauge.
+    pct = m.get("usage_pct")
+    if pct is not None and total:
+        if "used_blocks" not in m:
+            m["used_blocks"] = max(0, int(round(total * pct)))
+        if "free_blocks" not in m:
+            m["free_blocks"] = max(0, int(round(total * (1.0 - pct))))
 
     if preempt_samples:
         # Some vLLM builds expose aliases for the same scheduler counter. Sum
@@ -1766,13 +1774,14 @@ class DynamicAdmissionController:
 _kv_metric_warn_emitted = False
 
 
-def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> dict:
+def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
+              total_blocks_hint: int = 0) -> dict:
     """Fetch /metrics and return global KV cache statistics."""
     global _kv_metric_warn_emitted
     try:
         resp = session.get(f"{vllm_url}/metrics", timeout=5)
         resp.raise_for_status()
-        kv = _parse_vllm_kv_metrics(resp.text)
+        kv = _parse_vllm_kv_metrics(resp.text, total_blocks_hint=total_blocks_hint)
 
         used_pct   = kv.get("usage_pct")    # 0..1
         total_blks = kv.get("total_blocks")
@@ -1781,10 +1790,16 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> d
         if free_blks is None and total_blks is not None and used_blks is not None:
             free_blks = max(0, int(total_blks) - int(used_blks))
 
-        if used_pct is None and total_blks is None and not _kv_metric_warn_emitted:
+        if total_blks is None and not _kv_metric_warn_emitted:
             _kv_metric_warn_emitted = True
+            detail = (
+                "no KV metrics at all"
+                if used_pct is None
+                else "usage gauge present but no block counts; set "
+                     "sidecar.total_gpu_blocks to vLLM's startup '# GPU blocks' value"
+            )
             print(
-                "[sidecar] WARNING: KV cache metrics not found in /metrics response.\n"
+                f"[sidecar] WARNING: cannot derive KV total blocks ({detail}).\n"
                 f"          prometheus_client available: {_HAS_PROM_CLIENT}\n"
                 f"          vllm: metrics present: {sorted(kv.get('vllm_names', []))[:30]}",
                 flush=True,
@@ -1850,7 +1865,8 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
         record = {
             "ts":     iso_utc(now_utc()),
             "tick":   tick,
-            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk),
+            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk,
+                                 getattr(args, "total_gpu_blocks", 0)),
             "agents": agents,
         }
         if admission_controller is not None:
@@ -1915,6 +1931,11 @@ def parse_args() -> argparse.Namespace:
     geo.add_argument("--head-dim",     type=int, required=True)
     geo.add_argument("--block-size",   type=int, default=16)
     geo.add_argument("--dtype",        default="bfloat16", choices=list(_DTYPE_BYTES))
+    geo.add_argument("--total-gpu-blocks", type=int, default=0,
+                     help="Fallback total KV-cache block count. Required when "
+                          "vLLM exposes only the cache-usage gauge in /metrics "
+                          "(vLLM v1 / vllm-ascend 0.13). Read 'GPU blocks' or "
+                          "'NPU blocks' from vLLM's startup log.")
 
     ac = p.add_argument_group("dynamic admission control")
     ac.add_argument("--admission-control", action="store_true",

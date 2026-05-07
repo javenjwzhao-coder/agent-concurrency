@@ -73,12 +73,15 @@ block_size * num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
 - `kv_free_gb`
 - `scheduler_preemptions_total`
 
-The metric parser recognizes standard vLLM and vllm-ascend metric names. The
-total block count and the KV-used percentage are both derived from
-`num_npu_blocks_free` divided by `num_npu_blocks` so the dashboard's KV-used
-line and the controller's `C_percent` always share a denominator. (vllm-ascend's
-own `npu_cache_usage_perc` gauge is computed from a pre-scheduler block count
-and is intentionally ignored.)
+The metric parser recognizes standard vLLM and vllm-ascend metric names. When
+both `num_npu_blocks_free` and `num_npu_blocks` are exported it recomputes the
+KV-used percentage from them so the dashboard line and the controller's
+`C_percent` share a denominator (vllm-ascend's own `npu_cache_usage_perc` gauge
+divides by a pre-scheduler block count and can disagree with the free-pool
+count). When `/metrics` exposes only the usage gauge — common on vLLM v1 and
+vllm-ascend 0.13 — set `sidecar.total_gpu_blocks` to the value vLLM logs at
+startup ("# GPU blocks: N" / "# NPU blocks: N"); the parser then derives free
+and used block counts from `total × (1 − usage_pct)`.
 
 ## Controller State
 
