@@ -146,6 +146,17 @@ def test_dashboard_bridges_sampled_waiting_to_tool_call_jumps_with_reasoning():
     assert "misses a short reasoning span" in schema
 
 
+def test_dashboard_renders_post_tool_pending_release_as_reasoning():
+    js = _read("dashboard/dashboard.js")
+    schema = _read("dashboard/SCHEMA.md")
+
+    assert "function displayPhaseForAgent(agent)" in js
+    assert "switch (displayPhaseForAgent(agents[id]))" in js
+    assert 'agent.admission_state === "tool_complete_pending_release"' in js
+    assert "phase: ${displayPhaseForAgent(agent)}" in js
+    assert "post-tool pending-release sub-state as `reasoning`" in schema
+
+
 def test_dashboard_exports_standalone_html_snapshots():
     js = _read("dashboard/dashboard.js")
     html = _read("dashboard/index.html")

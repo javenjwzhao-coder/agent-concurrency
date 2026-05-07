@@ -159,7 +159,7 @@ ticks it already rendered.
 |--------------------------------------|---------------------------------------------------------------------|
 | One row per agent                    | keys of `agents` (first-seen order, never reshuffled)               |
 | Agent row label                      | `agent_id (elapsed: N secs)`, then `agent_id (E2E: N secs)` after `state=done`; uses `started_at`/`finished_at` when present |
-| Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active). If sampling misses a short reasoning span between `waiting` and `tool_call`, the dashboard bridges the unobserved interval as `reasoning` rather than extending `waiting` into the next tool call. |
+| Phase box                            | `agents[id].state` from `state_since` to next tick's `state_since` (or to `ts` if still active). The dashboard renders the post-tool pending-release sub-state as `reasoning` so normal tool-completion cleanup does not appear as a separate gray wait. If sampling misses a short reasoning span between `waiting` and `tool_call`, the dashboard bridges the unobserved interval as `reasoning` rather than extending `waiting` into the next tool call. |
 | Phase color                          | reasoning=blue, tool_call=green, waiting=gray, offloaded_waiting=orange, done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
 | Offload threshold line               | `100 - admission.threshold_percent` per tick                        |

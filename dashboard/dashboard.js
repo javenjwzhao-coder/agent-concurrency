@@ -258,7 +258,7 @@
     let launched = 0;
     for (const id of Object.keys(agents)) {
       launched++;
-      switch (agents[id].state) {
+      switch (displayPhaseForAgent(agents[id])) {
         case "reasoning":       reasoning++; break;
         case "tool_call":       tool_call++; break;
         case "waiting":         waiting++;   break;
@@ -503,7 +503,7 @@
   function applyAgentTick(agentId, agent, recordTs) {
     const entry = ensureAgentGroup(agentId, agent, recordTs);
     updateAgentRuntimeLabel(entry, agentId, agent, recordTs);
-    const phase = agent.state || "waiting";
+    const phase = displayPhaseForAgent(agent);
     const phaseStart = agent.state_since || recordTs;
     const previousRecordTs = entry.lastRecordTs;
     entry.lastKvGb = (agent.kv_gb !== undefined) ? agent.kv_gb : entry.lastKvGb;
@@ -568,13 +568,24 @@
     });
   }
 
+  function displayPhaseForAgent(agent) {
+    const phase = agent.state || "waiting";
+    if (
+      phase === "waiting"
+      && agent.admission_state === "tool_complete_pending_release"
+    ) {
+      return "reasoning";
+    }
+    return phase;
+  }
+
   function phaseTooltip(agentId, agent, phaseStart, recordTs) {
     const start = new Date(phaseStart);
     const end = new Date(recordTs);
     const durSec = Math.max(0, (end - start) / 1000).toFixed(1);
     const lines = [
       `agent: ${agentId}`,
-      `phase: ${agent.state}`,
+      `phase: ${displayPhaseForAgent(agent)}`,
       `start: ${formatHMS(start)}`,
       `dur:   ${durSec} s (so far)`,
     ];

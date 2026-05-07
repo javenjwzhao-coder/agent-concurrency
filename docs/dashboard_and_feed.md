@@ -159,6 +159,11 @@ Phase segments are derived from:
 - current tick `ts`
 - optional `kv_gb` for tooltips
 
+The `waiting` state with `admission_state = tool_complete_pending_release` is
+rendered as `reasoning`. That interval is normal post-tool cleanup before the
+next model step, and showing it as a gray wait makes the timeline look like the
+agent paused mid-reasoning.
+
 Because ticks are sampled, the browser can observe `waiting` on one tick and
 `tool_call` on the next even though a short reasoning span happened between
 them. In that case the dashboard keeps `waiting` only through the last tick
