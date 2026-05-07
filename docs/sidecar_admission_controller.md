@@ -130,7 +130,7 @@ Key quantities:
 | `C_percent` | `C_percent` | Free KV as percent of total. |
 | `s_t` | `s_t` | Current average KV GB among active, non-offloaded agents. |
 | `s_prev` | `s_prev` | Previous tick's active-agent average. |
-| `w` | `w` | `C / min(s_t, s_prev)`, when both samples exist. |
+| `w` | `w` | `C / min(s_t, s_prev)`, using whichever samples are known. |
 | threshold | `threshold_percent` / `threshold_gb` | Free-KV pressure threshold. |
 
 Pressure offload and admission are separate:
@@ -138,8 +138,9 @@ Pressure offload and admission are separate:
 - `threshold_percent` controls when pressure offload is considered.
 - `w_threshold` controls whether queued work can be admitted.
 
-Agents admit only when effective headroom is above `w_threshold`, except that
-unknown headroom admits one agent to bootstrap measurements.
+Agents admit only when effective headroom is above `w_threshold`. Unknown
+headroom can admit one agent to bootstrap measurements only while the controller
+is not already under free-KV pressure.
 
 ## Pressure Offload
 

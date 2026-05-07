@@ -116,7 +116,7 @@ def test_headroom_bootstrap_and_memoized_average():
 
     assert first["s_t"] == 1.5
     assert first["s_prev"] is None
-    assert first["w"] is None
+    assert first["w"] == 3.333333
     assert len(first["admissions"]) == 1
     assert first["admissions"][0]["agent_id"] == "fresh-a"
     assert first["admissions"][0]["previously_offloaded"] is False
@@ -503,6 +503,95 @@ def test_pressure_threshold_alone_does_not_block_fresh_admission():
     assert controller.pending_counts()["fresh"] == 0
 
 
+def test_pressure_blocks_admission_with_single_headroom_sample():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_percent=15.0,
+        initial_admit_interval_s=0.0,
+        max_active_agents=20,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    controller.enqueue_fresh(AgentLaunchSpec("fresh"))
+    agents = {
+        f"running-{idx}": {"state": "reasoning"}
+        for idx in range(19)
+    }
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={
+            "kv_free_gb": 0.3355,
+            "kv_used_gb": 33.2145,
+            "kv_total_gb": 33.55,
+        },
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["pressure"] is True
+    assert report["s_t"] == 1.748132
+    assert report["s_prev"] is None
+    assert report["w"] == 0.191919
+    assert report["active_agents"] == 19
+    assert report["active_agent_slots"] == 1
+    assert report["admissions"] == []
+    assert "headroom_low" in report["reasons"]
+    assert "saturation_guard" in report["reasons"]
+    assert "admission_blocked_by_headroom" in report["reasons"]
+    assert "admission_blocked_by_pressure" in report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
+
+    next_report = controller.on_tick(
+        tick=1,
+        vllm_info={
+            "kv_free_gb": 0.3355,
+            "kv_used_gb": 33.2145,
+            "kv_total_gb": 33.55,
+        },
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert next_report["s_t"] == 1.748132
+    assert next_report["s_prev"] == 1.748132
+    assert next_report["w"] < next_report["w_threshold"]
+    assert next_report["admissions"] == []
+    assert "headroom_low" in next_report["reasons"]
+    assert "admission_blocked_by_headroom" in next_report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
+
+
+def test_pressure_blocks_admission_when_headroom_has_no_samples():
+    admitted: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=1.0,
+        initial_admit_interval_s=0.0,
+        admit_callback=lambda spec: admitted.append(spec.agent_id),
+    )
+    controller.enqueue_fresh(AgentLaunchSpec("fresh"))
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.5},
+        agents={"running": {"state": "reasoning"}},
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["pressure"] is True
+    assert report["s_t"] is None
+    assert report["s_prev"] is None
+    assert report["w"] is None
+    assert report["admissions"] == []
+    assert "missing_headroom" in report["reasons"]
+    assert "admission_blocked_by_pressure" in report["reasons"]
+    assert admitted == []
+    assert controller.pending_counts()["fresh"] == 1
+
+
 def test_percent_threshold_derives_pressure_from_total_capacity():
     offloaded: list[str] = []
 
@@ -799,7 +888,7 @@ def test_fresh_admit_tick_cap_can_be_tuned():
         controller.enqueue_fresh(AgentLaunchSpec(f"fresh-{idx}"))
     agents = {"running": {"state": "reasoning", "kv_blocks": 1}}
 
-    controller.on_tick(
+    first = controller.on_tick(
         tick=0,
         vllm_info={"kv_free_gb": 10.0},
         agents=agents,
@@ -813,10 +902,11 @@ def test_fresh_admit_tick_cap_can_be_tuned():
         bytes_per_blk=BYTES_PER_GB,
     )
 
-    assert [a["agent_id"] for a in report["admissions"]] == ["fresh-1", "fresh-2"]
-    assert "fresh_admit_tick_cap" in report["reasons"]
-    assert admitted == ["fresh-0", "fresh-1", "fresh-2"]
-    assert controller.pending_counts()["fresh"] == 1
+    assert [a["agent_id"] for a in first["admissions"]] == ["fresh-0", "fresh-1"]
+    assert "fresh_admit_tick_cap" in first["reasons"]
+    assert [a["agent_id"] for a in report["admissions"]] == ["fresh-2", "fresh-3"]
+    assert admitted == ["fresh-0", "fresh-1", "fresh-2", "fresh-3"]
+    assert controller.pending_counts()["fresh"] == 0
 
 
 def test_max_active_agents_blocks_fresh_admission_when_full():
@@ -1110,7 +1200,7 @@ def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
 
     report = controller.on_tick(
         tick=2,
-        vllm_info={"kv_free_gb": 5.0},
+        vllm_info={"kv_free_gb": 7.0},
         agents={},
         bytes_per_blk=BYTES_PER_GB,
     )
@@ -1551,7 +1641,7 @@ def test_offloaded_ready_lane_admits_before_fresh_agents():
     controller.enqueue_fresh(AgentLaunchSpec("fresh-agent"))
     report = controller.on_tick(
         tick=1,
-        vllm_info={"kv_free_gb": 5.0},
+        vllm_info={"kv_free_gb": 3.0},
         agents={},
         bytes_per_blk=BYTES_PER_GB,
     )

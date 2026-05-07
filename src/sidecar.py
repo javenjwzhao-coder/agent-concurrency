@@ -673,8 +673,17 @@ class DynamicAdmissionController:
                 self._refresh_agent_kv_usage_locked(agents, bytes_per_blk)
                 if self.enabled else {"enabled": False, "reason": "admission_disabled"}
             )
-            avg_gb, avg_count = self._average_active_kv_gb(agents, bytes_per_blk)
             active_agents = self._active_agent_count(agents)
+            resident_active_agents = self._resident_active_agent_count(agents)
+            avg_gb, avg_count = self._average_active_kv_gb(agents, bytes_per_blk)
+            if avg_gb is None:
+                avg_gb = self._global_average_active_kv_gb(
+                    vllm_info,
+                    bytes_per_blk,
+                    resident_active_agents,
+                )
+                if avg_gb is not None:
+                    avg_count = resident_active_agents
             prev_avg_gb = self._prev_avg_gb
             w = self._headroom(free_gb, avg_gb, prev_avg_gb)
             pressure = (
@@ -806,7 +815,19 @@ class DynamicAdmissionController:
             if effective_w != w:
                 report["w_after_offload"] = self._round(effective_w)
 
-            admit_limit = self._admission_limit(effective_w)
+            effective_pressure = (
+                threshold_gb is not None
+                and current_free_gb <= threshold_gb
+            )
+            if effective_pressure and effective_w is None and runnable_queue > 0:
+                admit_limit = 0
+                report["reasons"].append("missing_headroom")
+                report["reasons"].append("saturation_guard")
+                report["reasons"].append("admission_blocked_by_pressure")
+                self._first_saturation_seen = True
+                report["first_saturation_seen"] = True
+            else:
+                admit_limit = self._admission_limit(effective_w)
             active_slots = self._active_agent_slots(active_agents)
             if active_slots is not None:
                 admit_limit = min(admit_limit, active_slots)
@@ -1073,10 +1094,44 @@ class DynamicAdmissionController:
             if agent.get("state") in self.ACTIVE_STATES
         )
 
+    def _resident_active_agent_count(self, agents: dict[str, dict[str, Any]]) -> int:
+        return sum(
+            1 for agent in agents.values()
+            if (
+                agent.get("state") in self.ACTIVE_STATES
+                and not agent.get("kv_offloaded")
+            )
+        )
+
     def _active_agent_slots(self, active_agents: int) -> Optional[int]:
         if self.max_active_agents <= 0:
             return None
         return max(0, self.max_active_agents - active_agents)
+
+    def _global_average_active_kv_gb(
+        self,
+        vllm_info: dict[str, Any],
+        bytes_per_blk: int,
+        resident_active_agents: int,
+    ) -> Optional[float]:
+        if resident_active_agents <= 0:
+            return None
+
+        used_gb = _finite_float(vllm_info.get("kv_used_gb"))
+        if used_gb is None:
+            total_gb = _finite_float(vllm_info.get("kv_total_gb"))
+            free_gb = _finite_float(vllm_info.get("kv_free_gb"))
+            if total_gb is not None and free_gb is not None:
+                used_gb = max(0.0, total_gb - free_gb)
+
+        if used_gb is None:
+            used_blocks = _finite_float(vllm_info.get("num_gpu_blocks_used"))
+            if used_blocks is not None:
+                used_gb = max(0.0, used_blocks * bytes_per_blk / 1e9)
+
+        if used_gb is None or used_gb <= 0:
+            return None
+        return used_gb / resident_active_agents
 
     def _headroom(
         self,
@@ -1087,7 +1142,7 @@ class DynamicAdmissionController:
         if free_gb is None:
             return None
         recent = [v for v in (avg_gb, prev_avg_gb) if v is not None and v > 0]
-        if len(recent) < 2:
+        if not recent:
             return None
         denom = min(recent)
         return free_gb / denom if denom > 0 else None

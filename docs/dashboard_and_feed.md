@@ -156,6 +156,9 @@ Supported phase colors are tested in `tests/test_dashboard_events.py`.
 ## Events
 
 The dashboard overlays vertical markers on both timeline and KV chart.
+Use the header's `Hide event lines` / `Show event lines` button to temporarily
+remove those vertical markers and their proximity tooltips while leaving event
+counts, phase rows, and KV-cache lines unchanged.
 
 | Event | Source |
 | --- | --- |

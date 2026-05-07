@@ -69,6 +69,20 @@ def test_dashboard_exposes_vllm_preempt_badge_and_event_line_overlay():
     assert "resetEventCounts()" in js
 
 
+def test_dashboard_can_hide_event_line_overlay():
+    js = _read("dashboard/dashboard.js")
+    html = _read("dashboard/index.html")
+    css = _read("dashboard/dashboard.css")
+
+    assert "eventLinesBtn" in html
+    assert "Hide event lines" in html
+    assert "eventLinesVisible: true" in js
+    assert "function setEventLinesVisible(visible)" in js
+    assert "clearEventLineLayers();" in js
+    assert "Show event lines" in js
+    assert "lines-hidden" in css
+
+
 def test_dashboard_uses_event_specific_admission_timestamps():
     js = _read("dashboard/dashboard.js")
     schema = _read("dashboard/SCHEMA.md")

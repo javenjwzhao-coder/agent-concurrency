@@ -54,6 +54,7 @@
     eventCounter: 0,
     itemCounter: 0,
     eventLineRenderPending: false,
+    eventLinesVisible: true,
     eventPoints: [],     // [{id, ts: epochMs, type, label, text}] for event lines + tooltips
     eventCounts: {},
     tickHistory: [],     // [{ts: epoch_ms, count: active_agent_count}]
@@ -352,6 +353,22 @@
     btn.textContent = p ? "Resume auto-scroll" : "Pause auto-scroll";
   }
 
+  function setEventLinesVisible(visible) {
+    state.eventLinesVisible = visible;
+    const btn = $("#eventLinesBtn");
+    if (btn) {
+      btn.classList.toggle("lines-hidden", !visible);
+      btn.setAttribute("aria-pressed", String(!visible));
+      btn.textContent = visible ? "Hide event lines" : "Show event lines";
+    }
+    if (visible) {
+      scheduleEventLineRender();
+    } else {
+      clearEventLineLayers();
+      hideTooltip();
+    }
+  }
+
   // ── per-agent phase rendering ──────────────────────────────────────────
 
   function ensureAgentGroup(agentId, agent, recordTs) {
@@ -608,6 +625,7 @@
   }
 
   function scheduleEventLineRender() {
+    if (!state.eventLinesVisible) return;
     if (state.eventLineRenderPending) return;
     state.eventLineRenderPending = true;
     requestAnimationFrame(() => {
@@ -617,6 +635,10 @@
   }
 
   function renderEventLines() {
+    if (!state.eventLinesVisible) {
+      clearEventLineLayers();
+      return;
+    }
     for (const [container, chart] of [
       [$("#timeline"), state.timeline],
       [$("#kvChart"),  state.kvChart],
@@ -719,6 +741,7 @@
 
   // Returns the closest rendered event line(s) to clientX.
   function findEventsAtPixel(clientX, container, chart) {
+    if (!state.eventLinesVisible) return [];
     if (!state.eventPoints.length) return [];
     const cRect = container.getBoundingClientRect();
     const hits = [];
@@ -1179,6 +1202,14 @@
       pauseBtn.classList.add("paused");
       pauseBtn.textContent = "Resume auto-scroll";
     }
+    const eventLinesBtn = header.querySelector("#eventLinesBtn");
+    if (eventLinesBtn) {
+      eventLinesBtn.classList.toggle("lines-hidden", !state.eventLinesVisible);
+      eventLinesBtn.setAttribute("aria-pressed", String(!state.eventLinesVisible));
+      eventLinesBtn.textContent = state.eventLinesVisible
+        ? "Hide event lines"
+        : "Show event lines";
+    }
     const saveBtn = header.querySelector("#saveSnapshotBtn");
     if (saveBtn) saveBtn.disabled = false;
     return "  " + header.outerHTML + "\n\n" +
@@ -1229,6 +1260,14 @@
   // ── controls ───────────────────────────────────────────────────────────
 
   function wireControls() {
+    const eventLinesBtn = $("#eventLinesBtn");
+    if (eventLinesBtn) {
+      state.eventLinesVisible = eventLinesBtn.getAttribute("aria-pressed") !== "true";
+      setEventLinesVisible(state.eventLinesVisible);
+      eventLinesBtn.addEventListener("click", () => {
+        setEventLinesVisible(!state.eventLinesVisible);
+      });
+    }
     $("#pauseBtn").addEventListener("click", () => {
       const next = !state.paused;
       setPaused(next);

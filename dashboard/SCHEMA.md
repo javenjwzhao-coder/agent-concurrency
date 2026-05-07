@@ -63,7 +63,7 @@ ticks it already rendered.
     "kv_total_gb": 33.55,                      // float — total KV capacity used for percent thresholds
     "s_t":     0.31,                           // float — current avg KV usage of active agents
     "s_prev":  0.29,                           // float|null — previous tick's avg
-    "w":       18.03,                          // float|null — headroom = C / min(s_t, s_prev)
+    "w":       18.03,                          // float|null — headroom = C / min(known s_t, s_prev)
     "w_threshold": 2.0,                         // float — minimum headroom before admitting queued agents
     "w_after_offload": null,                   // float|null — recomputed headroom after pressure offload, when changed
     "threshold_percent": 10.0,                 // float — configured free-KV pressure threshold
@@ -131,6 +131,7 @@ ticks it already rendered.
       "headroom_low",                          // emitted whenever w <= w_threshold
       "saturation_guard",                      // emitted when effective w <= w_threshold blocks runnable queue
       "admission_blocked_by_pressure",         // emitted when queued work stays pending due to effective w pressure
+      "missing_headroom",                      // emitted when pressure blocks admission before w can be computed
       "active_agent_cap",                      // emitted when max_active_agents constrains admissions
       "admission_blocked_by_active_agent_cap", // emitted when no active-agent slots are available
       "initial_admit_ramp_wait"                // emitted when pre-SAT fresh launch ramp delays admission

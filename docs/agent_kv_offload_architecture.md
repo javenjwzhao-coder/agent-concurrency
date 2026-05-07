@@ -70,9 +70,12 @@ Key quantities:
 - `C`: free KV capacity in GB.
 - `s_t`: current average KV GB among active agents.
 - `s_prev`: previous tick's active-agent average.
-- `w = C / min(s_t, s_prev)`: conservative admission headroom.
+- `w = C / min(s_t, s_prev)`: conservative admission headroom, using whichever
+  samples are known.
 - `threshold_percent`: pressure-offload threshold.
 - `w_threshold`: strict admission threshold. Agents admit only when `w > w_threshold`.
+  If pressure is already active and `w` cannot be computed yet, admission stays
+  blocked until the sidecar has enough headroom data.
 
 ```mermaid
 flowchart TD

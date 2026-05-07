@@ -78,6 +78,12 @@ button:disabled {
   color: #fbbf24;
 }
 
+#eventLinesBtn.lines-hidden {
+  background: #241a3f;
+  border-color: #6d5bd0;
+  color: #c4b5fd;
+}
+
 /* ── status badge ────────────────────────────────────────────────────────── */
 
 .status {

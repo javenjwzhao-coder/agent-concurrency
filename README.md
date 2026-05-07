@@ -119,7 +119,8 @@ At each sidecar tick:
 - `C` is free KV capacity in GB.
 - `s_t` is average active-agent KV GB for this tick.
 - `s_prev` is the previous active-agent average.
-- `w = C / min(s_t, s_prev)` is conservative headroom.
+- `w = C / min(s_t, s_prev)` is conservative headroom, using whichever samples
+  are known.
 
 The policy is intentionally simple:
 
