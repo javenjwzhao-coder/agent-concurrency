@@ -222,6 +222,11 @@
     setupEventLineLayers();
     setupProximityTooltips();
     window.addEventListener("resize", scheduleEventLineRender);
+    // vis-timeline emits "changed" after layout (e.g. when new groups are
+    // added). Re-render so the event-line layer's height tracks the
+    // foreground as more agents appear.
+    state.timeline.on("changed", scheduleEventLineRender);
+    state.kvChart.on("changed", scheduleEventLineRender);
   }
 
   // ── header count badges ────────────────────────────────────────────────
@@ -669,6 +674,33 @@
     return layer;
   }
 
+  // vis-timeline can extend its `.vis-foreground` (group rows) below the
+  // container's static box. The event-line layer is positioned with
+  // `inset: 0` of the container, so without this sync the vertical lines
+  // (which span `top: 0; bottom: 0` of the layer) stop at the container's
+  // box and miss the lowest rows. Stretch the layer to the bottom of the
+  // foreground so lines reach every group.
+  function syncEventLineLayerHeight(container, layer) {
+    const containerRect = container.getBoundingClientRect();
+    const fg = container.querySelector(".vis-panel.vis-center .vis-foreground")
+            || container.querySelector(".vis-foreground");
+    const reference = fg
+      || container.querySelector(".vis-panel.vis-center")
+      || null;
+    if (!reference || !containerRect.height) {
+      layer.style.removeProperty("bottom");
+      layer.style.removeProperty("height");
+      return;
+    }
+    const refRect = reference.getBoundingClientRect();
+    const desired = Math.max(
+      containerRect.height,
+      Math.ceil(refRect.bottom - containerRect.top),
+    );
+    layer.style.bottom = "auto";
+    layer.style.height = desired + "px";
+  }
+
   function scheduleEventLineRender() {
     if (!state.eventLinesVisible) return;
     if (state.eventLineRenderPending) return;
@@ -690,6 +722,7 @@
     ]) {
       const layer = getEventLineLayer(container);
       layer.textContent = "";
+      syncEventLineLayerHeight(container, layer);
       for (const hit of eventLineEntries(container, chart)) {
         const line = document.createElement("div");
         line.className = `event-line event-line-${hit.ep.type}`;
