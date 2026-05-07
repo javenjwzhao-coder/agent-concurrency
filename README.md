@@ -125,17 +125,20 @@ At each sidecar tick:
 The policy is intentionally simple:
 
 - Pressure offload runs when free KV percent is at or below
-  `threshold_percent`.
+  `threshold_percent`, including when the tick only has cache-used percent
+  telemetry.
 - New work admits only when effective `w > w_threshold`.
 - Previously offloaded agents readmit before fresh agents.
 - `max_active_agents` can cap active admitted agents.
 - Short predicted tool calls release held KV and are excluded from pressure
-  offload.
-- Long or fallback-long tool calls are scored by:
+  offload unless they later exceed the fallback-long age while still resident.
+- Long tool calls are scored by:
 
 ```text
 offload_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
 ```
+
+Fallback-long calls use elapsed tool-call seconds as the multiplier.
 
 Exact freed memory is reported only from vLLM free-block deltas or an explicit
 endpoint value. Async connector offloads may report `pending_async` until that

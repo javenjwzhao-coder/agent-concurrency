@@ -1291,6 +1291,76 @@ def test_short_tool_call_is_classified_and_excluded_from_pressure_offload():
     ]
 
 
+def test_elapsed_long_short_prediction_promotes_to_pressure_offload():
+    offloaded: list[str] = []
+    released: list[tuple[str, str]] = []
+    state_updates: dict[str, dict] = {}
+    old_ts = iso_utc(now_utc() - timedelta(seconds=12))
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    def release(agent_id, reason):
+        released.append((agent_id, reason))
+        return {"released": False, "reason": "still_resident"}
+
+    def update(agent_id, patch):
+        state_updates.setdefault(agent_id, {}).update(patch)
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        short_tool_call_threshold_s=2.0,
+        fallback_long_tool_call_s=5.0,
+        predictor=FakePredictor({"agent": 1.0}),
+        offload_callback=offload,
+        release_callback=release,
+        state_update_callback=update,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    policy = controller.on_tool_call_start(
+        "agent",
+        {
+            "agent_id": "agent",
+            "state": "tool_call",
+            "state_since": iso_utc(now_utc()),
+            "kv_blocks": 3,
+        },
+    )
+    assert policy["policy"] == "idle_short"
+    assert released == [("agent", "short_tool_call")]
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents={
+            "agent": {
+                "agent_id": "agent",
+                "state": "tool_call",
+                "state_since": old_ts,
+                "kv_blocks": 3,
+                "kv_policy": "idle_short",
+                "predicted_remaining_s": 1.0,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert offloaded == ["agent"]
+    assert report["skipped_candidates"] == []
+    assert report["heap_candidates"][0]["agent_id"] == "agent"
+    assert report["heap_candidates"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["heap_candidates"][0]["predicted_remaining_s"] == 1.0
+    assert report["heap_candidates"][0]["tool_elapsed_s"] >= 5.0
+    assert report["offloads"][0]["agent_id"] == "agent"
+    assert report["offloads"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["offloads"][0]["tool_elapsed_s"] >= 5.0
+    assert state_updates["agent"]["kv_policy"] == "idle_long"
+    assert state_updates["agent"]["kv_offloaded"] is True
+
+
 def test_long_tool_call_pressure_offloads_and_uses_readmit_flow():
     state_updates: dict[str, dict] = {}
     offloaded: list[str] = []
@@ -1705,6 +1775,48 @@ def test_predictor_unavailable_skips_idle_offload_policy():
             "fallback_long_tool_call_s": 30.0,
         }
     ]
+
+
+def test_percent_only_pressure_triggers_fallback_offload_without_predictor():
+    offloaded: list[str] = []
+    old_ts = iso_utc(now_utc() - timedelta(seconds=45))
+
+    def offload(cand):
+        offloaded.append(cand.agent_id)
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_percent=15.0,
+        fallback_long_tool_call_s=30.0,
+        offload_callback=offload,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_cache_used_pct": 95.0},
+        agents={
+            "fallback-agent": {
+                "agent_id": "fallback-agent",
+                "state": "tool_call",
+                "state_since": old_ts,
+                "kv_blocks": 2,
+            }
+        },
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["pressure"] is True
+    assert report["C"] is None
+    assert report["C_percent"] == 5.0
+    assert report["threshold_percent"] == 15.0
+    assert offloaded == ["fallback-agent"]
+    assert report["heap_candidates"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["offloads"][0]["agent_id"] == "fallback-agent"
+    assert report["offloads"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert "missing_kv_free_gb" not in report["reasons"]
+    assert "missing_kv_free_capacity" not in report["reasons"]
 
 
 def test_predictor_unavailable_falls_back_to_elapsed_long_tool_call():

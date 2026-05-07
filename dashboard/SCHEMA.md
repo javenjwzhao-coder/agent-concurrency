@@ -58,8 +58,8 @@ ticks it already rendered.
 
   "admission": {                               // Controller decisions for this tick.
     "enabled": true,                           // bool
-    "C":       5.59,                           // float — free KV in GB this tick
-    "C_percent": 16.67,                        // float — free KV as percent of total capacity
+    "C":       5.59,                           // float|null — free KV in GB this tick
+    "C_percent": 16.67,                        // float|null — free KV percent, derived from used percent when needed
     "kv_total_gb": 33.55,                      // float — total KV capacity used for percent thresholds
     "s_t":     0.31,                           // float — current avg KV usage of active agents
     "s_prev":  0.29,                           // float|null — previous tick's avg

@@ -102,9 +102,9 @@ sidecar:
     # pressure/headroom be the only admission limit.
     max_active_agents: 22
 
-    # Fallback offload eligibility when no predictor model is available or a
-    # prediction cannot be produced. A tool call older than this many seconds is
-    # treated as long/offloadable.
+    # Fallback offload eligibility. A tool call older than this many seconds is
+    # treated as long/offloadable when no prediction exists, or when an earlier
+    # short prediction aged badly while the agent still has resident KV.
     fallback_long_tool_call_s: 5.0
 
     # Optional override for GET /agent_kv_cache/usage. Leave unset to derive it

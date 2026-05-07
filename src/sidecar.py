@@ -720,7 +720,7 @@ class DynamicAdmissionController:
         with self._lock:
             free_gb = self._kv_free_gb(vllm_info, bytes_per_blk)
             total_gb = self._kv_total_gb(vllm_info, bytes_per_blk)
-            free_percent = self._kv_free_percent(free_gb, total_gb)
+            free_percent = self._kv_free_percent(free_gb, total_gb, vllm_info)
             threshold_gb = self._pressure_threshold_gb(total_gb)
             threshold_percent = self._pressure_threshold_percent(total_gb)
             usage_report = (
@@ -740,10 +740,11 @@ class DynamicAdmissionController:
                     avg_count = resident_active_agents
             prev_avg_gb = self._prev_avg_gb
             initial_w = self._headroom(free_gb, avg_gb, prev_avg_gb)
-            pressure = (
-                threshold_gb is not None
-                and free_gb is not None
-                and free_gb <= threshold_gb
+            pressure = self._is_pressure_active(
+                free_gb=free_gb,
+                free_percent=free_percent,
+                threshold_gb=threshold_gb,
+                threshold_percent=threshold_percent,
             )
             report: dict[str, Any] = {
                 "enabled": self.enabled,
@@ -793,7 +794,7 @@ class DynamicAdmissionController:
                 report["reasons"].append("disabled")
                 self._prev_avg_gb = avg_gb
                 return report
-            if free_gb is None:
+            if free_gb is None and free_percent is None:
                 # Distinguish "vLLM is unreachable" (no metrics at all) from
                 # "vLLM responded but the free-block metric is missing". The
                 # former is a critical operational state: the runner can't
@@ -804,7 +805,7 @@ class DynamicAdmissionController:
                     report["reasons"].append("vllm_unreachable")
                     self._note_vllm_unreachable_locked()
                 else:
-                    report["reasons"].append("missing_kv_free_gb")
+                    report["reasons"].append("missing_kv_free_capacity")
                     self._reset_vllm_unreachable_streak_locked()
                 self._prev_avg_gb = avg_gb
                 return report
@@ -830,12 +831,14 @@ class DynamicAdmissionController:
             ]
 
             current_free_gb = free_gb
+            current_free_percent = free_percent
             current_free_blocks = self._kv_free_blocks(vllm_info)
-            while (
-                threshold_gb is not None
-                and current_free_gb <= threshold_gb
-                and heap
-            ):
+            while self._is_pressure_active(
+                free_gb=current_free_gb,
+                free_percent=current_free_percent,
+                threshold_gb=threshold_gb,
+                threshold_percent=threshold_percent,
+            ) and heap:
                 _, _, cand = heapq.heappop(heap)
                 offload_result = self._offload_candidate(cand)
                 report["offloads"].append(offload_result)
@@ -889,7 +892,11 @@ class DynamicAdmissionController:
 
                     if freed_gb is None:
                         freed_gb = 0.0
-                    current_free_gb += max(0.0, freed_gb)
+                    if current_free_gb is not None:
+                        current_free_gb += max(0.0, freed_gb)
+                        current_free_percent = self._kv_free_percent(
+                            current_free_gb, total_gb, vllm_info
+                        )
                     after_blocks = offload_result.get("free_blocks_after")
                     if after_blocks is not None:
                         current_free_blocks = int(after_blocks)
@@ -903,9 +910,14 @@ class DynamicAdmissionController:
                 elif "offload_attempt_failed" not in report["reasons"]:
                     report["reasons"].append("offload_attempt_failed")
 
-            if threshold_gb is None:
+            if threshold_gb is None and threshold_percent is None:
                 report["reasons"].append("missing_kv_total_gb")
-            elif current_free_gb <= threshold_gb:
+            elif self._is_pressure_active(
+                free_gb=current_free_gb,
+                free_percent=current_free_percent,
+                threshold_gb=threshold_gb,
+                threshold_percent=threshold_percent,
+            ):
                 report["reasons"].append("pressure_threshold")
 
             effective_w = self._headroom(current_free_gb, avg_gb, prev_avg_gb)
@@ -919,8 +931,12 @@ class DynamicAdmissionController:
                 report["reasons"].append("headroom_low")
 
             effective_pressure = (
-                threshold_gb is not None
-                and current_free_gb <= threshold_gb
+                self._is_pressure_active(
+                    free_gb=current_free_gb,
+                    free_percent=current_free_percent,
+                    threshold_gb=threshold_gb,
+                    threshold_percent=threshold_percent,
+                )
             )
             if effective_pressure and effective_w is None and runnable_queue > 0:
                 admit_limit = 0
@@ -1153,9 +1169,17 @@ class DynamicAdmissionController:
             return max(0.0, free_gb)
 
         total = _finite_float(vllm_info.get("kv_total_gb"))
+        if total is None:
+            total = self._kv_total_gb(vllm_info, bytes_per_blk)
         used = _finite_float(vllm_info.get("kv_used_gb"))
         if total is not None and used is not None:
             return max(0.0, total - used)
+
+        pct = _finite_float(vllm_info.get("kv_cache_used_pct"))
+        if total is not None and pct is not None:
+            used_ratio = pct / 100.0 if pct > 1.0 else pct
+            if 0.0 <= used_ratio <= 1.0:
+                return max(0.0, total * (1.0 - used_ratio))
         return None
 
     def _kv_total_gb(
@@ -1182,11 +1206,36 @@ class DynamicAdmissionController:
         return None
 
     def _kv_free_percent(
-        self, free_gb: Optional[float], total_gb: Optional[float]
+        self,
+        free_gb: Optional[float],
+        total_gb: Optional[float],
+        vllm_info: Optional[dict[str, Any]] = None,
     ) -> Optional[float]:
-        if free_gb is None or total_gb is None or total_gb <= 0:
+        if free_gb is not None and total_gb is not None and total_gb > 0:
+            return max(0.0, min(100.0, 100.0 * free_gb / total_gb))
+
+        pct = (
+            _finite_float(vllm_info.get("kv_cache_used_pct"))
+            if vllm_info is not None else None
+        )
+        if pct is None:
             return None
-        return max(0.0, min(100.0, 100.0 * free_gb / total_gb))
+        used_percent = pct if pct > 1.0 else pct * 100.0
+        return max(0.0, min(100.0, 100.0 - used_percent))
+
+    def _is_pressure_active(
+        self,
+        *,
+        free_gb: Optional[float],
+        free_percent: Optional[float],
+        threshold_gb: Optional[float],
+        threshold_percent: Optional[float],
+    ) -> bool:
+        if threshold_gb is not None and free_gb is not None:
+            return free_gb <= threshold_gb
+        if threshold_percent is not None and free_percent is not None:
+            return free_percent <= threshold_percent
+        return False
 
     def _pressure_threshold_gb(self, total_gb: Optional[float]) -> Optional[float]:
         if self._legacy_threshold_gb is not None:
@@ -1298,18 +1347,6 @@ class DynamicAdmissionController:
                 or agent.get("kv_offloaded")
             ):
                 continue
-            if (
-                agent_id in self._idle_short
-                or agent.get("kv_policy") == "idle_short"
-            ):
-                skipped.append({"agent_id": agent_id, "reason": "idle_short"})
-                continue
-            if (
-                agent_id in self._released_agents
-                or agent.get("kv_policy") == "released"
-            ):
-                skipped.append({"agent_id": agent_id, "reason": "kv_released"})
-                continue
             current = self._read_current_agent_state(agent_id)
             if current is not None:
                 if current.get("state") != "tool_call":
@@ -1332,6 +1369,12 @@ class DynamicAdmissionController:
                     continue
                 agent = {**agent, **current}
                 agent.setdefault("agent_id", agent_id)
+            if (
+                agent_id in self._released_agents
+                or agent.get("kv_policy") == "released"
+            ):
+                skipped.append({"agent_id": agent_id, "reason": "kv_released"})
+                continue
             kv_gb = _agent_kv_gb(agent, bytes_per_blk)
             if kv_gb is None or kv_gb <= 0:
                 skipped.append({
@@ -1345,9 +1388,29 @@ class DynamicAdmissionController:
                     "tool_elapsed_s": self._round(self._tool_elapsed_s(agent)),
                 })
                 continue
+            elapsed_s = self._tool_elapsed_s(agent)
+            if (
+                agent_id in self._idle_short
+                or agent.get("kv_policy") == "idle_short"
+            ):
+                if (
+                    elapsed_s is None
+                    or elapsed_s < self.fallback_long_tool_call_s
+                ):
+                    skipped.append({"agent_id": agent_id, "reason": "idle_short"})
+                    continue
+                cand = self._elapsed_long_candidate_locked(
+                    agent_id,
+                    kv_gb=kv_gb,
+                    elapsed_s=elapsed_s,
+                    predicted_remaining_s=_finite_float(
+                        agent.get("predicted_remaining_s")
+                    ),
+                )
+                heapq.heappush(heap, (-cand.score, agent_id, cand))
+                continue
             remaining_s = self._predict_remaining(agent)
             if remaining_s is None:
-                elapsed_s = self._tool_elapsed_s(agent)
                 if elapsed_s is None or elapsed_s < self.fallback_long_tool_call_s:
                     skipped_event = {
                         "agent_id": agent_id,
@@ -1358,44 +1421,26 @@ class DynamicAdmissionController:
                     skipped.append(skipped_event)
                     continue
 
-                if agent_id not in self._idle_long:
-                    self._idle_short.discard(agent_id)
-                    self._idle_long.add(agent_id)
-                    event = {
-                        "ts": iso_utc(now_utc()),
-                        "agent_id": agent_id,
-                        "policy": "idle_long",
-                        "predicted_remaining_s": None,
-                        "tool_elapsed_s": self._round(elapsed_s),
-                        "threshold_s": self.short_tool_call_threshold_s,
-                        "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
-                        "reason": "fallback_elapsed_long_tool_call",
-                    }
-                    self._update_agent_state_locked(
-                        agent_id,
-                        {
-                            "kv_policy": "idle_long",
-                            "kv_offloaded": False,
-                            "admission_state": "admitted",
-                            "predicted_remaining_s": None,
-                            "tool_elapsed_s": self._round(elapsed_s),
-                            "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
-                            "last_kv_policy": event,
-                        },
-                    )
-                    self._record_kv_policy_event_locked(event)
-                score = kv_gb * elapsed_s
-                cand = _IdleAgentCandidate(
-                    agent_id=agent_id,
+                cand = self._elapsed_long_candidate_locked(
+                    agent_id,
                     kv_gb=kv_gb,
-                    predicted_remaining_s=None,
-                    tool_elapsed_s=elapsed_s,
-                    policy_reason="fallback_elapsed_long_tool_call",
-                    score=score,
+                    elapsed_s=elapsed_s,
                 )
-                heapq.heappush(heap, (-score, agent_id, cand))
+                heapq.heappush(heap, (-cand.score, agent_id, cand))
                 continue
             if remaining_s < self.short_tool_call_threshold_s:
+                if (
+                    elapsed_s is not None
+                    and elapsed_s >= self.fallback_long_tool_call_s
+                ):
+                    cand = self._elapsed_long_candidate_locked(
+                        agent_id,
+                        kv_gb=kv_gb,
+                        elapsed_s=elapsed_s,
+                        predicted_remaining_s=remaining_s,
+                    )
+                    heapq.heappush(heap, (-cand.score, agent_id, cand))
+                    continue
                 skipped_event = {
                     "agent_id": agent_id,
                     "reason": "predicted_short",
@@ -1459,6 +1504,52 @@ class DynamicAdmissionController:
             )
             heapq.heappush(heap, (-score, agent_id, cand))
         return heap, skipped
+
+    def _elapsed_long_candidate_locked(
+        self,
+        agent_id: str,
+        *,
+        kv_gb: float,
+        elapsed_s: float,
+        predicted_remaining_s: Optional[float] = None,
+    ) -> _IdleAgentCandidate:
+        """Promote a still-running tool call once elapsed time proves it long."""
+        self._idle_short.discard(agent_id)
+        if agent_id not in self._idle_long:
+            self._idle_long.add(agent_id)
+            event = {
+                "ts": iso_utc(now_utc()),
+                "agent_id": agent_id,
+                "policy": "idle_long",
+                "predicted_remaining_s": self._round(predicted_remaining_s),
+                "tool_elapsed_s": self._round(elapsed_s),
+                "threshold_s": self.short_tool_call_threshold_s,
+                "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
+                "reason": "fallback_elapsed_long_tool_call",
+            }
+            self._update_agent_state_locked(
+                agent_id,
+                {
+                    "kv_policy": "idle_long",
+                    "kv_offloaded": False,
+                    "admission_state": "admitted",
+                    "predicted_remaining_s": self._round(predicted_remaining_s),
+                    "tool_elapsed_s": self._round(elapsed_s),
+                    "fallback_long_tool_call_s": self.fallback_long_tool_call_s,
+                    "last_kv_policy": event,
+                },
+            )
+            self._record_kv_policy_event_locked(event)
+
+        score = kv_gb * elapsed_s
+        return _IdleAgentCandidate(
+            agent_id=agent_id,
+            kv_gb=kv_gb,
+            predicted_remaining_s=predicted_remaining_s,
+            tool_elapsed_s=elapsed_s,
+            policy_reason="fallback_elapsed_long_tool_call",
+            score=score,
+        )
 
     def _tool_elapsed_s(self, agent: dict[str, Any]) -> Optional[float]:
         start_dt = _parse_iso_ts(agent.get("tool_started_at")) or _parse_iso_ts(

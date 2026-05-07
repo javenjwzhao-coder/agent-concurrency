@@ -72,7 +72,8 @@ Key quantities:
 - `s_prev`: previous tick's active-agent average.
 - `w = C / min(s_t, s_prev)`: effective admission headroom, using whichever
   samples are known and including exact same-tick offload freeing when observed.
-- `threshold_percent`: pressure-offload threshold.
+- `threshold_percent`: pressure-offload threshold. Percent-only pressure from
+  vLLM's cache-used gauge can trigger offload even when free GB is unavailable.
 - `w_threshold`: strict admission threshold. Agents admit only when `w` is
   greater than `w_threshold`.
   If pressure is already active and `w` cannot be computed yet, admission stays
@@ -131,15 +132,18 @@ flowchart TD
     predict{Predictor returns<br/>remaining seconds?}
     short{below short-call threshold?}
     releaseShort[Release held KV immediately<br/>short tool-call reason]
-    idleShort[Mark short idle<br/>not offloadable]
+    idleShort[Mark short idle<br/>not offloadable yet]
     idleLong[Mark long idle<br/>eligible for pressure heap]
     fallback{elapsed above<br/>fallback long threshold?}
     unavailable[Mark predictor unavailable<br/>not offloadable yet]
+    agedShort{still resident and<br/>fallback age reached?}
 
     action --> close --> snapshot --> classify --> predict
     predict -- yes --> short
     short -- yes --> releaseShort --> idleShort
     short -- no --> idleLong
+    idleShort --> agedShort
+    agedShort -- yes --> idleLong
     predict -- no --> fallback
     fallback -- yes --> idleLong
     fallback -- no --> unavailable
@@ -226,6 +230,7 @@ stateDiagram-v2
     Reasoning --> Done: final or error
 
     ToolCall --> IdleShort: predicted short
+    IdleShort --> IdleLong: fallback age reached while KV is still resident
     IdleShort --> Reasoning: release + tool result
 
     ToolCall --> IdleLong: predicted long
@@ -243,7 +248,7 @@ State naming in telemetry:
 
 | State / field | Meaning |
 | --- | --- |
-| `idle_short` | Tool call predicted short; held KV is released and the agent is excluded from pressure offload. |
+| `idle_short` | Tool call predicted short; held KV is released and the agent is excluded from pressure offload until fallback age proves it long while KV is still resident. |
 | `idle_long` | Tool call is eligible for pressure offload. |
 | `offloaded_pending_tool` | KV offload accepted while the tool call is still running. |
 | `offloaded_ready` / `offloaded_waiting` | Tool finished; runner blocks before the next LLM call until readmitted. |

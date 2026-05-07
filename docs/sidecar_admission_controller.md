@@ -93,7 +93,7 @@ label) and derives free/used from `total × (1 − usage_pct)`.
 | `_offloaded_pending` | Agents whose KV was offloaded while the tool call was still running. |
 | `_offloaded_ready` | Offloaded agents whose tool result arrived and are waiting for readmission. |
 | `_offloaded_events` | Per-agent threading events used to block/resume agent threads. |
-| `_idle_short` | Tool-call agents predicted short; excluded from offload. |
+| `_idle_short` | Tool-call agents predicted short; excluded from offload until fallback age proves they are still long-running and resident. |
 | `_idle_long` | Tool-call agents eligible for pressure offload. |
 | `_released_agents` | Agents whose held KV was released without offload. |
 | `_kv_policy_events` | Recent policy decisions included in the next tick record. |
@@ -120,7 +120,9 @@ Decision order:
 6. Otherwise mark `idle_long`.
 
 Short calls are released quickly because keeping them pinned for offload would
-usually cost more than it saves.
+usually cost more than it saves. If that prediction ages badly and the scheduler
+still reports resident KV, the pressure heap promotes the agent to `idle_long`
+after `fallback_long_tool_call_s`.
 
 ## Admission Tick
 
@@ -131,8 +133,8 @@ Key quantities:
 
 | Symbol | Field | Meaning |
 | --- | --- | --- |
-| `C` | `C` | Free KV in GB. |
-| `C_percent` | `C_percent` | Free KV as percent of total. |
+| `C` | `C` | Free KV in GB, when block/free capacity is available. |
+| `C_percent` | `C_percent` | Free KV as percent of total; may be derived from `kv_cache_used_pct`. |
 | `s_t` | `s_t` | Current average KV GB among active, non-offloaded agents. |
 | `s_prev` | `s_prev` | Previous tick's active-agent average. |
 | `w` | `w` | `C / min(s_t, s_prev)`, using whichever samples are known. |
@@ -150,12 +152,13 @@ is not already under free-KV pressure.
 ## Pressure Offload
 
 When free KV is at or below the pressure threshold, the sidecar builds an
-offload heap from current `tool_call` agents.
+offload heap from current `tool_call` agents. If vLLM only exposes cache-used
+percent on a tick, percent pressure is enough to run the offload heap.
 
 Candidates are skipped when:
 
 - the agent is already offloaded
-- the tool call is marked `idle_short`
+- the tool call is marked `idle_short` and has not yet aged past fallback
 - held KV has already been released
 - KV usage is missing or zero
 - predictor is unavailable and fallback elapsed time has not been reached
@@ -166,8 +169,9 @@ Candidate score:
 score = agent_kv_gb * predicted_remaining_tool_seconds
 ```
 
-When prediction is unavailable but fallback makes the call eligible, elapsed
-tool time is used as the score multiplier.
+When fallback elapsed time makes the call eligible, elapsed tool time is used as
+the score multiplier. This also corrects short predictions that aged badly while
+the agent still has resident KV.
 
 The sidecar sends a POST to the offload endpoint, usually:
 

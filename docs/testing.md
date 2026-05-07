@@ -76,7 +76,9 @@ Covers admission and offload policy behavior:
 - short vs long tool-call classification
 - release/offload callback behavior
 - exact freed-memory accounting
-- fallback-long behavior when predictor output is unavailable
+- fallback-long behavior when predictor output is unavailable or a short
+  prediction ages badly
+- percent-only pressure telemetry triggering fallback offload
 
 ### `test_collect_tool_trace.py`
 
