@@ -388,6 +388,9 @@ class AgentPhaseTracker:
                 with _live_lock:
                     live = _LIVE_AGENTS.get(self.agent_id)
                     if live is not None:
+                        live["state"] = "waiting"
+                        live["state_since"] = iso_utc(event_dt)
+                        live["admission_state"] = "tool_complete_pending_release"
                         for key in (
                             "tool_name",
                             "tool_call_id",
@@ -1203,6 +1206,10 @@ def main() -> int:
         def _get_agents() -> dict:
             with _live_lock:
                 return {agent_id: dict(state) for agent_id, state in _LIVE_AGENTS.items()}
+        def _get_agent_state(agent_id: str) -> dict | None:
+            with _live_lock:
+                state = _LIVE_AGENTS.get(agent_id)
+                return dict(state) if state is not None else None
         if args.sidecar_admission_control:
             _sc_admission_controller = _sidecar.DynamicAdmissionController(
                 enabled=True,
@@ -1243,6 +1250,7 @@ def main() -> int:
                 bytes_per_blk=_sc_bpb,
                 predictor_model=args.sidecar_admission_predictor_model,
                 state_update_callback=_update_live_agent,
+                agent_state_reader=_get_agent_state,
             )
         _sc_http_feed = None
         if args.sidecar_http_port:

@@ -294,6 +294,49 @@ def test_scheduler_usage_queries_active_agents_in_parallel():
     assert set(session.calls) == set(agents)
 
 
+def test_stale_tool_call_snapshot_is_not_offloaded_after_live_state_changes():
+    offloaded: list[str] = []
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        predictor=FakePredictor({"agent": 10.0}),
+        offload_callback=lambda cand: offloaded.append(cand.agent_id) or {
+            "offloaded": True,
+            "freed_gb": cand.kv_gb,
+        },
+        agent_state_reader=lambda agent_id: {
+            "agent_id": agent_id,
+            "state": "reasoning",
+            "kv_blocks": 5,
+        },
+    )
+    stale_snapshot = {
+        "agent": {
+            "agent_id": "agent",
+            "state": "tool_call",
+            "state_since": iso_utc(now_utc() - timedelta(seconds=10)),
+            "kv_blocks": 5,
+        },
+    }
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents=stale_snapshot,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["offloads"] == []
+    assert offloaded == []
+    assert report["skipped_candidates"] == [
+        {
+            "agent_id": "agent",
+            "reason": "stale_snapshot_state",
+            "current_state": "reasoning",
+        },
+    ]
+
+
 def test_scheduler_usage_prefers_resident_kv_blocks_for_memory_sizing():
     session = FakeUsageSession({
         "running": {

@@ -393,6 +393,7 @@ class DynamicAdmissionController:
         predictor: Any = None,
         admit_callback: Optional[Callable[[AgentLaunchSpec], Any]] = None,
         state_update_callback: Optional[Callable[[str, dict[str, Any]], None]] = None,
+        agent_state_reader: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
         offload_callback: Optional[Callable[[_IdleAgentCandidate], dict[str, Any]]] = None,
         restore_callback: Optional[Callable[[str], dict[str, Any]]] = None,
         release_callback: Optional[Callable[[str, str], dict[str, Any]]] = None,
@@ -423,6 +424,7 @@ class DynamicAdmissionController:
         self.bytes_per_blk = int(bytes_per_blk) if bytes_per_blk else None
         self._admit_callback = admit_callback
         self._state_update_callback = state_update_callback
+        self._agent_state_reader = agent_state_reader
         self._offload_callback = offload_callback
         self._restore_callback = restore_callback
         self._release_callback = release_callback
@@ -1115,6 +1117,24 @@ class DynamicAdmissionController:
             ):
                 skipped.append({"agent_id": agent_id, "reason": "kv_released"})
                 continue
+            current = self._read_current_agent_state(agent_id)
+            if current is not None:
+                if current.get("state") != "tool_call":
+                    self._idle_long.discard(agent_id)
+                    skipped.append({
+                        "agent_id": agent_id,
+                        "reason": "stale_snapshot_state",
+                        "current_state": current.get("state"),
+                    })
+                    continue
+                if current.get("kv_offloaded"):
+                    continue
+                if current.get("kv_policy") == "released":
+                    self._idle_long.discard(agent_id)
+                    skipped.append({"agent_id": agent_id, "reason": "kv_released"})
+                    continue
+                agent = {**agent, **current}
+                agent.setdefault("agent_id", agent_id)
             kv_gb = _agent_kv_gb(agent, bytes_per_blk)
             if kv_gb is None or kv_gb <= 0:
                 continue
@@ -1240,6 +1260,17 @@ class DynamicAdmissionController:
         if start_dt is None:
             return None
         return max(0.0, (now_utc() - start_dt).total_seconds())
+
+    def _read_current_agent_state(self, agent_id: str) -> Optional[dict[str, Any]]:
+        if self._agent_state_reader is None:
+            return None
+        try:
+            current = self._agent_state_reader(agent_id)
+        except Exception:
+            return None
+        if not current:
+            return None
+        return dict(current)
 
     def _predict_remaining(self, agent: dict[str, Any]) -> Optional[float]:
         elapsed_s = self._tool_elapsed_s(agent) or 0.0
