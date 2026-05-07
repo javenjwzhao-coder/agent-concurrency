@@ -73,10 +73,12 @@ block_size * num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
 - `kv_free_gb`
 - `scheduler_preemptions_total`
 
-The metric parser recognizes standard vLLM and vllm-ascend metric names. When
-`total_gpu_blocks` is configured, it overrides Prometheus totals because Ascend
-deployments can expose a physical allocation that differs from the scheduler
-limit set by `--num-gpu-blocks-override`.
+The metric parser recognizes standard vLLM and vllm-ascend metric names. The
+total block count and the KV-used percentage are both derived from
+`num_npu_blocks_free` divided by `num_npu_blocks` so the dashboard's KV-used
+line and the controller's `C_percent` always share a denominator. (vllm-ascend's
+own `npu_cache_usage_perc` gauge is computed from a pre-scheduler block count
+and is intentionally ignored.)
 
 ## Controller State
 

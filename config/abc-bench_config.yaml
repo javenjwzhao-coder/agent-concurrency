@@ -71,10 +71,6 @@ sidecar:
   # vLLM KV block size in tokens. Must match the server-side block size.
   block_size: 128
 
-  # Total GPU KV blocks available to vLLM. Used to compute free/used GB and
-  # pressure thresholds when vLLM metrics do not expose a reliable total.
-  total_gpu_blocks: 1000
-
   # Set to 0 or remove to disable the live dashboard.
   http_port: 8765
 

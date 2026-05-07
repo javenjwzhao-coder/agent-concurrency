@@ -1122,10 +1122,6 @@ def parse_args() -> argparse.Namespace:
     sc.add_argument("--sidecar-head-dim",     type=int, default=None)
     sc.add_argument("--sidecar-block-size",   type=int, default=16)
     sc.add_argument("--sidecar-dtype",        default="bfloat16")
-    sc.add_argument("--sidecar-total-gpu-blocks", type=int, default=0,
-                    help="Total GPU/NPU KV-cache blocks. Required when vLLM does not expose "
-                         "a block-count metric in Prometheus (e.g. vllm_ascend). "
-                         "Must match --num-gpu-blocks-override in vLLM args.")
     sc.add_argument("--sidecar-admission-control", action="store_true",
                     help="Let the embedded sidecar admit queued agents dynamically.")
     sc.add_argument("--sidecar-admission-threshold-percent", type=float, default=10.0,
@@ -1204,7 +1200,6 @@ def main() -> int:
             head_dim=args.sidecar_head_dim,
             block_size=args.sidecar_block_size,
             dtype=args.sidecar_dtype,
-            total_gpu_blocks=args.sidecar_total_gpu_blocks,
         )
         _sc_bpb = _sidecar.bytes_per_block(
             _sc_args.num_layers, _sc_args.num_kv_heads,
@@ -1258,7 +1253,6 @@ def main() -> int:
                     if args.sidecar_exact_freed_gb_timeout_s is not None else 5.0
                 ),
                 vllm_url=args.sidecar_vllm_url,
-                total_gpu_blocks=args.sidecar_total_gpu_blocks,
                 bytes_per_blk=_sc_bpb,
                 predictor_model=args.sidecar_admission_predictor_model,
                 state_update_callback=_update_live_agent,

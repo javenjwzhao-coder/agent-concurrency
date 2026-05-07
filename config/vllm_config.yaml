@@ -19,7 +19,6 @@ native:
   extra_args: >-
     --block-size 128
     --gpu-memory-utilization 0.95
-    --num-gpu-blocks-override 1000
     --max-num-seqs 20
     --max-num-batched-tokens 32768
     --enable-auto-tool-choice

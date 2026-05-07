@@ -98,7 +98,7 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
+def _parse_vllm_kv_metrics(text: str) -> dict:
     """Extract KV-cache block statistics from Prometheus /metrics text.
 
     Covers every known metric-name variant used by standard vLLM and
@@ -227,30 +227,29 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                 _set_cached(val)
 
     # ── Derive missing values from what we have ────────────────────────────────
-    # Caller-supplied hint (from --num-gpu-blocks-override / total_gpu_blocks in
-    # config) takes priority over any Prometheus-derived value. vllm-ascend may
-    # expose a block-count metric that reflects the physical NPU allocation
-    # rather than the scheduler-level limit set by the override, so the hint is
-    # the ground truth when provided.
-    if total_blocks_hint > 0:
-        m["total_blocks"] = total_blocks_hint
-    elif "total_blocks" not in m:
-        # Derive from component gauges when no hint is given.
+    # Derive total from component gauges when vLLM does not export it directly.
+    if "total_blocks" not in m:
         parts = [m.get(k, 0) for k in ("used_blocks", "cached_blocks", "free_blocks")]
         if any(v > 0 for v in parts):
             m["total_blocks"] = sum(parts)
 
-    # usage_pct from used / total (when only block gauges are present).
-    if "usage_pct" not in m:
-        used  = m.get("used_blocks")
-        total = m.get("total_blocks")
+    # Always recompute usage_pct from free_blocks / total when both are present
+    # so the dashboard's KV-used line shares a denominator with the admission
+    # controller's free-percent. vllm-ascend's npu_cache_usage_perc gauge is
+    # derived from the worker's pre-scheduler block count and disagrees with
+    # num_npu_blocks_free; preferring the scheduler view keeps both consistent.
+    free  = m.get("free_blocks")
+    total = m.get("total_blocks")
+    if free is not None and total:
+        m["usage_pct"] = max(0.0, min(1.0, 1.0 - free / total))
+    elif "usage_pct" not in m:
+        used = m.get("used_blocks")
         if used is not None and total:
             m["usage_pct"] = used / total
 
     # used_blocks from usage_pct × total (when only the percentage is present).
     if "used_blocks" not in m:
-        pct   = m.get("usage_pct")
-        total = m.get("total_blocks")
+        pct = m.get("usage_pct")
         if pct is not None and total:
             m["used_blocks"] = round(total * pct)
 
@@ -387,7 +386,6 @@ class DynamicAdmissionController:
         exact_freed_gb_timeout_s: float = DEFAULT_EXACT_FREED_GB_TIMEOUT_S,
         exact_freed_gb_poll_interval_s: float = 0.05,
         vllm_url: Optional[str] = None,
-        total_gpu_blocks: int = 0,
         bytes_per_blk: Optional[int] = None,
         predictor_model: Optional[Path | str] = None,
         predictor: Any = None,
@@ -420,7 +418,6 @@ class DynamicAdmissionController:
             0.01, float(exact_freed_gb_poll_interval_s)
         )
         self.vllm_url = str(vllm_url or "")
-        self.total_gpu_blocks = max(0, int(total_gpu_blocks or 0))
         self.bytes_per_blk = int(bytes_per_blk) if bytes_per_blk else None
         self._admit_callback = admit_callback
         self._state_update_callback = state_update_callback
@@ -1062,9 +1059,6 @@ class DynamicAdmissionController:
     def _kv_total_gb(
         self, vllm_info: dict[str, Any], bytes_per_blk: int
     ) -> Optional[float]:
-        if self.total_gpu_blocks > 0:
-            return self.total_gpu_blocks * bytes_per_blk / 1e9
-
         total_blocks = _finite_float(vllm_info.get("num_gpu_blocks_total"))
         if total_blocks is not None and total_blocks > 0:
             return total_blocks * bytes_per_blk / 1e9
@@ -1484,7 +1478,6 @@ class DynamicAdmissionController:
                 self._session,
                 self.vllm_url,
                 bytes_per_blk,
-                self.total_gpu_blocks,
             )
             after_free_blocks = self._kv_free_blocks(after)
             if after_free_blocks is not None:
@@ -1773,14 +1766,13 @@ class DynamicAdmissionController:
 _kv_metric_warn_emitted = False
 
 
-def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
-              total_blocks_hint: int = 0) -> dict:
+def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> dict:
     """Fetch /metrics and return global KV cache statistics."""
     global _kv_metric_warn_emitted
     try:
         resp = session.get(f"{vllm_url}/metrics", timeout=5)
         resp.raise_for_status()
-        kv = _parse_vllm_kv_metrics(resp.text, total_blocks_hint=total_blocks_hint)
+        kv = _parse_vllm_kv_metrics(resp.text)
 
         used_pct   = kv.get("usage_pct")    # 0..1
         total_blks = kv.get("total_blocks")
@@ -1858,8 +1850,7 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
         record = {
             "ts":     iso_utc(now_utc()),
             "tick":   tick,
-            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk,
-                                 getattr(args, "total_gpu_blocks", 0)),
+            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk),
             "agents": agents,
         }
         if admission_controller is not None:
@@ -1924,10 +1915,6 @@ def parse_args() -> argparse.Namespace:
     geo.add_argument("--head-dim",     type=int, required=True)
     geo.add_argument("--block-size",   type=int, default=16)
     geo.add_argument("--dtype",        default="bfloat16", choices=list(_DTYPE_BYTES))
-    geo.add_argument("--total-gpu-blocks", type=int, default=0,
-                     help="Total GPU/NPU KV-cache blocks. Required when vLLM does not expose "
-                          "a block-count metric in Prometheus (e.g. vllm_ascend with only a "
-                          "usage-%% gauge). Must match --num-gpu-blocks-override in vLLM args.")
 
     ac = p.add_argument_group("dynamic admission control")
     ac.add_argument("--admission-control", action="store_true",
@@ -2017,7 +2004,6 @@ def main() -> int:
                 else DEFAULT_EXACT_FREED_GB_TIMEOUT_S
             ),
             vllm_url=args.vllm_url,
-            total_gpu_blocks=args.total_gpu_blocks,
             bytes_per_blk=bpb,
             predictor_model=args.admission_predictor_model,
         )
