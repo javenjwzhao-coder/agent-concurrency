@@ -222,35 +222,39 @@ not "recover blocks after ref count reaches zero"; it is "hold before free."
 ## 5. Agent State Machine
 
 ```mermaid
-%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 34, "rankSpacing": 38}} }%%
-flowchart LR
-    queued([Fresh queue])
-    admitted([Admitted])
-    reasoning([Reasoning<br/>LLM turn])
-    tool([Tool call<br/>running])
-    done([Done<br/>run terminal])
+%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 46}} }%%
+flowchart TB
+    subgraph run["Run lifecycle"]
+        direction LR
+        queued([Fresh queue])
+        admitted([Admitted])
+        reasoning([Reasoning<br/>LLM turn])
+        tool([Tool call<br/>running])
+        done([Done<br/>terminal])
 
-    short([Idle short<br/>release KV])
-    long([Idle long<br/>offload candidate])
-    offloaded([KV offloaded<br/>tool still running])
-    ready([Ready<br/>await readmit])
+        queued -->|launch| admitted -->|LLM request| reasoning
+        reasoning -->|ActionEvent| tool
+        reasoning -->|final response| done
+        reasoning -.->|run error / cancel| done
+        tool -.->|run abort| done
+    end
 
-    queued -->|launch| admitted -->|LLM request| reasoning
-    reasoning -->|ActionEvent| tool
-    reasoning -->|final response| done
-    reasoning -.->|run error / cancel| done
+    subgraph policy["Tool-call KV policy"]
+        direction LR
+        short([Idle short<br/>release KV])
+        long([Idle long<br/>offload candidate])
+        offloaded([KV offloaded<br/>tool still running])
+        ready([Ready<br/>await readmit])
+
+        short -->|fallback age| long
+        long -->|KV pressure| offloaded
+        offloaded -->|tool result / error| ready
+    end
 
     tool -->|short prediction| short
     tool -->|long prediction| long
-    tool -.->|run abort| done
-
     short -->|tool result / error| reasoning
-    short -->|fallback age| long
-
     long -->|tool result / error + release| reasoning
-    long -->|KV pressure| offloaded
-
-    offloaded -->|tool result / error| ready
     ready -->|readmit + restore| admitted
 
     classDef queue fill:#eef2ff,stroke:#4f46e5,stroke-width:1.4px,color:#111827
