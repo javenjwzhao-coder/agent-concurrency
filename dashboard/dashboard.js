@@ -123,6 +123,9 @@
   // ── timeline + KV chart bootstrap ──────────────────────────────────────
 
   function buildCharts() {
+    if (!hasVisCharts()) {
+      throw new Error("vis-timeline assets are unavailable");
+    }
     state.items = new vis.DataSet();
     state.groups = new vis.DataSet();
     const initialStart = new Date(Date.now() - VIEWPORT_PAST_MS);
@@ -1100,6 +1103,105 @@
     return { ticks: [], meta: { source: "invalid embedded data" } };
   }
 
+  function hasVisCharts() {
+    return Boolean(
+      window.vis &&
+      typeof window.vis.DataSet === "function" &&
+      typeof window.vis.Timeline === "function" &&
+      typeof window.vis.Graph2d === "function"
+    );
+  }
+
+  function showStartupError(title, detail) {
+    console.error(title, detail || "");
+    setDashboardTitle("Offline");
+    setStatus(title, "status-error");
+    const main = document.querySelector("main");
+    if (!main) return;
+    main.innerHTML = "";
+    const panel = document.createElement("section");
+    panel.className = "offline-fallback";
+    const h2 = document.createElement("h2");
+    h2.textContent = title;
+    const p = document.createElement("p");
+    p.textContent = detail || "The dashboard could not start.";
+    panel.append(h2, p);
+    main.appendChild(panel);
+  }
+
+  function renderSnapshotFallback(ticks, meta, reason) {
+    state.mode = "snapshot";
+    setDashboardTitle("Snapshot");
+    setPaused(true);
+    state.records = Array.isArray(ticks) ? ticks.slice() : [];
+    state.latestTick = state.records.reduce((latest, rec) => (
+      typeof rec.tick === "number" ? Math.max(latest, rec.tick) : latest
+    ), -1);
+    const last = state.records[state.records.length - 1] || {};
+    state.latestTs = last.ts || null;
+    setTickInfo(last.tick, last.ts);
+    setStatus(`snapshot fallback · ${state.records.length} tick(s)`, "status-error");
+    const liveBtn = $("#liveBtn");
+    if (liveBtn) liveBtn.hidden = true;
+
+    const main = document.querySelector("main");
+    if (!main) return;
+    main.innerHTML = "";
+    const panel = document.createElement("section");
+    panel.className = "offline-fallback";
+    const title = document.createElement("h2");
+    title.textContent = "Snapshot data loaded";
+    const detail = document.createElement("p");
+    detail.textContent = reason ||
+      "Interactive charts are unavailable because dashboard assets did not load.";
+    const summary = document.createElement("p");
+    summary.textContent = snapshotFallbackSummary(state.records, meta);
+    panel.append(title, detail, summary, snapshotFallbackTable(state.records));
+    main.appendChild(panel);
+  }
+
+  function snapshotFallbackSummary(records, meta) {
+    const first = records[0] || {};
+    const last = records[records.length - 1] || {};
+    const source = meta && (meta.source || meta.source_mode)
+      ? ` · source: ${meta.source || meta.source_mode}`
+      : "";
+    return `ticks: ${records.length} · first: ${first.ts || "n/a"} · last: ${last.ts || "n/a"}${source}`;
+  }
+
+  function snapshotFallbackTable(records) {
+    const table = document.createElement("table");
+    table.className = "offline-fallback-table";
+    const thead = document.createElement("thead");
+    thead.innerHTML = "<tr><th>tick</th><th>ts</th><th>C</th><th>w</th><th>active</th><th>events</th></tr>";
+    const tbody = document.createElement("tbody");
+    const recent = records.slice(-200);
+    for (const rec of recent) {
+      const adm = rec.admission || {};
+      const events = [];
+      if ((adm.offloads || []).some((ev) => ev && ev.offloaded === true)) events.push("OFFLOAD");
+      if ((adm.admissions || []).some((ev) => ev && ev.admitted === true && ev.previously_offloaded !== true)) events.push("ADMIT");
+      if ((adm.admissions || []).some((ev) => ev && ev.admitted === true && ev.previously_offloaded === true)) events.push("READMIT");
+      if ((adm.reasons || []).includes("saturation_guard")) events.push("SAT");
+      const row = document.createElement("tr");
+      for (const value of [
+        fmt(rec.tick),
+        fmt(rec.ts),
+        fmt(adm.C),
+        fmt(adm.w),
+        fmt(adm.active_agents),
+        events.join(", "),
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      }
+      tbody.appendChild(row);
+    }
+    table.append(thead, tbody);
+    return table;
+  }
+
   // ── standalone snapshot export ─────────────────────────────────────────
 
   async function saveStandaloneHtml() {
@@ -1197,6 +1299,10 @@
       ),
       assetTextForExport("#dashboardJsAsset", "/static/dashboard.js"),
     ]);
+    validateStandaloneAsset("vis-timeline CSS", visCss);
+    validateStandaloneAsset("dashboard CSS", dashboardCss);
+    validateStandaloneAsset("vis-timeline JS", visJs, ["Graph2d", "Timeline"]);
+    validateStandaloneAsset("dashboard JS", dashboardJs, ["SNAPSHOT_DATA_ID"]);
 
     const payload = {
       version: SNAPSHOT_VERSION,
@@ -1248,6 +1354,19 @@
     const resp = await fetch(url, { cache: "no-store" });
     if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
     return resp.text();
+  }
+
+  function validateStandaloneAsset(name, text, requiredTokens) {
+    const body = String(text || "");
+    if (!body.trim()) {
+      throw new Error(`snapshot export missing ${name}`);
+    }
+    if (
+      requiredTokens &&
+      !requiredTokens.every((token) => body.includes(token))
+    ) {
+      throw new Error(`snapshot export loaded invalid ${name}`);
+    }
   }
 
   function currentDashboardShellHtml() {
@@ -1413,15 +1532,35 @@
   // ── boot ───────────────────────────────────────────────────────────────
 
   document.addEventListener("DOMContentLoaded", async () => {
-    buildCharts();
-    wireControls();
-    const embedded = readEmbeddedSnapshot();
-    if (embedded) {
-      loadSnapshotRecords(embedded.ticks, embedded.meta);
-      return;
+    try {
+      wireControls();
+      const embedded = readEmbeddedSnapshot();
+      if (!hasVisCharts()) {
+        if (embedded) {
+          renderSnapshotFallback(
+            embedded.ticks,
+            embedded.meta,
+            "Interactive charts are unavailable because vis-timeline did not load.",
+          );
+        } else {
+          showStartupError(
+            "dashboard assets unavailable",
+            "This file cannot run as a live dashboard without its JavaScript assets. Use the dashboard's Save standalone HTML button for an offline snapshot.",
+          );
+        }
+        return;
+      }
+      buildCharts();
+      if (embedded) {
+        loadSnapshotRecords(embedded.ticks, embedded.meta);
+        return;
+      }
+      setDashboardTitle("Live");
+      await bootstrapLive();
+      connectStream();
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      showStartupError("dashboard failed to start", msg);
     }
-    setDashboardTitle("Live");
-    await bootstrapLive();
-    connectStream();
   });
 })();

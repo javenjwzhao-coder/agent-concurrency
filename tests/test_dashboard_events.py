@@ -139,9 +139,13 @@ def test_dashboard_exports_standalone_html_snapshots():
     js = _read("dashboard/dashboard.js")
     html = _read("dashboard/index.html")
     schema = _read("dashboard/SCHEMA.md")
+    css = _read("dashboard/dashboard.css")
 
     assert "saveSnapshotBtn" in html
     assert "Save standalone HTML" in html
+    assert 'href="static/dashboard.css"' in html
+    assert 'src="static/dashboard.js"' in html
+    assert "offline asset missing" in html
     assert "dashboardSnapshotData" in js
     assert "records: []" in js
     assert "buildStandaloneHtml" in js
@@ -150,4 +154,9 @@ def test_dashboard_exports_standalone_html_snapshots():
     assert "safeScriptJson(payload)" in js
     assert "loadSnapshotRecords(embedded.ticks, embedded.meta)" in js
     assert "assetTextForExport" in js
+    assert "validateStandaloneAsset(\"vis-timeline JS\", visJs" in js
+    assert "hasVisCharts()" in js
+    assert "renderSnapshotFallback(" in js
+    assert "dashboard assets unavailable" in js
+    assert "offline-fallback" in css
     assert "without `/state`, `/stream`, or a separate" in schema

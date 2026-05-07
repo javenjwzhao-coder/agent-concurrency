@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>Agent Concurrency · Live</title>
-  <link id="dashboardCssAsset" rel="stylesheet" href="/static/dashboard.css">
+  <link id="dashboardCssAsset" rel="stylesheet" href="static/dashboard.css">
   <!--
     vis-timeline (includes both Timeline and Graph2D) is loaded from a CDN.
     If the dashboard host has no internet, download these two files into
@@ -13,6 +13,32 @@
   -->
   <link id="visCssAsset" rel="stylesheet"
         href="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css">
+  <script>
+    (function () {
+      function showAssetError(asset) {
+        var status = document.getElementById("connStatus");
+        if (status) {
+          status.textContent = "offline asset missing: " + asset;
+          status.className = "status status-error";
+        }
+        var main = document.querySelector("main");
+        if (main && !document.getElementById("offlineAssetError")) {
+          main.innerHTML = '<section id="offlineAssetError" class="offline-fallback">' +
+            '<h2>Dashboard asset missing</h2>' +
+            '<p>This HTML file was opened without the JavaScript/CSS assets needed to run it. ' +
+            'For an offline snapshot, open the live dashboard and use the Save standalone HTML button.</p>' +
+            '</section>';
+        }
+      }
+      window.addEventListener("error", function (event) {
+        var target = event.target;
+        if (!target || !target.id) return;
+        if (/^(dashboardCssAsset|visCssAsset|visJsAsset|dashboardJsAsset)$/.test(target.id)) {
+          showAssetError(target.getAttribute("href") || target.getAttribute("src") || target.id);
+        }
+      }, true);
+    }());
+  </script>
 </head>
 <body>
   <header>
@@ -59,6 +85,6 @@
   </main>
 
   <script id="visJsAsset" src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
-  <script id="dashboardJsAsset" src="/static/dashboard.js"></script>
+  <script id="dashboardJsAsset" src="static/dashboard.js"></script>
 </body>
 </html>

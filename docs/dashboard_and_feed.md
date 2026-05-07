@@ -114,6 +114,11 @@ restarts the live bootstrap flow.
 
 Opening the exported file calls `readEmbeddedSnapshot()` and renders the saved
 data without `/state`, `/stream`, or an external `sidecar.log`.
+The exporter validates that the critical inline CSS/JS assets were actually
+captured before writing the file, so a broken asset fetch fails the save instead
+of producing a blank snapshot. If an already-saved snapshot is opened somewhere
+that blocks the charting library, the page shows a compact static fallback table
+with the embedded tick data rather than failing silently.
 When the browser exposes `showSaveFilePicker()`, the dashboard prompts for a
 destination path before writing the snapshot. Browsers without that API keep the
 download-link fallback.
