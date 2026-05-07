@@ -764,6 +764,11 @@ class DynamicAdmissionController:
 
             heap, skipped = self._idle_agent_heap(agents, bytes_per_blk)
             report["skipped_candidates"] = skipped
+            zero_kv_during_tool_call = sum(
+                1 for s in skipped if s.get("reason") == "missing_or_zero_kv"
+            )
+            if zero_kv_during_tool_call:
+                usage_report["zero_kv_during_tool_call"] = zero_kv_during_tool_call
             report["heap_candidates"] = [
                 {
                     "agent_id": cand.agent_id,
@@ -787,24 +792,53 @@ class DynamicAdmissionController:
                 offload_result = self._offload_candidate(cand)
                 report["offloads"].append(offload_result)
                 if offload_result.get("offloaded"):
-                    freed_gb = _finite_float(offload_result.get("freed_gb"))
-                    if freed_gb is not None:
-                        offload_result.setdefault("freed_gb_source", "offload_endpoint")
-                    else:
-                        observed = self._measure_exact_freed_gb(
-                            before_free_blocks=current_free_blocks,
-                            bytes_per_blk=bytes_per_blk,
-                        )
-                        if observed is not None:
-                            freed_gb = observed["freed_gb"]
-                            offload_result.update(observed)
-                            offload_result["freed_gb"] = self._round(freed_gb)
-                        else:
-                            offload_result["freed_gb_source"] = (
-                                "pending_async"
-                                if offload_result.get("pending")
-                                else "unavailable_exact"
+                    # Register the offloaded event before the slow polling work
+                    # so a concurrent runner-thread tool_call_end blocks on the
+                    # event instead of falling into the no-event release path.
+                    self._mark_agent_offloaded_locked(cand.agent_id, offload_result)
+
+                    before_blocks_for_measure = current_free_blocks
+                    needs_refresh_blocks = (
+                        _finite_float(offload_result.get("freed_gb")) is not None
+                        and offload_result.get("free_blocks_after") is None
+                        and offload_result.get("freed_blocks") is None
+                    )
+
+                    # Drop the lock around the deterministic 5s polling window
+                    # so runner threads (on_tool_call_start, release_agent_kv,
+                    # finish_agent) aren't blocked while we wait for vLLM.
+                    self._lock.release()
+                    try:
+                        freed_gb = _finite_float(offload_result.get("freed_gb"))
+                        refreshed_blocks: Optional[int] = None
+                        if freed_gb is not None:
+                            offload_result.setdefault(
+                                "freed_gb_source", "offload_endpoint"
                             )
+                            if needs_refresh_blocks and self.vllm_url:
+                                refreshed_blocks = self._kv_free_blocks(
+                                    poll_vllm(
+                                        self._session, self.vllm_url, bytes_per_blk
+                                    )
+                                )
+                        else:
+                            observed = self._measure_exact_freed_gb(
+                                before_free_blocks=before_blocks_for_measure,
+                                bytes_per_blk=bytes_per_blk,
+                            )
+                            if observed is not None:
+                                freed_gb = observed["freed_gb"]
+                                offload_result.update(observed)
+                                offload_result["freed_gb"] = self._round(freed_gb)
+                            else:
+                                offload_result["freed_gb_source"] = (
+                                    "pending_async"
+                                    if offload_result.get("pending")
+                                    else "unavailable_exact"
+                                )
+                    finally:
+                        self._lock.acquire()
+
                     if freed_gb is None:
                         freed_gb = 0.0
                     current_free_gb += max(0.0, freed_gb)
@@ -817,8 +851,7 @@ class DynamicAdmissionController:
                     ):
                         current_free_blocks += int(offload_result["freed_blocks"])
                     elif _finite_float(offload_result.get("freed_gb")) is not None:
-                        current_free_blocks = None
-                    self._mark_agent_offloaded_locked(cand.agent_id, offload_result)
+                        current_free_blocks = refreshed_blocks
                 elif "offload_attempt_failed" not in report["reasons"]:
                     report["reasons"].append("offload_attempt_failed")
 
@@ -1240,6 +1273,10 @@ class DynamicAdmissionController:
                     })
                     continue
                 if current.get("kv_offloaded"):
+                    skipped.append({
+                        "agent_id": agent_id,
+                        "reason": "kv_offloaded_live",
+                    })
                     continue
                 if current.get("kv_policy") == "released":
                     self._idle_long.discard(agent_id)
@@ -1255,6 +1292,9 @@ class DynamicAdmissionController:
                     "kv_blocks": agent.get("kv_blocks"),
                     "kv_gb": self._round(_finite_float(agent.get("kv_gb"))),
                     "kv_usage_source": agent.get("kv_usage_source"),
+                    "last_kv_updated": agent.get("last_kv_updated"),
+                    "last_kv_usage": agent.get("last_kv_usage"),
+                    "tool_elapsed_s": self._round(self._tool_elapsed_s(agent)),
                 })
                 continue
             remaining_s = self._predict_remaining(agent)

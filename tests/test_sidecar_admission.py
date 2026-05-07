@@ -485,15 +485,20 @@ def test_zero_kv_tool_call_has_explicit_skipped_reason():
 
     assert report["offloads"] == []
     assert report["heap_candidates"] == []
-    assert report["skipped_candidates"] == [
-        {
-            "agent_id": "tool",
-            "reason": "missing_or_zero_kv",
-            "kv_blocks": 0,
-            "kv_gb": 0.0,
-            "kv_usage_source": "scheduler_usage",
-        }
-    ]
+    assert len(report["skipped_candidates"]) == 1
+    sk = dict(report["skipped_candidates"][0])
+    elapsed = sk.pop("tool_elapsed_s")
+    assert elapsed is not None and 44.0 <= elapsed <= 46.0
+    assert sk == {
+        "agent_id": "tool",
+        "reason": "missing_or_zero_kv",
+        "kv_blocks": 0,
+        "kv_gb": 0.0,
+        "kv_usage_source": "scheduler_usage",
+        "last_kv_updated": None,
+        "last_kv_usage": None,
+    }
+    assert report["scheduler_usage"].get("zero_kv_during_tool_call") == 1
 
 
 def test_saturation_guard_blocks_admission_when_headroom_below_one():
