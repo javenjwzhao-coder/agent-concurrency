@@ -114,6 +114,9 @@ restarts the live bootstrap flow.
 
 Opening the exported file calls `readEmbeddedSnapshot()` and renders the saved
 data without `/state`, `/stream`, or an external `sidecar.log`.
+When the browser exposes `showSaveFilePicker()`, the dashboard prompts for a
+destination path before writing the snapshot. Browsers without that API keep the
+download-link fallback.
 
 The snapshot payload includes a version so future format changes can be handled
 explicitly.

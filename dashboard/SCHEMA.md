@@ -185,9 +185,9 @@ Three ways to view a finished `sidecar.log`:
    in replay mode; click *Back to live* to reconnect.
 
 3. **Standalone snapshot**: after loading live history or replaying a log,
-   click *Save standalone HTML*. The browser downloads a single `.html` file
-   with the currently loaded tick records plus dashboard assets embedded. That
-   file opens on another machine without `/state`, `/stream`, or a separate
-   `sidecar.log`.
+   click *Save standalone HTML*. Browsers with the File System Access API prompt
+   for a save location; other browsers download a single `.html` file with the
+   currently loaded tick records plus dashboard assets embedded. That file opens
+   on another machine without `/state`, `/stream`, or a separate `sidecar.log`.
 
 All paths consume the exact same JSON contract above.

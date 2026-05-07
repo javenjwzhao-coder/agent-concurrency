@@ -1098,18 +1098,38 @@
 
     const btn = $("#saveSnapshotBtn");
     if (btn) btn.disabled = true;
-    setStatus(`snapshot: bundling ${state.records.length} tick(s)…`, "status-pending");
+    const filename = snapshotFilename();
+    let fileHandle = null;
     try {
+      if (supportsSaveFilePicker()) {
+        setStatus("snapshot: choose save location…", "status-pending");
+        try {
+          fileHandle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [
+              {
+                description: "HTML file",
+                accept: { "text/html": [".html"] },
+              },
+            ],
+          });
+        } catch (err) {
+          if (isFilePickerAbort(err)) {
+            setStatus("snapshot save cancelled", "status-pending");
+            return;
+          }
+          console.warn("save picker unavailable", err);
+        }
+      }
+
+      setStatus(`snapshot: bundling ${state.records.length} tick(s)…`, "status-pending");
       const html = await buildStandaloneHtml();
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = snapshotFilename();
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      const savedWithPicker = await saveSnapshotBlob(blob, filename, fileHandle);
+      if (!savedWithPicker) {
+        setStatus(`snapshot download started · ${state.records.length} tick(s)`, "status-live");
+        return;
+      }
       setStatus(`snapshot saved · ${state.records.length} tick(s)`, "status-live");
     } catch (err) {
       console.error("snapshot export failed", err);
@@ -1118,6 +1138,38 @@
     } finally {
       if (btn) btn.disabled = false;
     }
+  }
+
+  function supportsSaveFilePicker() {
+    return typeof window.showSaveFilePicker === "function";
+  }
+
+  function isFilePickerAbort(err) {
+    return err && err.name === "AbortError";
+  }
+
+  async function saveSnapshotBlob(blob, filename, fileHandle) {
+    if (fileHandle) {
+      const writable = await fileHandle.createWritable();
+      try {
+        await writable.write(blob);
+        await writable.close();
+      } catch (err) {
+        try { await writable.abort(); } catch (_) {}
+        throw err;
+      }
+      return true;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    return false;
   }
 
   async function buildStandaloneHtml() {

@@ -140,6 +140,8 @@ def test_dashboard_exports_standalone_html_snapshots():
     assert "dashboardSnapshotData" in js
     assert "records: []" in js
     assert "buildStandaloneHtml" in js
+    assert "showSaveFilePicker" in js
+    assert "saveSnapshotBlob(blob, filename, fileHandle)" in js
     assert "safeScriptJson(payload)" in js
     assert "loadSnapshotRecords(embedded.ticks, embedded.meta)" in js
     assert "assetTextForExport" in js
