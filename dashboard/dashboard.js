@@ -1290,7 +1290,7 @@
     const [visCss, dashboardCss, visJs, dashboardJs] = await Promise.all([
       assetTextForExport(
         "#visCssAsset",
-        "https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css",
+        "https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css",
       ),
       assetTextForExport("#dashboardCssAsset", "/static/dashboard.css"),
       assetTextForExport(

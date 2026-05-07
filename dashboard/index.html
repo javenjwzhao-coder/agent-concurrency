@@ -6,13 +6,14 @@
   <link id="dashboardCssAsset" rel="stylesheet" href="static/dashboard.css">
   <!--
     vis-timeline (includes both Timeline and Graph2D) is loaded from a CDN.
+    The CSS lives under /styles/ on unpkg; the JS lives under /standalone/umd/.
     If the dashboard host has no internet, download these two files into
     ./static/ and change the two URLs below to /static/<filename>:
-      https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css
+      https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css
       https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js
   -->
   <link id="visCssAsset" rel="stylesheet"
-        href="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.css">
+        href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
   <script>
     (function () {
       function showAssetError(asset) {
