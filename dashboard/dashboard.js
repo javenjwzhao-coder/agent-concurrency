@@ -55,6 +55,10 @@
     itemCounter: 0,
     eventLineRenderPending: false,
     eventLinesVisible: true,
+    // Per-type opt-out so users can hide specific kinds of event lines while
+    // keeping the rest visible. The master toggle (#eventLinesBtn) overrides
+    // this when off.
+    eventTypeVisible: { offload: true, admit: true, readmit: true, sat: true },
     eventPoints: [],     // [{id, ts: epochMs, type, label, text}] for event lines + tooltips
     eventCounts: {},
     tickHistory: [],     // [{ts: epoch_ms, count: active_agent_count}]
@@ -792,11 +796,16 @@
     return { startMs, endMs, leftW, chartW };
   }
 
+  function isEventTypeVisible(type) {
+    return state.eventTypeVisible[type] !== false;
+  }
+
   function eventLineEntries(container, chart) {
     const layout = eventAxisLayout(container, chart);
     if (!layout) return [];
     const groups = new Map();
     for (const ep of state.eventPoints) {
+      if (!isEventTypeVisible(ep.type)) continue;
       const frac = (ep.ts - layout.startMs) / (layout.endMs - layout.startMs);
       if (frac < -0.02 || frac > 1.02) continue;
       const key = String(ep.ts);
@@ -1460,6 +1469,19 @@
         ? "Hide event lines"
         : "Show event lines";
     }
+    const eventTypeFilter = header.querySelector("#eventTypeFilter");
+    if (eventTypeFilter) {
+      // Persist the currently visible event types in the saved HTML.
+      eventTypeFilter.removeAttribute("open");
+      for (const cb of eventTypeFilter.querySelectorAll('input[type="checkbox"][data-event-type]')) {
+        const type = cb.dataset.eventType;
+        if (type && state.eventTypeVisible[type] === false) {
+          cb.removeAttribute("checked");
+        } else {
+          cb.setAttribute("checked", "");
+        }
+      }
+    }
     const saveBtn = header.querySelector("#saveSnapshotBtn");
     if (saveBtn) saveBtn.disabled = false;
     return "  " + header.outerHTML + "\n\n" +
@@ -1522,6 +1544,32 @@
       setEventLinesVisible(state.eventLinesVisible);
       eventLinesBtn.addEventListener("click", () => {
         setEventLinesVisible(!state.eventLinesVisible);
+      });
+    }
+    const filter = $("#eventTypeFilter");
+    if (filter) {
+      // Initialize state from any pre-set checked attributes (so a saved
+      // standalone snapshot can persist the user's last filter selection).
+      for (const cb of filter.querySelectorAll('input[type="checkbox"][data-event-type]')) {
+        const type = cb.dataset.eventType;
+        if (type) state.eventTypeVisible[type] = !!cb.checked;
+      }
+      filter.addEventListener("change", (ev) => {
+        const cb = ev.target;
+        if (!cb || cb.type !== "checkbox" || !cb.dataset.eventType) return;
+        state.eventTypeVisible[cb.dataset.eventType] = !!cb.checked;
+        if (state.eventLinesVisible) {
+          scheduleEventLineRender();
+        } else {
+          clearEventLineLayers();
+        }
+        hideTooltip();
+      });
+      // Close the dropdown when clicking outside.
+      document.addEventListener("click", (ev) => {
+        if (!filter.open) return;
+        if (filter.contains(ev.target)) return;
+        filter.open = false;
       });
     }
     $("#pauseBtn").addEventListener("click", () => {

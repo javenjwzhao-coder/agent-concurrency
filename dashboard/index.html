@@ -47,6 +47,15 @@
     <div class="controls">
       <button id="pauseBtn" type="button">Pause auto-scroll</button>
       <button id="eventLinesBtn" type="button" aria-pressed="false">Hide event lines</button>
+      <details id="eventTypeFilter" class="event-type-filter">
+        <summary>Filter events</summary>
+        <div class="event-type-filter-menu">
+          <label><input type="checkbox" data-event-type="offload" checked> OFFLOAD</label>
+          <label><input type="checkbox" data-event-type="admit" checked> ADMIT</label>
+          <label><input type="checkbox" data-event-type="readmit" checked> READMIT</label>
+          <label><input type="checkbox" data-event-type="sat" checked> SAT</label>
+        </div>
+      </details>
       <button id="replayBtn" type="button">Open sidecar.log…</button>
       <button id="saveSnapshotBtn" type="button">Save standalone HTML</button>
       <button id="liveBtn" type="button" hidden>Back to live</button>
