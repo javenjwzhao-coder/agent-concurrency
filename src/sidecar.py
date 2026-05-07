@@ -87,6 +87,8 @@ _PROM_RE = re.compile(
 )
 # Extracts device="<val>" from a label string.
 _DEVICE_RE = re.compile(r'\bdevice="([^"]*)"')
+# Extracts num_(gpu|npu)_blocks="<int>" from a cache_config_info label string.
+_CACHE_BLOCKS_RE = re.compile(r'\bnum_(?:gpu|npu)_blocks="(\d+)"')
 
 # ─────────────────────────────────────── helpers ──────────────────────────────
 
@@ -98,7 +100,7 @@ def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
+def _parse_vllm_kv_metrics(text: str) -> dict:
     """Extract KV-cache block statistics from Prometheus /metrics text.
 
     Covers every known metric-name variant used by standard vLLM and
@@ -164,6 +166,14 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                     _add_preempt_sample(name, val)
                 elif name in ("vllm:num_gpu_blocks", "vllm:num_npu_blocks"):
                     _set_total(val)
+                elif name == "vllm:cache_config_info":
+                    labels = sample.labels or {}
+                    blocks = labels.get("num_gpu_blocks") or labels.get("num_npu_blocks")
+                    try:
+                        if blocks is not None and blocks != "None":
+                            _set_total(float(blocks))
+                    except ValueError:
+                        pass
                 elif name in ("vllm:num_gpu_blocks_used",
                               "vllm:gpu_blocks_used",
                               "vllm:block_manager_gpu_used_blocks"):
@@ -209,6 +219,10 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                 _add_preempt_sample(name, val)
             elif name in ("vllm:num_gpu_blocks", "vllm:num_npu_blocks"):
                 _set_total(val)
+            elif name == "vllm:cache_config_info":
+                bm = _CACHE_BLOCKS_RE.search(label_str)
+                if bm:
+                    _set_total(float(bm.group(1)))
             elif name in ("vllm:num_gpu_blocks_used", "vllm:gpu_blocks_used",
                           "vllm:block_manager_gpu_used_blocks"):
                 _set_used(val)
@@ -227,15 +241,14 @@ def _parse_vllm_kv_metrics(text: str, total_blocks_hint: int = 0) -> dict:
                 _set_cached(val)
 
     # ── Derive missing values from what we have ────────────────────────────────
-    # Derive total from component gauges when vLLM exports them. Fall back to
-    # the caller's hint when vLLM only exposes the usage-percent gauge (vLLM v1
-    # / vllm-ascend 0.13 do not export per-block-pool counts in /metrics).
+    # When vLLM does not export per-pool block counts (vLLM v1 / vllm-ascend
+    # 0.13 only emit the usage-percent gauge), the total is read from the
+    # vllm:cache_config_info info gauge above. As a final fallback we sum the
+    # component gauges if any of them are exposed.
     if "total_blocks" not in m:
         parts = [m.get(k, 0) for k in ("used_blocks", "cached_blocks", "free_blocks")]
         if any(v > 0 for v in parts):
             m["total_blocks"] = sum(parts)
-        elif total_blocks_hint > 0:
-            m["total_blocks"] = total_blocks_hint
 
     total = m.get("total_blocks")
     free = m.get("free_blocks")
@@ -1774,14 +1787,13 @@ class DynamicAdmissionController:
 _kv_metric_warn_emitted = False
 
 
-def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
-              total_blocks_hint: int = 0) -> dict:
+def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int) -> dict:
     """Fetch /metrics and return global KV cache statistics."""
     global _kv_metric_warn_emitted
     try:
         resp = session.get(f"{vllm_url}/metrics", timeout=5)
         resp.raise_for_status()
-        kv = _parse_vllm_kv_metrics(resp.text, total_blocks_hint=total_blocks_hint)
+        kv = _parse_vllm_kv_metrics(resp.text)
 
         used_pct   = kv.get("usage_pct")    # 0..1
         total_blks = kv.get("total_blocks")
@@ -1792,14 +1804,10 @@ def poll_vllm(session: requests.Session, vllm_url: str, bytes_per_blk: int,
 
         if total_blks is None and not _kv_metric_warn_emitted:
             _kv_metric_warn_emitted = True
-            detail = (
-                "no KV metrics at all"
-                if used_pct is None
-                else "usage gauge present but no block counts; set "
-                     "sidecar.total_gpu_blocks to vLLM's startup '# GPU blocks' value"
-            )
             print(
-                f"[sidecar] WARNING: cannot derive KV total blocks ({detail}).\n"
+                "[sidecar] WARNING: cannot derive KV total blocks. Expected one "
+                "of vllm:num_(g|n)pu_blocks, vllm:cache_config_info{num_gpu_blocks=...}, "
+                "or summable per-pool counts in /metrics.\n"
                 f"          prometheus_client available: {_HAS_PROM_CLIENT}\n"
                 f"          vllm: metrics present: {sorted(kv.get('vllm_names', []))[:30]}",
                 flush=True,
@@ -1865,8 +1873,7 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
         record = {
             "ts":     iso_utc(now_utc()),
             "tick":   tick,
-            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk,
-                                 getattr(args, "total_gpu_blocks", 0)),
+            "vllm":   poll_vllm(session, args.vllm_url, bytes_per_blk),
             "agents": agents,
         }
         if admission_controller is not None:
@@ -1931,11 +1938,6 @@ def parse_args() -> argparse.Namespace:
     geo.add_argument("--head-dim",     type=int, required=True)
     geo.add_argument("--block-size",   type=int, default=16)
     geo.add_argument("--dtype",        default="bfloat16", choices=list(_DTYPE_BYTES))
-    geo.add_argument("--total-gpu-blocks", type=int, default=0,
-                     help="Fallback total KV-cache block count. Required when "
-                          "vLLM exposes only the cache-usage gauge in /metrics "
-                          "(vLLM v1 / vllm-ascend 0.13). Read 'GPU blocks' or "
-                          "'NPU blocks' from vLLM's startup log.")
 
     ac = p.add_argument_group("dynamic admission control")
     ac.add_argument("--admission-control", action="store_true",

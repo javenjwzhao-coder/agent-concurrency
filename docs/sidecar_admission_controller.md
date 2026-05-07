@@ -79,9 +79,9 @@ KV-used percentage from them so the dashboard line and the controller's
 `C_percent` share a denominator (vllm-ascend's own `npu_cache_usage_perc` gauge
 divides by a pre-scheduler block count and can disagree with the free-pool
 count). When `/metrics` exposes only the usage gauge — common on vLLM v1 and
-vllm-ascend 0.13 — set `sidecar.total_gpu_blocks` to the value vLLM logs at
-startup ("# GPU blocks: N" / "# NPU blocks: N"); the parser then derives free
-and used block counts from `total × (1 − usage_pct)`.
+vllm-ascend 0.13 — the parser reads the total block count from the
+`vllm:cache_config_info` info gauge (the `num_gpu_blocks` / `num_npu_blocks`
+label) and derives free/used from `total × (1 − usage_pct)`.
 
 ## Controller State
 

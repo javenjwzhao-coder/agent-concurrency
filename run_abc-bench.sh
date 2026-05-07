@@ -210,7 +210,6 @@ flat_keys = [
     ("SIDECAR_HEAD_DIM",       "sidecar.head_dim"),
     ("SIDECAR_BLOCK_SIZE",       "sidecar.block_size"),
     ("SIDECAR_DTYPE",            "sidecar.dtype"),
-    ("SIDECAR_TOTAL_GPU_BLOCKS", "sidecar.total_gpu_blocks"),
     ("SIDECAR_HTTP_PORT",        "sidecar.http_port"),
     ("SIDECAR_HTTP_HOST",        "sidecar.http_host"),
     ("SIDECAR_ADMISSION_ENABLED", "sidecar.admission_control.enabled"),
@@ -359,7 +358,6 @@ build_runner_cmd() {
             --sidecar-head-dim     "${SIDECAR_HEAD_DIM}"
             --sidecar-block-size        "${SIDECAR_BLOCK_SIZE:-16}"
             --sidecar-dtype             "${SIDECAR_DTYPE:-bfloat16}"
-            --sidecar-total-gpu-blocks  "${SIDECAR_TOTAL_GPU_BLOCKS:-0}"
         )
         if [[ -n "${SIDECAR_HTTP_PORT:-}" && "${SIDECAR_HTTP_PORT}" != "0" && "${SIDECAR_HTTP_PORT}" != "" ]]; then
             cmd+=(

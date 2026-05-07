@@ -197,7 +197,6 @@ Sidecar flags:
 - `--sidecar-interval`
 - model geometry fields: `--sidecar-num-layers`, `--sidecar-num-kv-heads`,
   `--sidecar-head-dim`, `--sidecar-block-size`, `--sidecar-dtype`
-- `--sidecar-total-gpu-blocks` (fallback when vLLM's /metrics omits block counts)
 - `--sidecar-admission-control`
 - admission knobs and vLLM endpoint overrides
 - dashboard feed flags: `--sidecar-http-port`, `--sidecar-http-host`
