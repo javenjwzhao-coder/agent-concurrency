@@ -162,12 +162,20 @@ When vLLM tells the connector a request is finished:
 1. `request_finished()` snapshots block ids and block hashes.
 2. The base OffloadingConnector still runs its normal finish logic.
 3. If the request belongs to an agent and holding is enabled, the connector
-   records the request in `_held_agent_requests`.
+   records the request in `_held_agent_requests` whenever resident block ids
+   exist. Hash-backed block metadata is not required for holding.
 4. The connector returns `True` to delay freeing.
 5. Blocks remain resident until release or async store completion.
 
 This is the central safety invariant: finished agent request blocks are held
 before they can enter vLLM's free queue.
+
+Resident and offloadable accounting are intentionally separate. Resident
+`block_ids` make `/agent_kv_cache/usage` report nonzero KV and allow admission
+sizing to see the held request. `block_hashes` are required only for CPU
+offload. If a held request has resident blocks but no hash-backed blocks, the
+offload endpoint rejects the attempt as `no offloadable held KV blocks for
+agent` while still reporting the resident block count.
 
 ## Offload Flow
 

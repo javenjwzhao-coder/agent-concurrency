@@ -399,6 +399,103 @@ def test_scheduler_usage_failure_preserves_live_kv_snapshot():
     assert "kv_usage_source" not in agents["running"]
 
 
+def test_zero_scheduler_usage_preserves_tool_call_live_kv_for_fallback_offload():
+    offloaded: list[tuple[str, float]] = []
+    old_ts = iso_utc(now_utc() - timedelta(seconds=45))
+    session = FakeUsageSession({
+        "tool": {
+            "available": True,
+            "resident_kv_blocks": 0,
+            "kv_blocks": 0,
+            "offloadable_kv_blocks": 0,
+            "active_requests": 0,
+            "held_requests": 0,
+            "pending_offload": False,
+            "offload_jobs": 0,
+        },
+    })
+
+    def offload(cand):
+        offloaded.append((cand.agent_id, cand.kv_gb))
+        return {"offloaded": True, "freed_gb": cand.kv_gb}
+
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        fallback_long_tool_call_s=30.0,
+        offload_callback=offload,
+        session=session,
+        usage_endpoint="http://vllm.invalid/agent_kv_cache/usage",
+    )
+    agents = {
+        "tool": {
+            "agent_id": "tool",
+            "state": "tool_call",
+            "state_since": old_ts,
+            "kv_blocks": 4,
+            "kv_gb": 4.0,
+            "kv_usage_source": "litellm_usage",
+        },
+    }
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["scheduler_usage"]["preserved_agents"] == ["tool"]
+    assert agents["tool"]["kv_blocks"] == 4
+    assert agents["tool"]["kv_gb"] == 4.0
+    assert (
+        agents["tool"]["kv_usage_source"]
+        == "live_snapshot_preserved_after_zero_scheduler_usage"
+    )
+    assert agents["tool"]["last_kv_usage"]["zero_scheduler_usage_preserved"] is True
+    assert report["heap_candidates"][0]["agent_id"] == "tool"
+    assert report["heap_candidates"][0]["policy_reason"] == "fallback_elapsed_long_tool_call"
+    assert report["offloads"][0]["agent_id"] == "tool"
+    assert offloaded == [("tool", 4.0)]
+
+
+def test_zero_kv_tool_call_has_explicit_skipped_reason():
+    controller = DynamicAdmissionController(
+        enabled=True,
+        threshold_gb=0.1,
+        fallback_long_tool_call_s=30.0,
+    )
+    agents = {
+        "tool": {
+            "agent_id": "tool",
+            "state": "tool_call",
+            "state_since": iso_utc(now_utc() - timedelta(seconds=45)),
+            "kv_blocks": 0,
+            "kv_gb": 0.0,
+            "kv_usage_source": "scheduler_usage",
+        },
+    }
+
+    report = controller.on_tick(
+        tick=0,
+        vllm_info={"kv_free_gb": 0.05},
+        agents=agents,
+        bytes_per_blk=BYTES_PER_GB,
+    )
+
+    assert report["offloads"] == []
+    assert report["heap_candidates"] == []
+    assert report["skipped_candidates"] == [
+        {
+            "agent_id": "tool",
+            "reason": "missing_or_zero_kv",
+            "kv_blocks": 0,
+            "kv_gb": 0.0,
+            "kv_usage_source": "scheduler_usage",
+        }
+    ]
+
+
 def test_saturation_guard_blocks_admission_when_headroom_below_one():
     admitted: list[str] = []
     controller = DynamicAdmissionController(

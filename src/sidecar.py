@@ -874,6 +874,7 @@ class DynamicAdmissionController:
             "queried_agents": 0,
             "workers": 0,
             "updated_agents": [],
+            "preserved_agents": [],
             "failed_agents": [],
         }
         if not self.usage_endpoint:
@@ -934,12 +935,48 @@ class DynamicAdmissionController:
 
             patch = result["patch"]
             agent = agents.get(agent_id)
+            preserved = self._preserve_live_tool_kv_on_zero_usage(
+                agent, patch, bytes_per_blk
+            )
             if agent is not None:
                 agent.update(patch)
             self._update_agent_state_locked(agent_id, patch)
             report["updated"] += 1
             report["updated_agents"].append(agent_id)
+            if preserved:
+                report["preserved_agents"].append(agent_id)
         return report
+
+    def _preserve_live_tool_kv_on_zero_usage(
+        self,
+        agent: Optional[dict[str, Any]],
+        patch: dict[str, Any],
+        bytes_per_blk: int,
+    ) -> bool:
+        """Keep a nonzero tool-call KV snapshot when scheduler usage races to 0."""
+        if not agent or agent.get("state") != "tool_call":
+            return False
+        if patch.get("kv_blocks") != 0:
+            return False
+        previous_blocks = agent.get("kv_blocks")
+        if not isinstance(previous_blocks, int) or previous_blocks <= 0:
+            return False
+
+        preserved_gb = previous_blocks * bytes_per_blk / 1e9
+        last_usage = dict(patch.get("last_kv_usage") or {})
+        last_usage.update({
+            "scheduler_reported_kv_blocks": patch.get("kv_blocks"),
+            "preserved_live_kv_blocks": previous_blocks,
+            "preserved_live_kv_gb": preserved_gb,
+            "zero_scheduler_usage_preserved": True,
+        })
+        patch.update({
+            "kv_blocks": previous_blocks,
+            "kv_gb": preserved_gb,
+            "kv_usage_source": "live_snapshot_preserved_after_zero_scheduler_usage",
+            "last_kv_usage": last_usage,
+        })
+        return True
 
     def _fetch_agent_kv_usage(
         self,
@@ -1197,6 +1234,13 @@ class DynamicAdmissionController:
                 agent.setdefault("agent_id", agent_id)
             kv_gb = _agent_kv_gb(agent, bytes_per_blk)
             if kv_gb is None or kv_gb <= 0:
+                skipped.append({
+                    "agent_id": agent_id,
+                    "reason": "missing_or_zero_kv",
+                    "kv_blocks": agent.get("kv_blocks"),
+                    "kv_gb": self._round(_finite_float(agent.get("kv_gb"))),
+                    "kv_usage_source": agent.get("kv_usage_source"),
+                })
                 continue
             remaining_s = self._predict_remaining(agent)
             if remaining_s is None:

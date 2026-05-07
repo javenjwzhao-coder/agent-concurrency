@@ -196,17 +196,30 @@ class AgentAwareOffloadingScheduler:
             for req_id in held_req_ids
             if req_id in self._held_request_snapshots
         }
+        resident_blocks = sum(
+            len(snapshot.get("block_ids", ())) for snapshot in snapshots.values())
         known_blocks = sum(
             len(snapshot.get("block_hashes", ())) for snapshot in snapshots.values())
         active_reqs = len(self._agent_to_requests.get(agent_id, ()))
+        if resident_blocks <= 0:
+            return {
+                "offloaded": False,
+                "pending": False,
+                "known_blocks": known_blocks,
+                "resident_kv_blocks": resident_blocks,
+                "held_requests": len(snapshots),
+                "active_requests": active_reqs,
+                "reason": "no held KV blocks for agent",
+            }
         if known_blocks <= 0:
             return {
                 "offloaded": False,
                 "pending": False,
                 "known_blocks": known_blocks,
+                "resident_kv_blocks": resident_blocks,
                 "held_requests": len(snapshots),
                 "active_requests": active_reqs,
-                "reason": "no held KV blocks for agent",
+                "reason": "no offloadable held KV blocks for agent",
             }
 
         self._pending_agent_offloads.add(agent_id)
@@ -217,6 +230,7 @@ class AgentAwareOffloadingScheduler:
             "offloaded": True,
             "pending": True,
             "known_blocks": known_blocks,
+            "resident_kv_blocks": resident_blocks,
             "held_requests": len(snapshots),
             "active_requests": active_reqs,
             "offload_jobs": offload_jobs,
@@ -562,7 +576,7 @@ class AgentAwareOffloadingScheduler:
         snapshot = self._agent_snapshots.get(agent_id, {}).get(req_id)
         if snapshot is None:
             return False
-        if not snapshot.get("block_ids") or not snapshot.get("block_hashes"):
+        if not snapshot.get("block_ids"):
             return False
         held = dict(snapshot)
         held["agent_id"] = agent_id
