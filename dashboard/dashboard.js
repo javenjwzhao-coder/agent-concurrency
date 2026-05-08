@@ -1,6 +1,11 @@
 /* dashboard.js — render live sidecar tick records as a Gantt timeline plus a
  * KV-cache-usage line chart on a shared time axis.
  *
+ * The vis-timeline component is the sole time-axis source. The KV chart is a
+ * custom SVG drawn into #kvChart that reads the timeline's window every frame,
+ * so the two views can never drift apart (an earlier vis.Graph2d sibling was
+ * dropped after saved-standalone files showed the two axes diverging).
+ *
  * Data model: see dashboard/SCHEMA.md. Each tick record is the same JSON the
  * sidecar writes to sidecar.log; we derive phase rows + admission-event
  * markers + a single kv_cache_used_pct line from it, no transformation in
@@ -41,13 +46,21 @@
     sat: "eventCountSat",
   };
 
+  const KV_CHART_TOP_PAD_PX = 8;
+  const KV_CHART_BOTTOM_PAD_PX = 12;
+  // vis-timeline's center panel has no right padding; match that here so the
+  // KV chart's time scale and the event-line overlay agree pixel-for-pixel
+  // with the timeline below.
+  const KV_CHART_RIGHT_PAD_PX = 0;
+  const KV_AXIS_LABEL_GAP_PX = 6;
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
   const state = {
     timeline: null,
     items: null,
     groups: null,
-    kvChart: null,
-    kvPoints: null,
-    kvGroups: null,
+    kvSeries: { kv: [], threshold: [] },
+    kvRedrawScheduled: false,
     agents: new Map(),
     agentOrder: [],
     agentLabelPanelWidth: AGENT_LABEL_PANEL_MIN_PX,
@@ -154,84 +167,171 @@
       $("#timeline"), state.items, state.groups, timelineOpts,
     );
 
-    state.kvPoints = new vis.DataSet();
-    state.kvGroups = new vis.DataSet([
-      {
-        id: "kv",
-        content: "KV used %",
-        className: "kv-line-used",
-        style: "stroke:#f59e0b;stroke-width:2px;fill:none;",
-        options: {
-          shaded: {
-            enabled: true,
-            orientation: "bottom",
-            style: "fill:#f59e0b;fill-opacity:0.10;stroke:none;",
-          },
-          drawPoints: {
-            enabled: true,
-            size: 3,
-            style: "circle",
-            styles: "fill:#f59e0b;stroke:#c47a07;stroke-width:1px;",
-          },
-          interpolation: { enabled: false },
-        },
-      },
-      {
-        id: "threshold",
-        content: "offload threshold",
-        className: "kv-line-threshold",
-        style: "stroke:#ff003d;stroke-width:2px;fill:none;",
-        options: {
-          shaded: { enabled: false },
-          drawPoints: { enabled: false },
-          interpolation: { enabled: false },
-        },
-      },
-    ]);
-    const kvOpts = {
-      style: "line",
-      shaded: { enabled: true, orientation: "bottom" },
-      drawPoints: { size: 3, style: "circle" },
-      interpolation: false,
-      start: initialStart,
-      end:   initialEnd,
-      dataAxis: {
-        left: {
-          range: { min: 0, max: 100 },
-          format: (v) => v.toFixed(0) + "%",
-          title: { text: "KV used %" },
-        },
-      },
-      legend: false,
-      moveable: true,
-      zoomable: true,
-    };
-    state.kvChart = new vis.Graph2d(
-      $("#kvChart"), state.kvPoints, state.kvGroups, kvOpts,
-    );
+    setupKvChart();
 
-    // Keep the two charts' time axes in sync when the user pans/zooms.
     state.timeline.on("rangechange", (props) => {
-      state.kvChart.setWindow(props.start, props.end, { animation: false });
       if (props.byUser) setPaused(true);
       updateBadges(props.end.getTime());
+      scheduleKvRedraw();
       scheduleEventLineRender();
     });
-    state.kvChart.on("rangechange", (props) => {
-      state.timeline.setWindow(props.start, props.end, { animation: false });
-      if (props.byUser) setPaused(true);
-      updateBadges(props.end.getTime());
+    // vis-timeline emits "changed" after layout (new groups, panel resizes).
+    // Re-render the KV chart and event-line layer so they track the timeline.
+    state.timeline.on("changed", () => {
+      scheduleKvRedraw();
       scheduleEventLineRender();
     });
 
     setupEventLineLayers();
     setupProximityTooltips();
-    window.addEventListener("resize", scheduleEventLineRender);
-    // vis-timeline emits "changed" after layout (e.g. when new groups are
-    // added). Re-render so the event-line layer's height tracks the
-    // foreground as more agents appear.
-    state.timeline.on("changed", scheduleEventLineRender);
-    state.kvChart.on("changed", scheduleEventLineRender);
+    window.addEventListener("resize", () => {
+      scheduleKvRedraw();
+      scheduleEventLineRender();
+    });
+  }
+
+  // ── KV chart (custom SVG, slaved to the timeline's window) ─────────────
+
+  function setupKvChart() {
+    const container = $("#kvChart");
+    if (!container) return;
+    container.innerHTML = "";
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "kv-chart-svg");
+    container.appendChild(svg);
+    state.kvSvg = svg;
+    scheduleKvRedraw();
+  }
+
+  function scheduleKvRedraw() {
+    if (state.kvRedrawScheduled) return;
+    state.kvRedrawScheduled = true;
+    requestAnimationFrame(() => {
+      state.kvRedrawScheduled = false;
+      redrawKvChart();
+    });
+  }
+
+  function redrawKvChart() {
+    const container = $("#kvChart");
+    const svg = state.kvSvg;
+    if (!container || !svg || !state.timeline) return;
+
+    const win = state.timeline.getWindow();
+    const tStart = win.start.getTime();
+    const tEnd   = win.end.getTime();
+    const tSpan  = tEnd - tStart;
+    if (!(tSpan > 0)) return;
+
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (cw <= 0 || ch <= 0) return;
+
+    const leftPad = state.agentLabelPanelWidth || AGENT_LABEL_PANEL_MIN_PX;
+    const plotW = Math.max(0, cw - leftPad - KV_CHART_RIGHT_PAD_PX);
+    const plotH = Math.max(0, ch - KV_CHART_TOP_PAD_PX - KV_CHART_BOTTOM_PAD_PX);
+
+    svg.setAttribute("width", String(cw));
+    svg.setAttribute("height", String(ch));
+    svg.setAttribute("viewBox", `0 0 ${cw} ${ch}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    if (plotW <= 0 || plotH <= 0) return;
+
+    const xFor = (t) => leftPad + ((t - tStart) / tSpan) * plotW;
+    const yFor = (v) => KV_CHART_TOP_PAD_PX + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
+    const baseY = KV_CHART_TOP_PAD_PX + plotH;
+
+    // Y-axis gridlines + labels (every 10%, label every 5%).
+    for (let p = 0; p <= 100; p += 5) {
+      const y = yFor(p);
+      if (p > 0 && p < 100 && p % 10 === 0) {
+        const grid = document.createElementNS(SVG_NS, "line");
+        grid.setAttribute("x1", String(leftPad));
+        grid.setAttribute("y1", y.toFixed(2));
+        grid.setAttribute("x2", String(leftPad + plotW));
+        grid.setAttribute("y2", y.toFixed(2));
+        grid.setAttribute("class", "kv-grid-line");
+        svg.appendChild(grid);
+      }
+      if (p > 0 && p < 100) {
+        const text = document.createElementNS(SVG_NS, "text");
+        text.setAttribute("x", String(leftPad - KV_AXIS_LABEL_GAP_PX));
+        text.setAttribute("y", (y + 4).toFixed(2));
+        text.setAttribute("text-anchor", "end");
+        text.setAttribute("class", "kv-axis-label");
+        text.textContent = p + "%";
+        svg.appendChild(text);
+      }
+    }
+
+    // Build line/area paths from a sorted series, clipping to the visible
+    // window and including one off-screen point on each side so the line
+    // continues to the panel edges.
+    const visiblePath = (series) => {
+      if (!series.length) return { line: "", points: [], firstX: null, lastX: null };
+      const segs = [];
+      const pts = [];
+      let prev = null;
+      let firstX = null;
+      let lastX = null;
+      let started = false;
+      for (let i = 0; i < series.length; i++) {
+        const cur = series[i];
+        const isVisible = cur.t >= tStart && cur.t <= tEnd;
+        const prevVisible = prev && prev.t >= tStart && prev.t <= tEnd;
+        if (isVisible || prevVisible || (prev && prev.t < tStart && cur.t > tEnd)) {
+          const x = xFor(cur.t);
+          const y = yFor(cur.y);
+          segs.push((started ? "L" : "M") + x.toFixed(2) + "," + y.toFixed(2));
+          if (firstX === null) firstX = x;
+          lastX = x;
+          started = true;
+          if (isVisible) pts.push({ x, y });
+        } else if (started) {
+          break;
+        }
+        prev = cur;
+      }
+      return { line: segs.join(" "), points: pts, firstX, lastX };
+    };
+
+    // KV used % — area fill + line + circle markers.
+    const kv = visiblePath(state.kvSeries.kv);
+    if (kv.line) {
+      const fill = document.createElementNS(SVG_NS, "path");
+      fill.setAttribute(
+        "d",
+        `M${kv.firstX.toFixed(2)},${baseY.toFixed(2)} ` +
+        kv.line.replace(/^M/, "L") +
+        ` L${kv.lastX.toFixed(2)},${baseY.toFixed(2)} Z`,
+      );
+      fill.setAttribute("class", "kv-line-used kv-fill");
+      svg.appendChild(fill);
+
+      const line = document.createElementNS(SVG_NS, "path");
+      line.setAttribute("d", kv.line);
+      line.setAttribute("class", "kv-line-used");
+      svg.appendChild(line);
+
+      for (const pt of kv.points) {
+        const dot = document.createElementNS(SVG_NS, "circle");
+        dot.setAttribute("cx", pt.x.toFixed(2));
+        dot.setAttribute("cy", pt.y.toFixed(2));
+        dot.setAttribute("r", "3");
+        dot.setAttribute("class", "kv-line-used kv-point");
+        svg.appendChild(dot);
+      }
+    }
+
+    // Offload threshold — line only.
+    const th = visiblePath(state.kvSeries.threshold);
+    if (th.line) {
+      const line = document.createElementNS(SVG_NS, "path");
+      line.setAttribute("d", th.line);
+      line.setAttribute("class", "kv-line-threshold");
+      svg.appendChild(line);
+    }
   }
 
   // ── header count badges ────────────────────────────────────────────────
@@ -359,7 +459,6 @@
     const start = new Date(nowDate.getTime() - VIEWPORT_PAST_MS);
     const end   = new Date(nowDate.getTime() + VIEWPORT_AHEAD_MS);
     state.timeline.setWindow(start, end, { animation: false });
-    state.kvChart.setWindow(start, end, { animation: false });
   }
 
   function setPaused(p) {
@@ -479,6 +578,7 @@
       "--agent-label-panel-width",
       state.agentLabelPanelWidth + "px",
     );
+    scheduleKvRedraw();
     scheduleEventLineRender();
   }
 
@@ -743,7 +843,7 @@
     }
     for (const [container, chart] of [
       [$("#timeline"), state.timeline],
-      [$("#kvChart"),  state.kvChart],
+      [$("#kvChart"),  state.timeline],
     ]) {
       const layer = getEventLineLayer(container);
       layer.textContent = "";
@@ -889,7 +989,7 @@
   function setupProximityTooltips() {
     for (const [container, chart] of [
       [$("#timeline"), state.timeline],
-      [$("#kvChart"),  state.kvChart],
+      [$("#kvChart"),  state.timeline],
     ]) {
       container.addEventListener("mousemove", (e) => {
         const evs = findEventsAtPixel(e.clientX, container, chart);
@@ -903,16 +1003,32 @@
   // ── KV % line ──────────────────────────────────────────────────────────
 
   function applyKvTick(record) {
+    const ts = parseTimeMs(record.ts);
+    if (ts === null) return;
     const pct = record.vllm && record.vllm.kv_cache_used_pct;
-    const ts = new Date(record.ts);
     if (pct !== null && pct !== undefined) {
-      state.kvPoints.add({ x: ts, y: Number(pct), group: "kv" });
+      appendKvSeriesPoint(state.kvSeries.kv, ts, Number(pct));
     }
-
     const thresholdPct = offloadThresholdPct(record);
     if (thresholdPct !== null) {
-      state.kvPoints.add({ x: ts, y: thresholdPct, group: "threshold" });
+      appendKvSeriesPoint(state.kvSeries.threshold, ts, thresholdPct);
     }
+    scheduleKvRedraw();
+  }
+
+  // Keep series sorted by time (replay loads in order; SSE may rarely emit
+  // out-of-order frames, so we splice to maintain a clean monotonic series).
+  function appendKvSeriesPoint(series, t, y) {
+    if (!series.length || series[series.length - 1].t <= t) {
+      series.push({ t, y });
+      return;
+    }
+    let lo = 0, hi = series.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (series[mid].t <= t) lo = mid + 1; else hi = mid;
+    }
+    series.splice(lo, 0, { t, y });
   }
 
   function finiteNumber(value) {
@@ -1090,7 +1206,9 @@
     resetAgentLabelPanelWidth();
     state.items.clear();
     state.groups.clear();
-    state.kvPoints.clear();
+    state.kvSeries.kv.length = 0;
+    state.kvSeries.threshold.length = 0;
+    scheduleKvRedraw();
     state.agents.clear();
     state.agentOrder = [];
     state.eventCounter = 0;
@@ -1123,7 +1241,7 @@
     const s = new Date(state.replayBounds.start - pad);
     const e = new Date(state.replayBounds.end   + pad);
     state.timeline.setWindow(s, e, { animation: false });
-    state.kvChart.setWindow(s, e, { animation: false });
+    scheduleKvRedraw();
     scheduleEventLineRender();
   }
 

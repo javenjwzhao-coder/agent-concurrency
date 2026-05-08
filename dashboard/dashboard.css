@@ -275,6 +275,25 @@ main {
   flex: 0 0 155px;
   border-bottom: 1px solid #1a2e4a;
   background: #0b1120;
+  position: relative;
+}
+
+#kvChart .kv-chart-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.kv-axis-label {
+  fill: #4a6080;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.kv-grid-line {
+  stroke: #111e35;
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
 }
 
 #timeline {
@@ -283,50 +302,31 @@ main {
   background: #0b1120;
 }
 
-/* ── KV % graph lines ────────────────────────────────────────────────────── */
+/* ── KV % chart (custom SVG, slaved to the timeline's window) ───────────── */
 
-.kv-line-used,
-.vis-graph-group0 {
-  stroke: #f59e0b !important;
-  stroke-width: 2px !important;
-  fill: none !important;
+.kv-line-used {
+  stroke: #f59e0b;
+  stroke-width: 2px;
+  fill: none;
 }
 
-.kv-line-used.vis-fill,
-.vis-graph-group0.vis-fill {
-  fill: #f59e0b !important;
-  fill-opacity: 0.10 !important;
-  opacity: 0.10 !important;
-  stroke: none !important;
+.kv-line-used.kv-fill {
+  fill: #f59e0b;
+  fill-opacity: 0.10;
+  stroke: none;
 }
 
-.kv-line-used.vis-point,
-.vis-graph-group0.vis-point {
-  fill: #f59e0b !important;
-  stroke: #c47a07 !important;
+.kv-line-used.kv-point {
+  fill: #f59e0b;
+  stroke: #c47a07;
+  stroke-width: 1px;
 }
 
 /* Offload threshold line: used% where free KV reaches admission.threshold_percent. */
-.kv-line-threshold,
-.vis-graph-group1 {
-  stroke: #ff003d !important;
-  stroke-width: 2px !important;
-  fill: none !important;
-}
-
-.kv-line-threshold.vis-fill,
-.vis-graph-group1.vis-fill,
-.kv-line-threshold.vis-point,
-.vis-graph-group1.vis-point {
-  display: none !important;
-}
-
-#kvChart .vis-y-axis .vis-label,
-#kvChart .vis-y-axis .vis-major,
-#kvChart .vis-y-axis .vis-minor {
-  color: #4a6080;
-  fill: #4a6080;
-  font-size: 12px;
+.kv-line-threshold {
+  stroke: #ff003d;
+  stroke-width: 2px;
+  fill: none;
 }
 
 /* ── phase legend chips ──────────────────────────────────────────────────── */
@@ -423,13 +423,11 @@ main {
 
 /* ── Left-panel alignment ────────────────────────────────────────────────── */
 /*
- * The Timeline's left panel (group labels) and the Graph2d's left panel
- * (Y-axis) have different natural widths, so their time axes start at
- * different horizontal pixels.  Forcing them to the same fixed width makes
- * the time axes — and therefore the event overlay lines — pixel-perfect.
+ * The KV chart's SVG offsets its plot by --agent-label-panel-width, so the
+ * timeline's left panel must use the same width — that's what keeps the KV
+ * line, the time axis, and the event-line overlay aligned column-for-column.
  */
-#timeline .vis-panel.vis-left,
-#kvChart  .vis-panel.vis-left {
+#timeline .vis-panel.vis-left {
   width: var(--agent-label-panel-width) !important;
   min-width: var(--agent-label-panel-width) !important;
   max-width: var(--agent-label-panel-width) !important;
