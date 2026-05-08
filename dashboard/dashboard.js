@@ -242,27 +242,30 @@
     const yFor = (v) => KV_CHART_TOP_PAD_PX + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
     const baseY = KV_CHART_TOP_PAD_PX + plotH;
 
-    // Y-axis gridlines + labels (every 10%, label every 5%).
-    for (let p = 0; p <= 100; p += 5) {
+    // Y-axis gridlines + labels. Density adapts to the plot height so labels
+    // don't overlap when the container is short.
+    const labelStep = plotH < 110 ? 25 : plotH < 180 ? 20 : 10;
+    const gridStep = Math.max(10, Math.floor(labelStep / 2));
+    for (let p = 0; p <= 100; p += gridStep) {
+      if (p === 0 || p === 100) continue;
       const y = yFor(p);
-      if (p > 0 && p < 100 && p % 10 === 0) {
-        const grid = document.createElementNS(SVG_NS, "line");
-        grid.setAttribute("x1", String(leftPad));
-        grid.setAttribute("y1", y.toFixed(2));
-        grid.setAttribute("x2", String(leftPad + plotW));
-        grid.setAttribute("y2", y.toFixed(2));
-        grid.setAttribute("class", "kv-grid-line");
-        svg.appendChild(grid);
-      }
-      if (p > 0 && p < 100) {
-        const text = document.createElementNS(SVG_NS, "text");
-        text.setAttribute("x", String(leftPad - KV_AXIS_LABEL_GAP_PX));
-        text.setAttribute("y", (y + 4).toFixed(2));
-        text.setAttribute("text-anchor", "end");
-        text.setAttribute("class", "kv-axis-label");
-        text.textContent = p + "%";
-        svg.appendChild(text);
-      }
+      const grid = document.createElementNS(SVG_NS, "line");
+      grid.setAttribute("x1", String(leftPad));
+      grid.setAttribute("y1", y.toFixed(2));
+      grid.setAttribute("x2", String(leftPad + plotW));
+      grid.setAttribute("y2", y.toFixed(2));
+      grid.setAttribute("class", "kv-grid-line");
+      svg.appendChild(grid);
+    }
+    for (let p = labelStep; p < 100; p += labelStep) {
+      const y = yFor(p);
+      const text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("x", String(leftPad - KV_AXIS_LABEL_GAP_PX));
+      text.setAttribute("y", (y + 4).toFixed(2));
+      text.setAttribute("text-anchor", "end");
+      text.setAttribute("class", "kv-axis-label");
+      text.textContent = p + "%";
+      svg.appendChild(text);
     }
 
     // Build line/area paths from a sorted series, clipping to the visible
