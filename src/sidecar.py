@@ -797,6 +797,7 @@ class DynamicAdmissionController:
                     "predicted_remaining_s": self._round(cand.predicted_remaining_s),
                     "tool_elapsed_s": self._round(cand.tool_elapsed_s),
                     "policy_reason": cand.policy_reason,
+                    "offload_score_gb_s": self._round(cand.score),
                     "e_s": self._round(cand.score),
                 }
                 for _, _, cand in heap
@@ -1414,6 +1415,7 @@ class DynamicAdmissionController:
     def _offload_candidate(self, cand: _IdleAgentCandidate) -> dict[str, Any]:
         result: dict[str, Any] = {
             "agent_id": cand.agent_id,
+            "offload_score_gb_s": self._round(cand.score),
             "e_s": self._round(cand.score),
             "kv_gb": self._round(cand.kv_gb),
             "predicted_remaining_s": self._round(cand.predicted_remaining_s),

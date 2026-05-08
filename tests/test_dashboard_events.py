@@ -26,6 +26,10 @@ def test_dashboard_renders_successful_offload_markers_only():
     assert "known_blocks: ${fmt(ev.known_blocks)}" in js
     assert "offload_jobs: ${fmt(ev.offload_jobs)}" in js
     assert "reason: ${fmt(ev.reason)}" in js
+    assert "const offloadScore = ev.offload_score_gb_s ?? ev.e_s" in js
+    assert "offload_score_gb_s: ${fmt(offloadScore)}" in js
+    assert "tool_elapsed_s: ${fmt(ev.tool_elapsed_s)}" in js
+    assert "e_s:" not in js
 
     assert "OFFLOAD_FAIL" not in html
     assert "OFFLOAD_FAIL: ${ev.agent_id}" not in js

@@ -137,6 +137,7 @@ The policy is intentionally simple:
 offload_score = agent_kv_usage_gb * predicted_remaining_tool_seconds
 ```
 
+The sidecar reports that score as `offload_score_gb_s` (and legacy `e_s`).
 Fallback-long calls use elapsed tool-call seconds as the multiplier.
 
 Exact freed memory is reported only from vLLM free-block deltas or an explicit

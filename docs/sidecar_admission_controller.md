@@ -169,9 +169,10 @@ Candidate score:
 score = agent_kv_gb * predicted_remaining_tool_seconds
 ```
 
-When fallback elapsed time makes the call eligible, elapsed tool time is used as
-the score multiplier. This also corrects short predictions that aged badly while
-the agent still has resident KV.
+Admission reports the score as `offload_score_gb_s` (and legacy `e_s`). It is
+not wall-clock elapsed time. When fallback elapsed time makes the call eligible,
+elapsed tool time is used as the score multiplier. This also corrects short
+predictions that aged badly while the agent still has resident KV.
 
 The sidecar sends a POST to the offload endpoint, usually:
 

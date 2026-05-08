@@ -609,6 +609,7 @@
 
     for (const ev of (adm.offloads || [])) {
       if (ev.offloaded === true) {
+        const offloadScore = ev.offload_score_gb_s ?? ev.e_s;
         addEvent(ts, "offload", `OFFLOAD: ${ev.agent_id}`,
           `agent: ${ev.agent_id}\n` +
           `freed_gb: ${fmt(ev.freed_gb)}\n` +
@@ -620,8 +621,9 @@
           `known_blocks: ${fmt(ev.known_blocks)}\n` +
           `offload_jobs: ${fmt(ev.offload_jobs)}\n` +
           `reason: ${fmt(ev.reason)}\n` +
-          `e_s:      ${fmt(ev.e_s)}\n` +
-          `kv_gb:    ${fmt(ev.kv_gb)}\n` +
+          `offload_score_gb_s: ${fmt(offloadScore)}\n` +
+          `kv_gb: ${fmt(ev.kv_gb)}\n` +
+          `tool_elapsed_s: ${fmt(ev.tool_elapsed_s)}\n` +
           `predicted_remaining_s: ${fmt(ev.predicted_remaining_s)}`,
           tooltipBase);
       }

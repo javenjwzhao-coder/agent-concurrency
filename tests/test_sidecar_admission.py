@@ -698,6 +698,7 @@ def test_pressure_offload_pops_highest_score_idle_agent():
     assert report["pressure"] is True
     assert offloaded == ["agent-a"]
     assert report["offloads"][0]["agent_id"] == "agent-a"
+    assert report["offloads"][0]["offload_score_gb_s"] == 10.0
     assert report["offloads"][0]["e_s"] == 10.0
 
 
@@ -1568,6 +1569,7 @@ def test_failed_pressure_offload_gets_default_reason_without_offload_state():
     assert report["offloads"] == [
         {
             "agent_id": "agent",
+            "offload_score_gb_s": 10.0,
             "e_s": 10.0,
             "kv_gb": 2.0,
             "predicted_remaining_s": 5.0,

@@ -92,7 +92,7 @@ ticks it already rendered.
     "heap_candidates": [                       // ranked idle-agent offload heap (snapshot)
       { "agent_id": "...", "kv_gb": 0.5, "predicted_remaining_s": 8.0,
         "tool_elapsed_s": null, "policy_reason": "eligible_for_pressure_offload",
-        "e_s": 4.0 }
+        "offload_score_gb_s": 4.0, "e_s": 4.0 }
     ],
     "skipped_candidates": [                    // tool-call agents excluded from offload
       { "agent_id": "...", "reason": "idle_short" }
@@ -111,7 +111,8 @@ ticks it already rendered.
         "freed_gb_source": "vllm_free_blocks_delta",
         "pending": false, "held_requests": 1,
         "known_blocks": 48, "offload_jobs": 1,
-        "predicted_remaining_s": 8.0, "e_s": 4.0,
+        "predicted_remaining_s": 8.0, "tool_elapsed_s": null,
+        "offload_score_gb_s": 4.0, "e_s": 4.0,
         "status_code": 200, "reason": "ok" },
       { "agent_id": "...", "offloaded": false,
         "kv_gb": 0.5, "status_code": 409,
