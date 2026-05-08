@@ -242,10 +242,9 @@
     const yFor = (v) => KV_CHART_TOP_PAD_PX + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
     const baseY = KV_CHART_TOP_PAD_PX + plotH;
 
-    // Y-axis gridlines + labels. Density adapts to the plot height so labels
-    // don't overlap when the container is short.
-    const labelStep = plotH < 110 ? 25 : plotH < 180 ? 20 : 10;
-    const gridStep = Math.max(10, Math.floor(labelStep / 2));
+    // Y-axis: label every 5%, with gridlines at the same cadence.
+    const labelStep = 5;
+    const gridStep = 5;
     for (let p = 0; p <= 100; p += gridStep) {
       if (p === 0 || p === 100) continue;
       const y = yFor(p);
