@@ -153,7 +153,10 @@
       stack: false,
       orientation: { axis: "top", item: "top" },
       horizontalScroll: true,
-      zoomKey: "ctrlKey",
+      // Browser-level Ctrl/trackpad zoom must scale the whole dashboard
+      // uniformly. Timeline-only wheel zoom leaves snapshots in a mixed page
+      // zoom + time-window zoom state that cannot be reset with browser zoom.
+      zoomable: false,
       groupOrder: "order",
       margin: { item: 1, axis: 4 },
       tooltip: { followMouse: true, overflowMethod: "flip" },
@@ -164,6 +167,7 @@
         majorLabels: { second: "HH:mm" },
       },
     };
+    setupUniformBrowserZoom();
     state.timeline = new vis.Timeline(
       $("#timeline"), state.items, state.groups, timelineOpts,
     );
@@ -189,6 +193,27 @@
       scheduleKvRedraw();
       scheduleEventLineRender();
     });
+  }
+
+  function setupUniformBrowserZoom() {
+    const stopTimelineZoom = (event) => {
+      if (!isBrowserZoomGesture(event)) return;
+      // Do not preventDefault: the browser should still perform normal page
+      // zoom. We only stop vis-timeline from also treating the same wheel
+      // gesture as a time-window zoom.
+      event.stopImmediatePropagation();
+    };
+    for (const target of [window, document, $("#timeline")]) {
+      if (!target || !target.addEventListener) continue;
+      target.addEventListener("wheel", stopTimelineZoom, {
+        capture: true,
+        passive: true,
+      });
+    }
+  }
+
+  function isBrowserZoomGesture(event) {
+    return event && (event.ctrlKey || event.metaKey);
   }
 
   // ── KV chart (custom SVG, slaved to the timeline's window) ─────────────
@@ -1590,6 +1615,7 @@
       "<html lang=\"en\">\n" +
       "<head>\n" +
       "  <meta charset=\"utf-8\">\n" +
+      "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n" +
       "  <title>Agent Concurrency · Snapshot</title>\n" +
       "  <style id=\"visCssAsset\">\n" + safeInlineStyle(visCss) + "\n  </style>\n" +
       "  <style id=\"dashboardCssAsset\">\n" + safeInlineStyle(dashboardCss) + "\n  </style>\n" +

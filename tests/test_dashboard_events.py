@@ -168,6 +168,23 @@ def test_dashboard_phase_labels_do_not_stretch_duration_bars():
     assert "width: 0;" in css
 
 
+def test_dashboard_ctrl_wheel_uses_uniform_browser_zoom():
+    js = _read("dashboard/dashboard.js")
+    html = _read("dashboard/index.html")
+
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in html
+    assert "zoomable: false" in js
+    assert 'zoomKey: "ctrlKey"' not in js
+    assert "function setupUniformBrowserZoom()" in js
+    assert "setupUniformBrowserZoom();" in js
+    assert js.index("setupUniformBrowserZoom();") < js.index("new vis.Timeline")
+    assert "event.stopImmediatePropagation();" in js
+    assert "event.preventDefault" not in js
+    assert "passive: true" in js
+    assert "event && (event.ctrlKey || event.metaKey)" in js
+    assert '<meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1\\">' in js
+
+
 def test_dashboard_renders_post_tool_pending_release_as_reasoning():
     js = _read("dashboard/dashboard.js")
     schema = _read("dashboard/SCHEMA.md")
