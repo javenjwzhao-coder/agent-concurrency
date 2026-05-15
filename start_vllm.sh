@@ -5,6 +5,7 @@ set -euo pipefail
 
 ACTION="start"
 CONFIG="config/vllm_config.yaml"
+BASELINE=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -12,10 +13,12 @@ while [ $# -gt 0 ]; do
             ACTION="stop"; shift ;;
         --start|start)
             ACTION="start"; shift ;;
+        --baseline)
+            BASELINE=true; shift ;;
         --config|-c)
             CONFIG="$2"; shift 2 ;;
         --help|-h)
-            echo "Usage: $0 [--start|--stop] [--config <path>] [<config>]"
+            echo "Usage: $0 [--start|--stop] [--baseline] [--config <path>] [<config>]"
             exit 0 ;;
         --*)
             echo "[ERROR] Unknown option: $1" >&2
@@ -44,6 +47,19 @@ c=json.load(sys.stdin)
 for k in '$1'.split('.'): c=c[k]
 print(' '.join(str(i) for i in c) if isinstance(c,list) else ('' if c is None else c))
 "
+}
+
+pid_file_for_mode() {
+    local configured
+    configured=$(cfg native.pid_file)
+    if [ "$BASELINE" = "true" ]; then
+        case "$configured" in
+            *.pid) printf '%s\n' "${configured%.pid}_baseline.pid" ;;
+            *)     printf '%s\n' "${configured}.baseline" ;;
+        esac
+    else
+        printf '%s\n' "$configured"
+    fi
 }
 
 export no_proxy="localhost,127.0.0.1"
@@ -104,13 +120,13 @@ snapshot_vllm_worker_pids() {
 
 clear_vllm_worker_snapshot() {
     local pid_file
-    pid_file=$(cfg native.pid_file)
+    pid_file=$(pid_file_for_mode)
     rm -f "${pid_file}.workers.before"
 }
 
 stop_vllm_from_pid_file() {
     local pid_file
-    pid_file=$(cfg native.pid_file)
+    pid_file=$(pid_file_for_mode)
 
     new_vllm_worker_pids_since_snapshot() {
         local snapshot="${pid_file}.workers.before"
@@ -349,10 +365,14 @@ start_native() {
     local TP=$(cfg native.tensor_parallel_size)
     local DTYPE=$(cfg native.dtype)
     local EXTRA=$(cfg native.extra_args)
-    local PID_FILE=$(cfg native.pid_file)
+    local PID_FILE=$(pid_file_for_mode)
 
     REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-    VENV="$REPO_DIR/.venv"
+    if [ "$BASELINE" = "true" ]; then
+        VENV="${VLLM_BASELINE_VENV:-$REPO_DIR/.venv-baseline}"
+    else
+        VENV="$REPO_DIR/.venv"
+    fi
     VLLM_ASCEND_VERSION="${VLLM_ASCEND_VERSION:-0.13.0}"
     VLLM_VERSION="${VLLM_VERSION:-$VLLM_ASCEND_VERSION}"
     TORCH_VERSION="${VLLM_ASCEND_TORCH_VERSION:-2.8.0}"
@@ -364,11 +384,19 @@ start_native() {
     VLLM_INSTALL_METHOD="${VLLM_ASCEND_INSTALL_METHOD:-source}"
     VLLM_GIT_REF="${VLLM_GIT_REF:-v${VLLM_VERSION}}"
     VLLM_GIT_URL="${VLLM_GIT_URL:-git@github.com:vllm-project/vllm.git}"
-    VLLM_SOURCE_DIR="${VLLM_SOURCE_DIR:-$REPO_DIR/.vllm-src/${VLLM_GIT_REF}}"
+    if [ "$BASELINE" = "true" ]; then
+        VLLM_SOURCE_DIR="${VLLM_SOURCE_DIR:-$REPO_DIR/.vllm-baseline-src/${VLLM_GIT_REF}}"
+    else
+        VLLM_SOURCE_DIR="${VLLM_SOURCE_DIR:-$REPO_DIR/.vllm-src/${VLLM_GIT_REF}}"
+    fi
     VLLM_ASCEND_GIT_REF="${VLLM_ASCEND_GIT_REF:-v${VLLM_ASCEND_VERSION}}"
     VLLM_ASCEND_GIT_URL="${VLLM_ASCEND_GIT_URL:-git@github.com:vllm-project/vllm-ascend.git}"
     VLLM_ASCEND_MAX_JOBS="${VLLM_ASCEND_MAX_JOBS:-16}"
-    VLLM_ASCEND_SOURCE_DIR="${VLLM_ASCEND_SOURCE_DIR:-$REPO_DIR/.vllm-ascend-src/${VLLM_ASCEND_GIT_REF}-${VLLM_ASCEND_SOC_VERSION}}"
+    if [ "$BASELINE" = "true" ]; then
+        VLLM_ASCEND_SOURCE_DIR="${VLLM_ASCEND_SOURCE_DIR:-$REPO_DIR/.vllm-ascend-baseline-src/${VLLM_ASCEND_GIT_REF}-${VLLM_ASCEND_SOC_VERSION}}"
+    else
+        VLLM_ASCEND_SOURCE_DIR="${VLLM_ASCEND_SOURCE_DIR:-$REPO_DIR/.vllm-ascend-src/${VLLM_ASCEND_GIT_REF}-${VLLM_ASCEND_SOC_VERSION}}"
+    fi
     VLLM_ASCEND_SOC_MARKER="$VENV/.vllm-ascend-soc-version"
     export PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple}"
 
@@ -924,17 +952,87 @@ PY
     unset -f check_local_ascend_stack
     unset -f check_local_vllm_ascend
 
-    # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────────
-    echo "[INFO] Applying patches to vLLM package at $VLLM_PATCH_DIR ..."
-    "$VENV/bin/python" "$REPO_DIR/src/vllm_patches/apply_patches.py" \
-        --vllm-dir "$VLLM_PATCH_DIR"
+    if [ "$BASELINE" = "true" ]; then
+        # ── 3. Baseline: verify clean upstream vLLM/vllm-ascend ──────────────
+        echo "[INFO] Baseline mode: skipping agent-aware vLLM patches."
+        echo "[INFO] Verifying clean baseline vLLM import path..."
+        VLLM_PATCH_DIR="$VLLM_PATCH_DIR" \
+        DESIRED_VLLM="$VLLM_VERSION" \
+        DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
+        TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import importlib.util
+import pathlib
 
-    # ── 4. Verify the project venv imports the patched copy ──────────────────
-    echo "[INFO] Verifying patched vLLM import path..."
-    VLLM_PATCH_DIR="$VLLM_PATCH_DIR" \
-    DESIRED_VLLM="$VLLM_VERSION" \
-    DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
+import vllm
+import vllm.entrypoints.openai.api_server as api_server
+import vllm.entrypoints.openai.protocol as protocol
+import vllm.entrypoints.openai.serving_chat as serving_chat
+
+target = pathlib.Path(__import__("os").environ["VLLM_PATCH_DIR"]).resolve()
+vllm_file = pathlib.Path(vllm.__file__).resolve()
+api_server_file = pathlib.Path(api_server.__file__).resolve()
+protocol_file = pathlib.Path(protocol.__file__).resolve()
+serving_chat_file = pathlib.Path(serving_chat.__file__).resolve()
+desired = __import__("os").environ["DESIRED_VLLM"]
+desired_ascend = __import__("os").environ["DESIRED_VLLM_ASCEND"]
+version = metadata.version("vllm")
+ascend_version = metadata.version("vllm-ascend")
+
+def is_release_or_local_build(actual, expected):
+    return actual == expected or actual.startswith(expected + "+")
+
+for path in (vllm_file, api_server_file, protocol_file, serving_chat_file):
+    if not path.is_relative_to(target):
+        raise AssertionError(f"Imported vLLM path {path} is not under baseline target {target}")
+
+if not is_release_or_local_build(version, desired):
+    raise AssertionError(f"Imported vLLM version {version!r} does not match target {desired!r}")
+if not is_release_or_local_build(ascend_version, desired_ascend):
+    raise AssertionError(
+        f"Imported vllm-ascend version {ascend_version!r} does not match "
+        f"target {desired_ascend!r}"
+    )
+
+usage_fields = getattr(protocol.UsageInfo, "model_fields", {})
+chat_fields = getattr(protocol.ChatCompletionRequest, "model_fields", {})
+if "kv_blocks_used" in usage_fields or "kv_blocks_size_gb" in usage_fields:
+    raise AssertionError("Baseline vLLM unexpectedly exposes patched KV usage fields")
+if "agent_id" in chat_fields:
+    raise AssertionError("Baseline vLLM unexpectedly exposes patched agent_id request field")
+route_paths = {getattr(route, "path", "") for route in api_server.router.routes}
+patched_routes = {
+    "/agent_kv_cache/offload",
+    "/agent_kv_cache/usage",
+    "/agent_kv_cache/restore",
+    "/agent_kv_cache/release",
+} & route_paths
+if patched_routes:
+    raise AssertionError(f"Baseline api_server has patched agent KV route(s): {sorted(patched_routes)}")
+spec = importlib.util.find_spec(
+    "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector"
+)
+if spec is not None:
+    raise AssertionError(f"Baseline unexpectedly imports AgentAware connector from {spec.origin}")
+
+print(f"[INFO] baseline vllm version -> {version}")
+print(f"[INFO] baseline vllm-ascend version -> {ascend_version}")
+print(f"[INFO] baseline vllm package -> {vllm_file}")
+print(f"[INFO] baseline api_server.py -> {api_server_file}")
+print("[INFO] baseline agent KV routes -> none")
+PY
+    else
+        # ── 3. Apply KV-tracking patches to project venv (idempotent) ────────
+        echo "[INFO] Applying patches to vLLM package at $VLLM_PATCH_DIR ..."
+        "$VENV/bin/python" "$REPO_DIR/src/vllm_patches/apply_patches.py" \
+            --vllm-dir "$VLLM_PATCH_DIR"
+
+        # ── 4. Verify the project venv imports the patched copy ──────────────
+        echo "[INFO] Verifying patched vLLM import path..."
+        VLLM_PATCH_DIR="$VLLM_PATCH_DIR" \
+        DESIRED_VLLM="$VLLM_VERSION" \
+        DESIRED_VLLM_ASCEND="$VLLM_ASCEND_VERSION" \
+        TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$VENV/bin/python" - <<'PY'
 import importlib.metadata as metadata
 import importlib
 import pathlib
@@ -998,6 +1096,7 @@ print(f"[INFO] serving_chat.py -> {serving_chat_file}")
 print(f"[INFO] connector.py -> {pathlib.Path(connector.__file__).resolve()}")
 print(f"[INFO] agent KV routes -> {sorted(p for p in route_paths if 'agent_kv' in p)}")
 PY
+    fi
 
     # ── 5. Skip if already running ────────────────────────────────────────────
     # Verify the recorded PID is actually a vLLM process before assuming the
@@ -1014,8 +1113,35 @@ PY
         rm -f "$PID_FILE" "${PID_FILE}.workers.before"
     fi
 
+    if [ "$BASELINE" = "true" ]; then
+        BASELINE_HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+            -H "Authorization: Bearer ${API_KEY}" \
+            "http://localhost:${PORT}/v1/models" 2>/dev/null || echo "000")
+        if [ "$BASELINE_HEALTH_CODE" = "200" ]; then
+            AGENT_KV_ROUTE_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                -X POST \
+                -H "Content-Type: application/json" \
+                -d '{"agent_id":"__baseline_probe__"}' \
+                "http://localhost:${PORT}/agent_kv_cache/offload" \
+                2>/dev/null || echo "000")
+            case "$AGENT_KV_ROUTE_CODE" in
+                2*)
+                    echo "[ERROR] Baseline mode found patched agent KV routes on the running vLLM server." >&2
+                    echo "[ERROR] Stop that server before launching the clean baseline." >&2
+                    exit 2
+                    ;;
+            esac
+            echo "[INFO] Baseline-compatible vLLM already serving on port ${PORT}. Skipping launch."
+            return
+        fi
+    fi
+
     # ── 6. Launch vllm serve natively ────────────────────────────────────────
-    echo "[INFO] Starting native vLLM (model=$(basename $MODEL), tp=$TP, port=$PORT)..."
+    if [ "$BASELINE" = "true" ]; then
+        echo "[INFO] Starting baseline native vLLM (model=$(basename $MODEL), tp=$TP, port=$PORT)..."
+    else
+        echo "[INFO] Starting native vLLM (model=$(basename $MODEL), tp=$TP, port=$PORT)..."
+    fi
     snapshot_vllm_worker_pids "$PID_FILE"
     (
         set +u
@@ -1033,12 +1159,18 @@ PY
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
         export OMP_NUM_THREADS=1
 
+        if [ "$BASELINE" = "true" ]; then
+            KV_TRANSFER_CONFIG='{"kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}'
+        else
+            KV_TRANSFER_CONFIG='{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu", "agent_hold_finished_requests": true, "agent_hold_ttl_s": 300.0}}'
+        fi
+
         VLLM_CMD=("$VENV/bin/python" "$VLLM_CLI" serve "$MODEL" \
           --served-model-name "$SERVED_NAME" \
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \
           --dtype "$DTYPE" \
-          --kv-transfer-config '{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu", "agent_hold_finished_requests": true, "agent_hold_ttl_s": 300.0}}')
+          --kv-transfer-config "$KV_TRANSFER_CONFIG")
         if [ -n "$EXTRA" ]; then
             # shellcheck disable=SC2206
             EXTRA_ARGS=($EXTRA)
@@ -1071,7 +1203,11 @@ if ! wait_for_ready; then
     stop_vllm_from_pid_file
     exit 1
 fi
-verify_agent_kv_offload_route || exit 1
+if [ "$BASELINE" = "true" ]; then
+    echo "[INFO] Baseline mode: skipping agent KV offload route probe."
+else
+    verify_agent_kv_offload_route || exit 1
+fi
 clear_vllm_worker_snapshot
 
 # Export sidecar geometry for callers of run_abc_bench_instrumented.py

@@ -634,20 +634,32 @@ def copy_task_to_workspace(src: Path, workspace_root: Path, suffix: str = "") ->
 
 # ─────────────────────────── single-agent runner ─────────────────────────────
 
-def make_llm(model: str, base_url: str, api_key: str, agent_id: str) -> LLM:
+def make_llm(
+    model: str,
+    base_url: str,
+    api_key: str,
+    agent_id: str,
+    baseline_mode: bool = False,
+) -> LLM:
     """
-    Build an LLM handle.  ``agent_id`` is passed through ``extra_body`` so
-    that a patched vLLM can track per-agent KV-cache ownership.
+    Build an LLM handle.
+
+    Optimized runs pass ``agent_id`` through ``extra_body`` so the patched vLLM
+    can track per-agent KV-cache ownership. Baseline runs must stay compatible
+    with clean upstream vLLM, so they only send standard chat-template kwargs.
     """
+    extra_body: dict[str, Any] = {
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    if not baseline_mode:
+        extra_body["agent_id"] = agent_id
+
     return LLM(
         usage_id=agent_id,
         model=model,
         base_url=base_url,
         api_key=SecretStr(api_key),
-        litellm_extra_body={
-            "chat_template_kwargs": {"enable_thinking": False},
-            "agent_id": agent_id,
-        },
+        litellm_extra_body=extra_body,
     )
 
 
@@ -672,6 +684,7 @@ def run_single_agent(
     results_dir: Path,
     scheduled_dt: datetime,
     admission_controller: Any = None,
+    baseline_mode: bool = False,
 ) -> dict[str, Any]:
     """
     Execute one agent on one task and return a summary dict.
@@ -684,7 +697,10 @@ def run_single_agent(
     task_yaml = load_yaml(task_yaml_path)
     prompt = build_agent_prompt(task_yaml, task_dir)
 
-    llm = make_llm(llm_model, llm_base_url, llm_api_key, agent_id)
+    llm = make_llm(
+        llm_model, llm_base_url, llm_api_key, agent_id,
+        baseline_mode=baseline_mode,
+    )
     agent = make_agent(llm)
     tracker = AgentPhaseTracker(agent_id=agent_id, task_id=task_dir.name,
                                 scheduled_dt=scheduled_dt,
@@ -735,11 +751,13 @@ def run_single_agent(
         except Exception:
             pass  # callbacks must never raise
 
-    import litellm as _litellm
-    with _litellm_cb_lock:
-        if not isinstance(getattr(_litellm, "success_callback", None), list):
-            _litellm.success_callback = []
-        _litellm.success_callback.append(_kv_cb)
+    _litellm = None
+    if not baseline_mode:
+        import litellm as _litellm
+        with _litellm_cb_lock:
+            if not isinstance(getattr(_litellm, "success_callback", None), list):
+                _litellm.success_callback = []
+            _litellm.success_callback.append(_kv_cb)
 
     wall_start = time.monotonic()
     wall_end = wall_start
@@ -764,11 +782,12 @@ def run_single_agent(
         if admission_controller is not None:
             admission_controller.finish_agent(agent_id)
 
-        with _litellm_cb_lock:
-            try:
-                _litellm.success_callback.remove(_kv_cb)
-            except (ValueError, AttributeError):
-                pass
+        if _litellm is not None:
+            with _litellm_cb_lock:
+                try:
+                    _litellm.success_callback.remove(_kv_cb)
+                except (ValueError, AttributeError):
+                    pass
 
         # Persist trace CSV + human-readable event log.  This lives in the
         # finally block so failed runs still leave useful partial traces.
@@ -793,6 +812,7 @@ def run_single_agent(
         llm_metrics["kv_blocks_used"]       = _kv_acc["total_kv_blocks"]
         llm_metrics["kv_blocks_size_gb"]    = round(_kv_acc["total_kv_size_gb"], 6)
         llm_metrics["kv_blocks_call_count"] = _kv_acc["call_count"]
+        llm_metrics["baseline_mode"] = bool(baseline_mode)
 
         with (results_dir / f"{agent_id}_llm_metrics.json").open("w") as f:
             json_dump_safe(llm_metrics, f, indent=2)
@@ -1064,6 +1084,7 @@ def _agent_thread(
             results_dir=result_dir,
             scheduled_dt=scheduled_dt,
             admission_controller=admission_controller,
+            baseline_mode=args.baseline_mode,
         )
         if args.run_tests:
             test_result = maybe_run_tests(
@@ -1108,6 +1129,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-wave-delay-s", type=float, default=15.0)
     p.add_argument("--launch-seed", type=int, default=None,
                    help="RNG seed for reproducible launch schedules.")
+    p.add_argument("--open-loop-launch", action="store_true",
+                   help="Submit every planned task immediately using a thread "
+                        "pool, with no sequential fallback or sidecar gate.")
+    p.add_argument("--baseline-mode", action="store_true",
+                   help="Run against clean upstream vLLM: omit agent_id request "
+                        "metadata and per-agent KV callbacks.")
 
     # ── embedded sidecar (optional) ──────────────────────────────────────────
     # Set --sidecar-log-file to enable.  The sidecar runs as a daemon thread
@@ -1177,6 +1204,10 @@ def main() -> int:
         print("ERROR: --sidecar-admission-control requires --sidecar-log-file",
               file=sys.stderr)
         return 2
+    if args.baseline_mode and args.sidecar_admission_control:
+        print("ERROR: --baseline-mode cannot be combined with "
+              "--sidecar-admission-control", file=sys.stderr)
+        return 2
 
     # ── optional embedded sidecar ────────────────────────────────────────────
     _sc_stop = None
@@ -1199,6 +1230,7 @@ def main() -> int:
             head_dim=args.sidecar_head_dim,
             block_size=args.sidecar_block_size,
             dtype=args.sidecar_dtype,
+            baseline_mode=args.baseline_mode,
         )
         _sc_bpb = _sidecar.bytes_per_block(
             _sc_args.num_layers, _sc_args.num_kv_heads,
@@ -1305,6 +1337,11 @@ def main() -> int:
         summaries = launch_agents(
             waves, args, admission_controller=_sc_admission_controller
         )
+    elif args.open_loop_launch:
+        waves = [(0.0, task_dirs)]
+        log.info("Planned open-loop launch for %d task(s): %s",
+                 len(task_dirs), [t.name for t in task_dirs])
+        summaries = launch_agents(waves, args)
     elif args.randomise_launch:
         waves = plan_launch_waves(
             task_dirs,
@@ -1337,6 +1374,7 @@ def main() -> int:
                     results_dir=result_dir,
                     scheduled_dt=now_utc(),
                     admission_controller=None,
+                    baseline_mode=args.baseline_mode,
                 )
                 if args.run_tests:
                     summary["test_result"] = maybe_run_tests(

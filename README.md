@@ -55,6 +55,13 @@ Run ABC-Bench with the YAML wrapper:
 bash run_abc-bench.sh --config config/abc-bench_config.yaml
 ```
 
+Run the clean vLLM/vLLM-Ascend baseline with all tasks submitted at once, no
+admission control, no tool prediction, and no per-agent KV tracking:
+
+```bash
+bash run_abc-bench.sh --config config/abc-bench_config.yaml --baseline
+```
+
 Use a dry run to inspect the resolved command:
 
 ```bash
@@ -175,6 +182,7 @@ Aggregate outputs include:
 - `run_metadata.json`
 - `prediction_metrics.json`
 - `sidecar.log`, when the sidecar is enabled
+- `baseline_vllm_metrics.json`, for baseline runs
 
 ## Useful Checks
 

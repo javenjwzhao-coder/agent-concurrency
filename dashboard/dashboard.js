@@ -80,6 +80,7 @@
     latestTick: -1,
     latestTs: null,
     paused: false,
+    admissionEnabled: false,
     eventSource: null,
     mode: "live",       // "live" | "replay" | "snapshot"
     replayBounds: null, // {start, end} when in replay/snapshot mode
@@ -398,6 +399,7 @@
       wThreshold,
       wSource,
       pressure,
+      admissionEnabled: adm.enabled === true,
       vllmPreemptions: vllmSchedulerPreemptions(vllm),
     };
   }
@@ -422,6 +424,26 @@
     el.style.display = "";
   }
 
+  function hideBadge(id) {
+    const el = $("#" + id);
+    if (el) el.style.display = "none";
+  }
+
+  function setAdmissionVisualsVisible(visible) {
+    for (const el of [
+      $("#eventLinesBtn"),
+      $("#eventTypeFilter"),
+      $("#eventLegendTitle"),
+      $("#kvThresholdLegendChip"),
+      document.querySelector(".event-offload"),
+      document.querySelector(".event-admit"),
+      document.querySelector(".event-readmit"),
+      document.querySelector(".event-sat"),
+    ]) {
+      if (el) el.style.display = visible ? "" : "none";
+    }
+  }
+
   function updateBadges(timeMs) {
     const s = snapshotAt(timeMs);
     if (!s) return;
@@ -433,22 +455,29 @@
       `live: ${s.live}`,
       `reasoning: ${s.reasoning}\ntool_call: ${s.tool_call}\nwaiting:   ${s.waiting}\n\nlaunched: ${s.launched}`,
     );
-    setBadge("offloadedCount", `offloaded: ${s.offloaded}`,
-      "agents whose KV is currently offloaded to CPU (offloaded_waiting)");
-    setBadge("heapCount", `heap: ${s.heap}`,
-      "agents currently in the offload heap (eligible to be offloaded)");
-    setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.w)} / T: ${fmtPct(s.threshold)}`,
-      "free KV GB / admission headroom W / free-KV threshold percent\n" +
-      `free_pct: ${fmtPct(s.freePercent)}\nthreshold_gb: ${fmtGb(s.thresholdGb)}\n` +
-      `w: ${fmtW(s.w)}\nw_threshold: ${fmtW(s.wThreshold)}\nw_source: ${fmt(s.wSource)}\n` +
-      wBeforeOffloadText +
-      "controller offloads only when free KV percent <= threshold");
-    const pressureEl = $("#pressureBadge");
-    if (pressureEl) {
-      pressureEl.classList.toggle("badge-pressure-active", s.pressure);
+    if (s.admissionEnabled) {
+      setBadge("offloadedCount", `offloaded: ${s.offloaded}`,
+        "agents whose KV is currently offloaded to CPU (offloaded_waiting)");
+      setBadge("heapCount", `heap: ${s.heap}`,
+        "agents currently in the offload heap (eligible to be offloaded)");
+      setBadge("pressureBadge", `C: ${fmtGb(s.C)} / W: ${fmtW(s.w)} / T: ${fmtPct(s.threshold)}`,
+        "free KV GB / admission headroom W / free-KV threshold percent\n" +
+        `free_pct: ${fmtPct(s.freePercent)}\nthreshold_gb: ${fmtGb(s.thresholdGb)}\n` +
+        `w: ${fmtW(s.w)}\nw_threshold: ${fmtW(s.wThreshold)}\nw_source: ${fmt(s.wSource)}\n` +
+        wBeforeOffloadText +
+        "controller offloads only when free KV percent <= threshold");
+      const pressureEl = $("#pressureBadge");
+      if (pressureEl) {
+        pressureEl.classList.toggle("badge-pressure-active", s.pressure);
+      }
+      setBadge("queueCount", `queue: ${s.queue}`,
+        "fresh + offloaded_ready agents waiting to be admitted");
+    } else {
+      hideBadge("offloadedCount");
+      hideBadge("heapCount");
+      hideBadge("pressureBadge");
+      hideBadge("queueCount");
     }
-    setBadge("queueCount", `queue: ${s.queue}`,
-      "fresh + offloaded_ready agents waiting to be admitted");
     setBadge("doneCount", `done: ${s.done} / ${s.launched}`,
       "completed agents / total launched");
     setBadge("vllmPreemptCount", `vllm preempt: ${fmtCount(s.vllmPreemptions)}`,
@@ -1126,6 +1155,10 @@
     state.records.push(record);
     state.latestTs = record.ts;
     setTickInfo(record.tick, record.ts);
+    if (record.admission && record.admission.enabled === true) {
+      state.admissionEnabled = true;
+    }
+    setAdmissionVisualsVisible(state.admissionEnabled);
 
     const recordTs = record.ts;
     const agents = record.agents || {};
@@ -1218,10 +1251,12 @@
     state.latestTick = -1;
     state.latestTs = null;
     state.replayBounds = null;
+    state.admissionEnabled = false;
     state.tickHistory = [];
     state.records = [];
     state.eventPoints = [];
     state.lastSatActive = false;
+    setAdmissionVisualsVisible(false);
     for (const id of [
       "liveCount",
       "offloadedCount",

@@ -1894,7 +1894,12 @@ def run_loop(args: argparse.Namespace, bytes_per_blk: int,
                 bytes_per_blk=bytes_per_blk,
             )
         else:
-            record["admission"] = {"enabled": False, "reasons": ["not_configured"]}
+            baseline_mode = bool(getattr(args, "baseline_mode", False))
+            record["admission"] = {
+                "enabled": False,
+                "mode": "baseline" if baseline_mode else "telemetry_only",
+                "reasons": ["baseline"] if baseline_mode else ["not_configured"],
+            }
 
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")

@@ -34,6 +34,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config/abc-bench_config.yaml"
 DRY_RUN=false
 SKIP_PREDICTION=false
+BASELINE=false
 BENCH_UV_HTTP_TIMEOUT="${BENCH_UV_HTTP_TIMEOUT:-300}"
 BENCH_UV_INSTALL_RETRIES="${BENCH_UV_INSTALL_RETRIES:-3}"
 declare -a OVERRIDES=()
@@ -59,6 +60,8 @@ Options:
                            Examples: dataset.max_tasks=2  launch.randomise=false
   --dry-run               Print resolved config and commands without executing
   --skip-prediction       Skip the prediction step even if enabled in config
+  --baseline              Run clean vLLM/vllm-ascend baseline with open-loop
+                          task submission and global KV/preempt telemetry only
   --help, -h              Show this help
 
 Examples:
@@ -78,6 +81,8 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true; shift ;;
         --skip-prediction)
             SKIP_PREDICTION=true; shift ;;
+        --baseline)
+            BASELINE=true; shift ;;
         --help|-h)
             usage; exit 0 ;;
         *)
@@ -268,6 +273,15 @@ if [[ -z "${SIDECAR_VLLM_URL:-}" && -n "${LLM_BASE_URL:-}" ]]; then
     SIDECAR_VLLM_URL="$(derive_sidecar_url "$LLM_BASE_URL")"
 fi
 
+if [[ "$BASELINE" == "true" ]]; then
+    PREDICTION_ENABLED=false
+    SKIP_PREDICTION=true
+    SIDECAR_ENABLED=true
+    SIDECAR_ADMISSION_ENABLED=false
+    SIDECAR_ADMISSION_PREDICTOR_MODEL=""
+    LAUNCH_RANDOMISE=false
+fi
+
 # ─────────────────────────── validation ──────────────────────────────────────
 
 ERRORS=()
@@ -294,6 +308,11 @@ if [[ -z "${SIDECAR_ADMISSION_PREDICTOR_MODEL:-}" ]]; then
 fi
 if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" && "${SIDECAR_ENABLED:-false}" != "true" ]]; then
     ERRORS+=("sidecar.admission_control.enabled requires sidecar.enabled=true")
+fi
+if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
+    [[ -z "${SIDECAR_NUM_LAYERS:-}" ]]   && ERRORS+=("sidecar.num_layers is required when sidecar.enabled=true")
+    [[ -z "${SIDECAR_NUM_KV_HEADS:-}" ]] && ERRORS+=("sidecar.num_kv_heads is required when sidecar.enabled=true")
+    [[ -z "${SIDECAR_HEAD_DIM:-}" ]]     && ERRORS+=("sidecar.head_dim is required when sidecar.enabled=true")
 fi
 
 RUNNER_SCRIPT="${SCRIPT_DIR}/src/run_abc_bench_instrumented.py"
@@ -327,7 +346,12 @@ build_runner_cmd() {
         --max-iterations "${MAX_ITERATIONS:-80}"
     )
 
-    if [[ "${LAUNCH_RANDOMISE:-false}" == "true" ]]; then
+    if [[ "$BASELINE" == "true" ]]; then
+        cmd+=(
+            --baseline-mode
+            --open-loop-launch
+        )
+    elif [[ "${LAUNCH_RANDOMISE:-false}" == "true" ]]; then
         cmd+=(
             --randomise-launch
             --max-agents-per-wave "${MAX_AGENTS_PER_WAVE:-4}"
@@ -449,7 +473,11 @@ echo -e "  ${CYAN}Agent${RESET}"
 echo "    max_iterations:     ${MAX_ITERATIONS:-80}"
 echo ""
 echo -e "  ${CYAN}Launch${RESET}"
+echo "    baseline:           ${BASELINE}"
 echo "    randomise:          ${LAUNCH_RANDOMISE:-false}"
+if [[ "$BASELINE" == "true" ]]; then
+    echo "    open_loop:          true"
+fi
 if [[ "${LAUNCH_RANDOMISE:-false}" == "true" ]]; then
     echo "    max_agents_per_wave: ${MAX_AGENTS_PER_WAVE:-4}"
     echo "    min_wave_delay_s:   ${MIN_WAVE_DELAY_S:-2.0}"
@@ -480,6 +508,9 @@ if [[ "${SIDECAR_ENABLED:-false}" == "true" ]]; then
         echo "    dashboard:          http://${SIDECAR_HTTP_HOST:-127.0.0.1}:${SIDECAR_HTTP_PORT}/"
     fi
     echo "    admission_control:  ${SIDECAR_ADMISSION_ENABLED:-false}"
+    if [[ "$BASELINE" == "true" ]]; then
+        echo "    mode:               baseline telemetry only"
+    fi
     if [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]]; then
         if [[ -n "${SIDECAR_ADMISSION_THRESHOLD_GB:-}" && -z "${SIDECAR_ADMISSION_THRESHOLD_PERCENT:-}" ]]; then
             echo "    threshold_gb:       ${SIDECAR_ADMISSION_THRESHOLD_GB} (deprecated)"
@@ -506,9 +537,22 @@ echo -e "${BOLD}═════════════════════�
 # ─────────────────────────── display commands ────────────────────────────────
 
 RUNNER_CMD=$(build_runner_cmd)
+VLLM_START_SCRIPT="${SCRIPT_DIR}/start_vllm.sh"
+build_vllm_start_cmd() {
+    local -a cmd=(bash "$VLLM_START_SCRIPT")
+    if [[ "$BASELINE" == "true" ]]; then
+        cmd+=(--baseline)
+    fi
+    printf "%q " "${cmd[@]}"
+    printf "\n"
+}
+VLLM_START_CMD=$(build_vllm_start_cmd)
 echo ""
 echo -e "${BOLD}── Agent runner command ──${RESET}"
 echo -e "${GREEN}${RUNNER_CMD}${RESET}" | sed 's/ --/\n    --/g; s/^/  /'
+echo ""
+echo -e "${BOLD}── vLLM start command ──${RESET}"
+echo -e "${GREEN}${VLLM_START_CMD}${RESET}" | sed 's/ --/\n    --/g; s/^/  /'
 echo ""
 
 RUN_PREDICTION=false
@@ -553,7 +597,6 @@ VLLM_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
     -H "Authorization: Bearer ${LLM_API_KEY}" \
     "$VLLM_HEALTH_URL" 2>/dev/null || echo "000")
 
-VLLM_START_SCRIPT="${SCRIPT_DIR}/start_vllm.sh"
 VLLM_STARTED_BY_THIS_SCRIPT=false
 
 # Stop the vLLM instance we started, including its NPU worker subprocesses.
@@ -567,7 +610,11 @@ stop_started_vllm() {
         return 0
     fi
     echo -e "${YELLOW}Stopping vLLM (started by this run) ...${RESET}" >&2
-    bash "$VLLM_START_SCRIPT" --stop || true
+    if [[ "$BASELINE" == "true" ]]; then
+        bash "$VLLM_START_SCRIPT" --baseline --stop || true
+    else
+        bash "$VLLM_START_SCRIPT" --stop || true
+    fi
 }
 
 # On Ctrl+C / SIGTERM we want to also tear down the vLLM (and its NPU workers)
@@ -582,6 +629,19 @@ on_interrupt() {
 trap on_interrupt INT TERM
 
 if [[ "$VLLM_HTTP_CODE" == "200" ]]; then
+    if [[ "$BASELINE" == "true" ]]; then
+        AGENT_KV_PROBE_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"agent_id":"__baseline_probe__"}' \
+            "${SIDECAR_VLLM_URL:-http://localhost:8000}/agent_kv_cache/offload" \
+            2>/dev/null || echo "000")
+        if [[ "$AGENT_KV_PROBE_CODE" =~ ^2 ]]; then
+            echo -e "${RED}ERROR: baseline mode found patched agent KV routes on the running vLLM server.${RESET}" >&2
+            echo -e "${YELLOW}Stop that server first, then rerun baseline so start_vllm.sh --baseline can launch clean vLLM.${RESET}" >&2
+            exit 2
+        fi
+    fi
     echo -e "${GREEN}  vLLM is already running.${RESET}"
 else
     echo -e "${YELLOW}  vLLM not responding (HTTP ${VLLM_HTTP_CODE}). Starting via start_vllm.sh ...${RESET}"
@@ -589,7 +649,11 @@ else
         echo -e "${RED}ERROR: start_vllm.sh not found: ${VLLM_START_SCRIPT}${RESET}" >&2
         exit 2
     fi
-    bash "$VLLM_START_SCRIPT"
+    if [[ "$BASELINE" == "true" ]]; then
+        bash "$VLLM_START_SCRIPT" --baseline
+    else
+        bash "$VLLM_START_SCRIPT"
+    fi
     VLLM_STARTED_BY_THIS_SCRIPT=true
 fi
 
@@ -693,6 +757,84 @@ if [[ "$RUN_PREDICTION" == "true" ]]; then
     echo -e "${GREEN}✓ Prediction model completed${RESET}"
 fi
 
+write_baseline_metrics_summary() {
+    local sidecar_log="${SIDECAR_LOG_FILE:-${RESULTS_ROOT:-./abc_results}/sidecar.log}"
+    local output="${RESULTS_ROOT:-./abc_results}/baseline_vllm_metrics.json"
+    python3 - "$sidecar_log" "$output" <<'PYEOF'
+import json
+import math
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+
+ticks = 0
+max_kv_used_pct = None
+max_kv_used_gb = None
+max_preemptions = None
+final_preemptions = None
+first_ts = None
+last_ts = None
+
+if log_path.exists():
+    with log_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ticks += 1
+            first_ts = first_ts or rec.get("ts")
+            last_ts = rec.get("ts") or last_ts
+            vllm = rec.get("vllm") or {}
+            pct = vllm.get("kv_cache_used_pct")
+            if isinstance(pct, (int, float)) and math.isfinite(float(pct)):
+                max_kv_used_pct = (
+                    float(pct)
+                    if max_kv_used_pct is None
+                    else max(max_kv_used_pct, float(pct))
+                )
+            used_gb = vllm.get("kv_used_gb")
+            if isinstance(used_gb, (int, float)) and math.isfinite(float(used_gb)):
+                max_kv_used_gb = (
+                    float(used_gb)
+                    if max_kv_used_gb is None
+                    else max(max_kv_used_gb, float(used_gb))
+                )
+            preempt = vllm.get("scheduler_preemptions_total")
+            if isinstance(preempt, (int, float)) and math.isfinite(float(preempt)):
+                final_preemptions = int(preempt)
+                max_preemptions = (
+                    int(preempt)
+                    if max_preemptions is None
+                    else max(max_preemptions, int(preempt))
+                )
+
+summary = {
+    "baseline": True,
+    "sidecar_log": str(log_path),
+    "ticks": ticks,
+    "first_ts": first_ts,
+    "last_ts": last_ts,
+    "max_kv_cache_used_pct": max_kv_used_pct,
+    "max_kv_used_gb": max_kv_used_gb,
+    "final_scheduler_preemptions_total": final_preemptions,
+    "max_scheduler_preemptions_total": max_preemptions,
+}
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+PYEOF
+    echo -e "${GREEN}✓ Baseline vLLM metrics → ${output}${RESET}"
+}
+
+if [[ "$BASELINE" == "true" ]]; then
+    write_baseline_metrics_summary
+fi
+
 # Write run metadata.
 RESULTS_DIR="${RESULTS_ROOT:-./abc_results}"
 cat > "${RESULTS_DIR}/run_metadata.json" <<METAEOF
@@ -702,7 +844,15 @@ cat > "${RESULTS_DIR}/run_metadata.json" <<METAEOF
   "started_at": "${START_TS}",
   "elapsed_s": ${ELAPSED},
   "runner_exit_code": ${RUNNER_EXIT},
-  "prediction_enabled": ${RUN_PREDICTION}
+  "prediction_enabled": ${RUN_PREDICTION},
+  "baseline": ${BASELINE},
+  "vllm_mode": "$(if [[ "$BASELINE" == "true" ]]; then printf 'baseline_stock_offloading_connector'; else printf 'agent_aware_optimized'; fi)",
+  "optimizations": {
+    "admission_control": $(if [[ "$BASELINE" == "true" ]]; then printf 'false'; else [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]] && printf 'true' || printf 'false'; fi),
+    "tool_prediction": $(if [[ "$BASELINE" == "true" ]]; then printf 'false'; else [[ "${PREDICTION_ENABLED:-false}" == "true" ]] && printf 'true' || printf 'false'; fi),
+    "agent_kv_offload": $(if [[ "$BASELINE" == "true" ]]; then printf 'false'; else [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]] && printf 'true' || printf 'false'; fi),
+    "per_agent_kv_tracking": $(if [[ "$BASELINE" == "true" ]]; then printf 'false'; else printf 'true'; fi)
+  }
 }
 METAEOF
 

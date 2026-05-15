@@ -35,6 +35,16 @@ bash run_abc-bench.sh \
   --override launch.randomise=false
 ```
 
+Run a clean baseline:
+
+```bash
+bash run_abc-bench.sh --config config/abc-bench_config.yaml --baseline
+```
+
+Baseline mode forces open-loop launch, disables prediction and admission
+control, keeps only global sidecar telemetry, and starts vLLM through
+`start_vllm.sh --baseline`.
+
 ### Wrapper Responsibilities
 
 - Parse YAML with Python and PyYAML.
@@ -50,6 +60,8 @@ bash run_abc-bench.sh \
 - Install benchmark dependencies with retry support.
 - Run the instrumented runner.
 - Optionally train the predictor after the run.
+- In baseline mode, write `baseline_vllm_metrics.json` with max KV usage and
+  final/max scheduler preemptions from `sidecar.log`.
 
 ### Important Environment Variables
 
@@ -126,6 +138,13 @@ This script starts vLLM on Ascend NPU using the native bare-metal path:
 
 ```bash
 bash start_vllm.sh config/vllm_config.yaml
+```
+
+The baseline path uses separate clean install/cache/PID paths and stock vLLM
+offloading:
+
+```bash
+bash start_vllm.sh --baseline config/vllm_config.yaml
 ```
 
 ### Responsibilities

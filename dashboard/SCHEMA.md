@@ -58,6 +58,7 @@ ticks it already rendered.
 
   "admission": {                               // Controller decisions for this tick.
     "enabled": true,                           // bool
+    "mode": "baseline",                        // optional when enabled=false: "baseline"|"telemetry_only"
     "C":       5.59,                           // float|null — free KV in GB this tick
     "C_percent": 16.67,                        // float|null — free KV percent, derived from used percent when needed
     "kv_total_gb": 33.55,                      // float — total KV capacity used for percent thresholds
@@ -159,6 +160,7 @@ ticks it already rendered.
 | Phase color                          | reasoning=blue, tool_call=green, waiting=gray, offloaded_waiting=orange, done=light gray |
 | KV-cache % line                      | `vllm.kv_cache_used_pct` per tick                                   |
 | Offload threshold line               | `100 - admission.threshold_percent` per tick                        |
+| Baseline KV line                     | `vllm.kv_cache_used_pct` per tick; admission-only markers/thresholds are hidden when `admission.enabled == false` |
 | Free-KV pressure badge               | `admission.C`, `admission.C_percent`, `admission.threshold_percent`, and `admission.pressure` |
 | vLLM preempt badge                   | `vllm.scheduler_preemptions_total` from vLLM `/metrics`             |
 | OFFLOAD marker (red)                 | `admission.offloads[*]` where `offloaded == true` (KV pushed to CPU) |
