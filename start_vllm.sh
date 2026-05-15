@@ -1159,18 +1159,17 @@ PY
         export ASCEND_RT_VISIBLE_DEVICES="$DEVICES"
         export OMP_NUM_THREADS=1
 
-        if [ "$BASELINE" = "true" ]; then
-            KV_TRANSFER_CONFIG='{"kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu"}}'
-        else
-            KV_TRANSFER_CONFIG='{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu", "agent_hold_finished_requests": true, "agent_hold_ttl_s": 300.0}}'
-        fi
-
         VLLM_CMD=("$VENV/bin/python" "$VLLM_CLI" serve "$MODEL" \
           --served-model-name "$SERVED_NAME" \
           --host "$HOST" --port "$PORT" --api-key "$API_KEY" \
           --tensor-parallel-size "$TP" \
-          --dtype "$DTYPE" \
-          --kv-transfer-config "$KV_TRANSFER_CONFIG")
+          --dtype "$DTYPE")
+        if [ "$BASELINE" = "true" ]; then
+            echo "[INFO] Baseline mode: disabling --kv-transfer-config."
+        else
+            KV_TRANSFER_CONFIG='{"kv_connector": "AgentAwareOffloadingConnector", "kv_connector_module_path": "vllm.distributed.kv_transfer.kv_connector.v1.agent_offloading_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"num_cpu_blocks": 8192, "caching_hash_algo": "sha256_cbor", "spec_name": "NPUOffloadingSpec", "spec_module_path": "vllm_ascend.kv_offload.npu", "agent_hold_finished_requests": true, "agent_hold_ttl_s": 300.0}}'
+            VLLM_CMD+=(--kv-transfer-config "$KV_TRANSFER_CONFIG")
+        fi
         if [ -n "$EXTRA" ]; then
             # shellcheck disable=SC2206
             EXTRA_ARGS=($EXTRA)

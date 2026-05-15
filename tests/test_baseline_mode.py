@@ -21,6 +21,14 @@ def test_runner_baseline_omits_patch_only_request_and_callback():
     assert "elif args.open_loop_launch:" in src
 
 
+def test_runner_prompt_steers_file_editor_to_relative_paths():
+    src = _read("src/run_abc_bench_instrumented.py")
+
+    assert "When using file_editor, pass workspace-relative paths" in src
+    assert "do not pass absolute paths" in src
+    assert "Benchmark task directory: {task_dir}" not in src
+
+
 def test_wrapper_baseline_forces_open_loop_and_disables_optimizations():
     src = _read("run_abc-bench.sh")
 
@@ -36,7 +44,7 @@ def test_wrapper_baseline_forces_open_loop_and_disables_optimizations():
     assert "__baseline_probe__" in src
 
 
-def test_start_vllm_baseline_uses_clean_paths_and_stock_offloading_connector():
+def test_start_vllm_baseline_uses_clean_paths_and_no_kv_transfer_config():
     src = _read("start_vllm.sh")
 
     assert "--baseline)" in src
@@ -46,21 +54,19 @@ def test_start_vllm_baseline_uses_clean_paths_and_stock_offloading_connector():
     assert "Baseline mode: skipping agent-aware vLLM patches." in src
     assert "Baseline vLLM unexpectedly exposes patched agent_id request field" in src
     assert "Baseline mode: skipping agent KV offload route probe." in src
-    assert "KV_TRANSFER_CONFIG='{\"kv_connector\": \"OffloadingConnector\"" in src
-    assert '"kv_role": "kv_both"' in src
-    assert '"spec_name": "NPUOffloadingSpec"' in src
-    assert '"spec_module_path": "vllm_ascend.kv_offload.npu"' in src
-    baseline_assignment = (
-        "KV_TRANSFER_CONFIG='{\"kv_connector\": \"OffloadingConnector\", "
-        "\"kv_role\": \"kv_both\""
-    )
-    baseline_idx = src.index(baseline_assignment)
-    optimized_idx = src.index(
-        "KV_TRANSFER_CONFIG='{\"kv_connector\": \"AgentAwareOffloadingConnector\""
-    )
-    baseline_block = src[baseline_idx:optimized_idx]
-    assert "kv_connector_module_path" not in baseline_block
-    assert "agent_hold_finished_requests" not in baseline_block
+    assert "Baseline mode: disabling --kv-transfer-config." in src
+    assert "KV_TRANSFER_CONFIG='{\"kv_connector\": \"OffloadingConnector\"" not in src
+
+    launch_start = src.index('VLLM_CMD=("$VENV/bin/python" "$VLLM_CLI" serve "$MODEL"')
+    launch_end = src.index('        if [ -n "$EXTRA" ]; then', launch_start)
+    launch_block = src[launch_start:launch_end]
+    baseline_case, optimized_case = launch_block.split("        else\n", 1)
+    optimized_case = optimized_case.split("        fi\n", 1)[0]
+
+    assert "VLLM_CMD+=(--kv-transfer-config" not in baseline_case
+    assert "KV_TRANSFER_CONFIG" not in baseline_case
+    assert 'KV_TRANSFER_CONFIG=\'{"kv_connector": "AgentAwareOffloadingConnector"' in optimized_case
+    assert 'VLLM_CMD+=(--kv-transfer-config "$KV_TRANSFER_CONFIG")' in optimized_case
 
 
 def test_baseline_sidecar_and_dashboard_keep_global_telemetry_only():

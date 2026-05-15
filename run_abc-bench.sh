@@ -846,7 +846,7 @@ cat > "${RESULTS_DIR}/run_metadata.json" <<METAEOF
   "runner_exit_code": ${RUNNER_EXIT},
   "prediction_enabled": ${RUN_PREDICTION},
   "baseline": ${BASELINE},
-  "vllm_mode": "$(if [[ "$BASELINE" == "true" ]]; then printf 'baseline_stock_offloading_connector'; else printf 'agent_aware_optimized'; fi)",
+  "vllm_mode": "$(if [[ "$BASELINE" == "true" ]]; then printf 'baseline_clean_no_kv_transfer'; else printf 'agent_aware_optimized'; fi)",
   "optimizations": {
     "admission_control": $(if [[ "$BASELINE" == "true" ]]; then printf 'false'; else [[ "${SIDECAR_ADMISSION_ENABLED:-false}" == "true" ]] && printf 'true' || printf 'false'; fi),
     "tool_prediction": $(if [[ "$BASELINE" == "true" ]]; then printf 'false'; else [[ "${PREDICTION_ENABLED:-false}" == "true" ]] && printf 'true' || printf 'false'; fi),

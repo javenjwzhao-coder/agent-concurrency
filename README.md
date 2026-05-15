@@ -56,7 +56,8 @@ bash run_abc-bench.sh --config config/abc-bench_config.yaml
 ```
 
 Run the clean vLLM/vLLM-Ascend baseline with all tasks submitted at once, no
-admission control, no tool prediction, and no per-agent KV tracking:
+KV transfer config, no admission control, no tool prediction, and no per-agent
+KV tracking:
 
 ```bash
 bash run_abc-bench.sh --config config/abc-bench_config.yaml --baseline

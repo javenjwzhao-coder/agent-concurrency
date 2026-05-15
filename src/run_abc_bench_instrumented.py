@@ -614,12 +614,14 @@ def build_agent_prompt(task_yaml: dict[str, Any], task_dir: Path) -> str:
     suffix = (
         "\n\nAdditional execution rules for this local ABC-Bench run:\n"
         "- You are already inside the root of the benchmark task repository.\n"
+        "- When using file_editor, pass workspace-relative paths such as "
+        "`src/main.py`; do not pass absolute paths.\n"
         "- Make the minimum code/config changes needed to solve the task.\n"
         "- Do not edit the benchmark tests unless the task explicitly requires it.\n"
         "- You may inspect files, edit source code, run shell commands, build containers, "
         "start services, and execute ./run-tests.sh for validation.\n"
         "- Stop when the repository is in a state that should pass the provided validator.\n"
-        f"- Benchmark task directory: {task_dir}\n"
+        "- If you need the absolute directory for shell work, run `pwd` first.\n"
     )
     return base.rstrip() + suffix
 

@@ -140,8 +140,8 @@ This script starts vLLM on Ascend NPU using the native bare-metal path:
 bash start_vllm.sh config/vllm_config.yaml
 ```
 
-The baseline path uses separate clean install/cache/PID paths and stock vLLM
-offloading:
+The baseline path uses separate clean install/cache/PID paths and launches
+stock vLLM without `--kv-transfer-config`:
 
 ```bash
 bash start_vllm.sh --baseline config/vllm_config.yaml
