@@ -91,7 +91,7 @@ sidecar:
 
     # Bootstrap pacing before the controller has a stable active-agent average.
     # The runner admits at most one fresh task per this interval during startup.
-    initial_admit_interval_s: 1.0
+    initial_admit_interval_s: 0.2
 
     # Maximum number of never-started agents admitted per sidecar tick.
     # Previously offloaded agents use a priority lane and are not counted as
