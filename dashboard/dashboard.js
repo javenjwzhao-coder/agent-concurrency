@@ -37,6 +37,10 @@
   const EVENT_LINE_HIT_PX = 4;
   const AGENT_LABEL_PANEL_MIN_PX = 220;
   const AGENT_LABEL_PANEL_PADDING_PX = 28;
+  const MIN_TIME_WINDOW_MS = 1_000;
+  const DASHBOARD_WHEEL_ZOOM_SPEED = 0.0015;
+  const DASHBOARD_WHEEL_DELTA_CLAMP_PX = 600;
+  const ZOOM_RESET_SNAP_RATIO = 0.995;
   const SNAPSHOT_DATA_ID = "dashboardSnapshotData";
   const SNAPSHOT_VERSION = 1;
   const EVENT_COUNT_IDS = {
@@ -153,9 +157,8 @@
       stack: false,
       orientation: { axis: "top", item: "top" },
       horizontalScroll: true,
-      // Browser-level Ctrl/trackpad zoom must scale the whole dashboard
-      // uniformly. Timeline-only wheel zoom leaves snapshots in a mixed page
-      // zoom + time-window zoom state that cannot be reset with browser zoom.
+      // Ctrl/Cmd-wheel is handled by setupDashboardWheelZoom() so the timeline
+      // and KV chart always share one window and browser page zoom is blocked.
       zoomable: false,
       groupOrder: "order",
       margin: { item: 1, axis: 4 },
@@ -167,7 +170,7 @@
         majorLabels: { second: "HH:mm" },
       },
     };
-    setupUniformBrowserZoom();
+    setupDashboardWheelZoom();
     state.timeline = new vis.Timeline(
       $("#timeline"), state.items, state.groups, timelineOpts,
     );
@@ -195,25 +198,179 @@
     });
   }
 
-  function setupUniformBrowserZoom() {
-    const stopTimelineZoom = (event) => {
-      if (!isBrowserZoomGesture(event)) return;
-      // Do not preventDefault: the browser should still perform normal page
-      // zoom. We only stop vis-timeline from also treating the same wheel
-      // gesture as a time-window zoom.
+  function setupDashboardWheelZoom() {
+    window.addEventListener("wheel", handleDashboardWheelZoom, {
+      capture: true,
+      passive: false,
+    });
+    window.addEventListener("keydown", handleDashboardZoomKeydown, {
+      capture: true,
+    });
+  }
+
+  function handleDashboardWheelZoom(event) {
+    if (!isDashboardZoomGesture(event) || !eventTargetsDashboard(event)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!state.timeline) return;
+    const deltaY = normalizedWheelDeltaY(event);
+    if (!deltaY) return;
+    setPaused(true);
+    zoomTimelineWindow(deltaY, event.clientX);
+  }
+
+  function handleDashboardZoomKeydown(event) {
+    if (!isDashboardZoomGesture(event) || !eventTargetsDashboard(event)) return;
+    if (event.key === "0") {
+      event.preventDefault();
       event.stopImmediatePropagation();
-    };
-    for (const target of [window, document, $("#timeline")]) {
-      if (!target || !target.addEventListener) continue;
-      target.addEventListener("wheel", stopTimelineZoom, {
-        capture: true,
-        passive: true,
-      });
+      resetDashboardZoom();
+    } else if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setPaused(true);
+      zoomTimelineWindow(DASHBOARD_WHEEL_DELTA_CLAMP_PX / 4, null);
+    } else if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setPaused(true);
+      zoomTimelineWindow(-DASHBOARD_WHEEL_DELTA_CLAMP_PX / 4, null);
     }
   }
 
-  function isBrowserZoomGesture(event) {
+  function isDashboardZoomGesture(event) {
     return event && (event.ctrlKey || event.metaKey);
+  }
+
+  function eventTargetsDashboard(event) {
+    const target = event && event.target;
+    return target instanceof Node && document.body.contains(target);
+  }
+
+  function normalizedWheelDeltaY(event) {
+    let deltaY = event.deltaY || 0;
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+      deltaY *= 16;
+    } else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+      deltaY *= window.innerHeight || 800;
+    }
+    return clamp(
+      deltaY,
+      -DASHBOARD_WHEEL_DELTA_CLAMP_PX,
+      DASHBOARD_WHEEL_DELTA_CLAMP_PX,
+    );
+  }
+
+  function zoomTimelineWindow(deltaY, clientX) {
+    const win = state.timeline.getWindow();
+    const currentStart = win.start.getTime();
+    const currentEnd = win.end.getTime();
+    const currentSpan = Math.max(MIN_TIME_WINDOW_MS, currentEnd - currentStart);
+    const bounds = dashboardZoomBounds();
+    const maxSpan = bounds ? bounds.end - bounds.start : Number.POSITIVE_INFINITY;
+    const factor = Math.exp(deltaY * DASHBOARD_WHEEL_ZOOM_SPEED);
+    const nextSpan = clamp(currentSpan * factor, MIN_TIME_WINDOW_MS, maxSpan);
+
+    if (bounds && nextSpan >= maxSpan * ZOOM_RESET_SNAP_RATIO) {
+      setTimelineWindow(bounds.start, bounds.end);
+      return;
+    }
+
+    const anchorRatio = timeAnchorRatio(clientX);
+    const anchorTime = currentStart + currentSpan * anchorRatio;
+    let nextStart = anchorTime - nextSpan * anchorRatio;
+    let nextEnd = nextStart + nextSpan;
+    if (bounds) {
+      ({ start: nextStart, end: nextEnd } = clampWindowToBounds(
+        nextStart, nextEnd, bounds,
+      ));
+    }
+    setTimelineWindow(nextStart, nextEnd);
+  }
+
+  function resetDashboardZoom() {
+    const bounds = dashboardZoomBounds();
+    if (bounds) {
+      setPaused(true);
+      setTimelineWindow(bounds.start, bounds.end);
+      return;
+    }
+    if (state.latestTs) {
+      setPaused(false);
+      const nowMs = parseTimeMs(state.latestTs) ?? Date.now();
+      setTimelineWindow(nowMs - VIEWPORT_PAST_MS, nowMs + VIEWPORT_AHEAD_MS);
+    }
+  }
+
+  function setTimelineWindow(startMs, endMs) {
+    state.timeline.setWindow(new Date(startMs), new Date(endMs), { animation: false });
+    updateBadges(endMs);
+    scheduleKvRedraw();
+    scheduleEventLineRender();
+  }
+
+  function dashboardZoomBounds() {
+    if (state.replayBounds) return fitReplayWindowMs();
+    const h = state.tickHistory;
+    if (!h.length) return null;
+    const first = h[0].ts;
+    const last = h[h.length - 1].ts;
+    const span = Math.max(VIEWPORT_PAST_MS + VIEWPORT_AHEAD_MS, last - first);
+    const pad = Math.max(1000, span * 0.02);
+    return { start: first - pad, end: last + pad + VIEWPORT_AHEAD_MS };
+  }
+
+  function fitReplayWindowMs() {
+    const span = state.replayBounds.end - state.replayBounds.start;
+    const pad = Math.max(1000, span * 0.02);
+    return {
+      start: state.replayBounds.start - pad,
+      end: state.replayBounds.end + pad,
+    };
+  }
+
+  function clampWindowToBounds(start, end, bounds) {
+    const span = end - start;
+    if (span >= bounds.end - bounds.start) {
+      return { start: bounds.start, end: bounds.end };
+    }
+    if (start < bounds.start) {
+      end += bounds.start - start;
+      start = bounds.start;
+    }
+    if (end > bounds.end) {
+      start -= end - bounds.end;
+      end = bounds.end;
+    }
+    return {
+      start: Math.max(bounds.start, start),
+      end: Math.min(bounds.end, end),
+    };
+  }
+
+  function timeAnchorRatio(clientX) {
+    const bounds = timePlotClientBounds();
+    if (!bounds || clientX === null || clientX === undefined) return 0.5;
+    return clamp((clientX - bounds.left) / bounds.width, 0, 1);
+  }
+
+  function timePlotClientBounds() {
+    const center = document.querySelector("#timeline .vis-panel.vis-center");
+    if (center) {
+      const rect = center.getBoundingClientRect();
+      if (rect.width > 0) return { left: rect.left, width: rect.width };
+    }
+    const kvChart = $("#kvChart");
+    if (!kvChart) return null;
+    const rect = kvChart.getBoundingClientRect();
+    const leftPad = state.agentLabelPanelWidth || AGENT_LABEL_PANEL_MIN_PX;
+    const width = rect.width - leftPad - KV_CHART_RIGHT_PAD_PX;
+    if (width <= 0) return null;
+    return { left: rect.left + leftPad, width };
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
   }
 
   // ── KV chart (custom SVG, slaved to the timeline's window) ─────────────
@@ -1314,11 +1471,10 @@
 
   function fitReplayWindow() {
     if (!state.replayBounds) return;
-    const span = state.replayBounds.end - state.replayBounds.start;
-    const pad = Math.max(1000, span * 0.02);
-    const s = new Date(state.replayBounds.start - pad);
-    const e = new Date(state.replayBounds.end   + pad);
-    state.timeline.setWindow(s, e, { animation: false });
+    const bounds = fitReplayWindowMs();
+    state.timeline.setWindow(
+      new Date(bounds.start), new Date(bounds.end), { animation: false },
+    );
     scheduleKvRedraw();
     scheduleEventLineRender();
   }

@@ -168,20 +168,26 @@ def test_dashboard_phase_labels_do_not_stretch_duration_bars():
     assert "width: 0;" in css
 
 
-def test_dashboard_ctrl_wheel_uses_uniform_browser_zoom():
+def test_dashboard_ctrl_wheel_uses_unified_time_zoom():
     js = _read("dashboard/dashboard.js")
     html = _read("dashboard/index.html")
 
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in html
     assert "zoomable: false" in js
     assert 'zoomKey: "ctrlKey"' not in js
-    assert "function setupUniformBrowserZoom()" in js
-    assert "setupUniformBrowserZoom();" in js
-    assert js.index("setupUniformBrowserZoom();") < js.index("new vis.Timeline")
+    assert "function setupDashboardWheelZoom()" in js
+    assert "setupDashboardWheelZoom();" in js
+    assert js.index("setupDashboardWheelZoom();") < js.index("new vis.Timeline")
+    assert "function handleDashboardWheelZoom(event)" in js
+    assert "event.preventDefault();" in js
     assert "event.stopImmediatePropagation();" in js
-    assert "event.preventDefault" not in js
-    assert "passive: true" in js
-    assert "event && (event.ctrlKey || event.metaKey)" in js
+    assert "passive: false" in js
+    assert "function isDashboardZoomGesture(event)" in js
+    assert "return event && (event.ctrlKey || event.metaKey);" in js
+    assert "Math.exp(deltaY * DASHBOARD_WHEEL_ZOOM_SPEED)" in js
+    assert "fitReplayWindowMs()" in js
+    assert "ZOOM_RESET_SNAP_RATIO" in js
+    assert "function timePlotClientBounds()" in js
     assert '<meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1\\">' in js
 
 
