@@ -175,8 +175,23 @@ def test_dashboard_renders_post_tool_pending_release_as_reasoning():
     assert "function displayPhaseForAgent(agent)" in js
     assert "switch (displayPhaseForAgent(agents[id]))" in js
     assert 'agent.admission_state === "tool_complete_pending_release"' in js
-    assert "phase: ${displayPhaseForAgent(agent)}" in js
+    assert "phase: ${phase || displayPhaseForAgent(agent)}" in js
     assert "post-tool pending-release sub-state as `reasoning`" in schema
+
+
+def test_dashboard_finalizes_phase_tooltips_with_actual_end_time():
+    js = _read("dashboard/dashboard.js")
+    schema = _read("dashboard/SCHEMA.md")
+
+    assert "activeAgent: null" in js
+    assert "entry.activeAgent = Object.assign({}, agent)" in js
+    assert "const closedEndTs = bridgeMissedReasoning ? previousRecordTs : phaseStart" in js
+    assert "closedEndTs, true" in js
+    assert "function phaseTooltip(agentId, agent, phase, phaseStart, phaseEnd, completed = false)" in js
+    assert "`dur:   ${durSec} s`" in js
+    assert "so far" not in js
+    assert "if (completed) lines.push(`end:   ${formatHMS(end)}`);" in js
+    assert "completed phases use the next phase `state_since` as the tooltip end" in schema
 
 
 def test_dashboard_exports_standalone_html_snapshots():

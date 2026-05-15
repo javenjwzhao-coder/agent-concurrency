@@ -168,7 +168,7 @@ ticks it already rendered.
 | READMIT marker (cyan)                | `admission.admissions[*].admitted_at` where `admitted && previously_offloaded`; falls back to tick `ts` if absent |
 | SAT marker (dashed yellow)           | `"saturation_guard"` ∈ `admission.reasons` (low effective headroom blocks queued agents) |
 | Event tooltip                        | `{ts, tick, C, C_percent, threshold_percent, threshold_gb, pressure, w, w_threshold, w_source, s_t, s_prev}` plus event-specific fields |
-| Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick           |
+| Phase tooltip                        | phase name, start, duration, agent's `kv_gb` at that tick; completed phases use the next phase `state_since` as the tooltip end so hover duration matches the rendered bar |
 
 ## Replay
 

@@ -540,6 +540,7 @@
       activeItemId: null,
       activeStart: null,
       activePhase: null,
+      activeAgent: null,
       lastRecordTs: null,
       lastKvGb: null,
     };
@@ -651,8 +652,9 @@
       state.items.update({
         id: entry.activeItemId,
         end: new Date(recordTs),
-        title: phaseTooltip(agentId, agent, phaseStart, recordTs),
+        title: phaseTooltip(agentId, agent, phase, phaseStart, recordTs),
       });
+      entry.activeAgent = Object.assign({}, agent);
       entry.lastRecordTs = recordTs;
       return;
     }
@@ -667,9 +669,15 @@
       && parseTimeMs(previousRecordTs) < parseTimeMs(phaseStart);
 
     if (entry.activeItemId !== null) {
+      const closedEndTs = bridgeMissedReasoning ? previousRecordTs : phaseStart;
+      const closedAgent = entry.activeAgent || agent;
       state.items.update({
         id: entry.activeItemId,
-        end: new Date(bridgeMissedReasoning ? previousRecordTs : phaseStart),
+        end: new Date(closedEndTs),
+        title: phaseTooltip(
+          agentId, closedAgent, entry.activePhase, entry.activeStart,
+          closedEndTs, true,
+        ),
       });
       if (bridgeMissedReasoning) {
         addSyntheticReasoningBridge(entry, agentId, agent, previousRecordTs, phaseStart);
@@ -683,11 +691,12 @@
       end: new Date(recordTs),
       content: phaseItemContent(),
       className: "phase-" + phase,
-      title: phaseTooltip(agentId, agent, phaseStart, recordTs),
+      title: phaseTooltip(agentId, agent, phase, phaseStart, recordTs),
     });
     entry.activeItemId = itemId;
     entry.activeStart = phaseStart;
     entry.activePhase = phase;
+    entry.activeAgent = Object.assign({}, agent);
     entry.lastRecordTs = recordTs;
   }
 
@@ -701,7 +710,7 @@
       end: new Date(endTs),
       content: phaseItemContent(),
       className: "phase-reasoning",
-      title: phaseTooltip(agentId, bridgeAgent, startTs, endTs),
+      title: phaseTooltip(agentId, bridgeAgent, "reasoning", startTs, endTs, true),
     });
   }
 
@@ -716,16 +725,17 @@
     return phase;
   }
 
-  function phaseTooltip(agentId, agent, phaseStart, recordTs) {
+  function phaseTooltip(agentId, agent, phase, phaseStart, phaseEnd, completed = false) {
     const start = new Date(phaseStart);
-    const end = new Date(recordTs);
+    const end = new Date(phaseEnd);
     const durSec = Math.max(0, (end - start) / 1000).toFixed(1);
     const lines = [
       `agent: ${agentId}`,
-      `phase: ${displayPhaseForAgent(agent)}`,
+      `phase: ${phase || displayPhaseForAgent(agent)}`,
       `start: ${formatHMS(start)}`,
-      `dur:   ${durSec} s (so far)`,
+      `dur:   ${durSec} s`,
     ];
+    if (completed) lines.push(`end:   ${formatHMS(end)}`);
     if (agent.kv_gb !== null && agent.kv_gb !== undefined) {
       lines.push(`kv:    ${Number(agent.kv_gb).toFixed(3)} GB`);
     }
