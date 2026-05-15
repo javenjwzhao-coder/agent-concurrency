@@ -23,7 +23,7 @@ dataset:
 
   # Maximum number of tasks to launch for this run. Lower this for quick
   # smoke tests; increase it for full concurrency experiments.
-  max_tasks: 100
+  max_tasks: 50
 
 paths:
   # Root directory where per-agent working copies are created.
@@ -91,7 +91,7 @@ sidecar:
 
     # Bootstrap pacing before the controller has a stable active-agent average.
     # The runner admits at most one fresh task per this interval during startup.
-    initial_admit_interval_s: 0.2
+    initial_admit_interval_s: 1
 
     # Maximum number of never-started agents admitted per sidecar tick.
     # Previously offloaded agents use a priority lane and are not counted as
@@ -100,7 +100,7 @@ sidecar:
 
     # Hard cap on active admitted agents. Set 0 to disable this cap and let KV
     # pressure/headroom be the only admission limit.
-    max_active_agents: 32
+    max_active_agents: 25
 
     # Fallback offload eligibility. A tool call older than this many seconds is
     # treated as long/offloadable when no prediction exists, or when an earlier
