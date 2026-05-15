@@ -150,6 +150,24 @@ def test_dashboard_bridges_sampled_waiting_to_tool_call_jumps_with_reasoning():
     assert "misses a short reasoning span" in schema
 
 
+def test_dashboard_phase_labels_do_not_stretch_duration_bars():
+    js = _read("dashboard/dashboard.js")
+    css = _read("dashboard/dashboard.css")
+
+    assert "function phaseItemContent()" in js
+    assert "return \"\";" in js
+    assert "content: phaseItemContent()" in js
+    assert "content: phase," not in js
+    assert "content: \"reasoning\"," not in js
+
+    assert ".vis-item.phase-tool_call::after { content: \"tool_call\"; }" in css
+    assert "height: 28px;" in css
+    assert "line-height: 28px;" in css
+    assert "min-width: 0 !important" in css
+    assert ".vis-item.phase-tool_call .vis-item-content" in css
+    assert "width: 0;" in css
+
+
 def test_dashboard_renders_post_tool_pending_release_as_reasoning():
     js = _read("dashboard/dashboard.js")
     schema = _read("dashboard/SCHEMA.md")

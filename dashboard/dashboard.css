@@ -355,7 +355,43 @@ main {
   color: #f0f6ff;
   font-size: 12px;
   font-weight: 600;
+  height: 28px;
+  line-height: 28px;
+  min-width: 0 !important;
+  overflow: hidden;
 }
+
+.vis-item.phase-reasoning .vis-item-content,
+.vis-item.phase-tool_call .vis-item-content,
+.vis-item.phase-waiting .vis-item-content,
+.vis-item.phase-offloaded_waiting .vis-item-content,
+.vis-item.phase-done .vis-item-content {
+  min-width: 0;
+  padding: 0;
+  width: 0;
+}
+
+.vis-item.phase-reasoning::after,
+.vis-item.phase-tool_call::after,
+.vis-item.phase-waiting::after,
+.vis-item.phase-offloaded_waiting::after,
+.vis-item.phase-done::after {
+  position: absolute;
+  top: 50%;
+  left: 8px;
+  max-width: calc(100% - 10px);
+  overflow: hidden;
+  text-overflow: clip;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.vis-item.phase-reasoning::after { content: "reasoning"; }
+.vis-item.phase-tool_call::after { content: "tool_call"; }
+.vis-item.phase-waiting::after { content: "waiting"; }
+.vis-item.phase-offloaded_waiting::after { content: "offloaded"; }
+.vis-item.phase-done::after { content: "done"; }
 
 .vis-item.phase-reasoning      { background-color: #1d4ed8; border-color: #1d4ed8; }
 .vis-item.phase-tool_call      { background-color: #0e7490; border-color: #0e7490; }

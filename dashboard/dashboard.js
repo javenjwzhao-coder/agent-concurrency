@@ -621,6 +621,12 @@
     );
   }
 
+  function phaseItemContent() {
+    // Labels are drawn by CSS pseudo-elements so text width cannot stretch a
+    // short phase bar and make sub-second work look like multi-second work.
+    return "";
+  }
+
   function measureAgentLabel(text) {
     if (!measureAgentLabel.canvas) {
       measureAgentLabel.canvas = document.createElement("canvas");
@@ -675,7 +681,7 @@
       group: entry.groupId,
       start: new Date(phaseStart),
       end: new Date(recordTs),
-      content: phase,
+      content: phaseItemContent(),
       className: "phase-" + phase,
       title: phaseTooltip(agentId, agent, phaseStart, recordTs),
     });
@@ -693,7 +699,7 @@
       group: entry.groupId,
       start: new Date(startTs),
       end: new Date(endTs),
-      content: "reasoning",
+      content: phaseItemContent(),
       className: "phase-reasoning",
       title: phaseTooltip(agentId, bridgeAgent, startTs, endTs),
     });

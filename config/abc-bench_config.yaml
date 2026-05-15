@@ -23,7 +23,7 @@ dataset:
 
   # Maximum number of tasks to launch for this run. Lower this for quick
   # smoke tests; increase it for full concurrency experiments.
-  max_tasks: 50
+  max_tasks: 80
 
 paths:
   # Root directory where per-agent working copies are created.
@@ -87,7 +87,7 @@ sidecar:
     # Admission headroom gate. Queued agents are admitted only when effective
     # w > w_threshold. Default policy uses w_threshold=2.0, meaning keep enough
     # headroom for roughly two average active agents before admitting more.
-    w_threshold: 2.0
+    w_threshold: 2.5
 
     # Bootstrap pacing before the controller has a stable active-agent average.
     # The runner admits at most one fresh task per this interval during startup.
