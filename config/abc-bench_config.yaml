@@ -23,7 +23,7 @@ dataset:
 
   # Maximum number of tasks to launch for this run. Lower this for quick
   # smoke tests; increase it for full concurrency experiments.
-  max_tasks: 50
+  max_tasks: 100
 
 paths:
   # Root directory where per-agent working copies are created.
